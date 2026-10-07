@@ -175,7 +175,7 @@ class AdminService {
                     // VOICE_MAIL.md R14 / AGENT_VOICE.md R14: '' = not set.
                     'spokenName' => (string)($w['spoken_name'] ?? ''),
                     'voiceId'    => VoiceService::workspaceVoiceFor($w),
-                ];
+                ] + self::announcedFields($w);
             }
             // Single-wrapper rule (see class doc): return the list directly.
             // AdminMcpTools::call() supplies the one and only 'workspaces' key.
@@ -260,9 +260,73 @@ class AdminService {
                 // VOICE_MAIL.md R14 / AGENT_VOICE.md R14: '' = not set.
                 'spokenName'  => (string)($record['spoken_name'] ?? ''),
                 'voiceId'     => VoiceService::workspaceVoiceFor($record),
-            ];
+            ] + self::announcedFields($record);
         } catch (\Throwable $e) {
             return self::failure('getWorkspace', $e);
+        }
+    }
+
+    /**
+     * AGENT_SELF_SERVICE.md R3: what the listener really hears for one workspace.
+     * `announcedAs` is the spoken name, or the display name when none is set.
+     * `effectiveVoiceId` is the workspace's own voice, or the Settings voice.
+     *
+     * @param array<string,mixed> $record
+     * @return array{announcedAs:string,effectiveVoiceId:string,speed:string,effectiveSpeed:string}
+     */
+    private static function announcedFields(array $record): array {
+        $own = VoiceService::workspaceVoiceFor($record);
+        if ($own === '') {
+            $own = trim((string)(ConfigService::getConfig()['tts_voice'] ?? ''));
+        }
+        $speed = VoiceService::workspaceSpeedFor($record);
+        if ($speed === '') {
+            $speed = VoiceService::normaliseSpeed((string)(ConfigService::getConfig()['tts_speed'] ?? '1.0')) ?? '1';
+        }
+        return [
+            'announcedAs'      => VoiceMailService::spokenNameFor($record),
+            'effectiveVoiceId' => $own,
+            // AGENT_SELF_SERVICE.md R8: '' in `speed` = not set; this is what is used.
+            'speed'            => VoiceService::workspaceSpeedFor($record),
+            'effectiveSpeed'   => $speed,
+        ];
+    }
+
+    /**
+     * AGENT_SELF_SERVICE.md R2: an empty $id means "the workspace I am running
+     * in", found from AICLI_SESSION_ID exactly as getWorkspace('') finds it.
+     * A given id passes through unchanged (the caller's own lookup then decides
+     * whether it exists).
+     *
+     * @return array{id:string}|array{error:string}
+     */
+    public static function resolveOwnWorkspaceId(string $id): array {
+        $id = trim($id);
+        if ($id !== '') return ['id' => $id];
+        $sid = (string)(getenv('AICLI_SESSION_ID') ?: '');
+        if ($sid === '') {
+            return ['error' => 'No workspace id was given, and AICLI_SESSION_ID is not set for this process. Pass an id, or call this from inside a workspace session.'];
+        }
+        if (self::findSession($sid) === null) {
+            return ['error' => "This session ('$sid') is not a known workspace. Pass an id from aicli_list_workspaces."];
+        }
+        return ['id' => $sid];
+    }
+
+    /**
+     * AGENT_SELF_SERVICE.md R1: the voices the engine offers, plus the Settings
+     * default. Wraps VoiceService::listVoices(), so the engine key never leaves
+     * the server.
+     *
+     * @return array<string,mixed>
+     */
+    public static function listVoices(): array {
+        try {
+            $r = VoiceService::listVoices();
+            $r['default'] = trim((string)(ConfigService::getConfig()['tts_voice'] ?? ''));
+            return $r;
+        } catch (\Throwable $e) {
+            return self::failure('listVoices', $e);
         }
     }
 
@@ -545,6 +609,15 @@ class AdminService {
             // ---- voice mail (VOICE_MAIL.md R8) ----
             'voicemail_max_per_workspace' => ['group' => 'voice', 'description' => 'How many voice mail messages to keep for each workspace, 1 to 500. When a workspace has more, the oldest heard messages go first.'],
             'voicemail_max_age_days'      => ['group' => 'voice', 'description' => 'How many days to keep a voice mail message, 1 to 90. Older messages are removed whether they were heard or not.'],
+
+            // ---- notebook (ARTEFACTS.md) — a person changes these on Settings, Notebook; an agent cannot ----
+            'notebook_enabled'            => ['group' => 'notebook', 'description' => 'The Notebook drawer and the artefact tools. 1 is on (default), 0 is off. Changes only on the Settings page, Notebook — an agent cannot change it.'],
+            'notebook_auto_open'          => ['group' => 'notebook', 'description' => 'Open the Notebook drawer by itself when an agent asks (open:true on create). 0 is off (default). Changes only on the Settings page, Notebook.'],
+            'notebook_folder'             => ['group' => 'notebook', 'description' => 'The folder name of the notebook inside each project folder (default notebook). Changes only on the Settings page, Notebook.'],
+            'notebook_allow_prod_secrets' => ['group' => 'notebook', 'description' => 'Allow a connection card to hold a value that looks like a production key. 0 is off (default). Changes only on the Settings page, Notebook.'],
+            'notebook_spoken_notice'      => ['group' => 'notebook', 'description' => 'Speak a short notice when an agent adds something that needs the person. 0 is off (default). Changes only on the Settings page, Notebook.'],
+            'notebook_journal'            => ['group' => 'notebook', 'description' => 'The agent journal: 1 lets agents add short "what I did and why" lines to the page Agent journal with aicli_journal_artefact. 0 is off (default) and the tool refuses. Changes only on the Settings page, Notebook.'],
+            'notebook_quiet_hours'        => ['group' => 'notebook', 'description' => 'Quiet hours for the spoken notice, written HH:MM-HH:MM in server local time, for example 22:00-07:00 (it may cross midnight). Empty means no quiet hours. During quiet hours no notebook notice is spoken. Changes only on the Settings page, Notebook.'],
         ];
     }
 
@@ -936,7 +1009,33 @@ class AdminService {
         // cosmetic/verbosity-style group. A whole number of bytes, or '0' for
         // no cap (the Settings page shows/edits it in MB and converts).
         'upload_max_bytes' => ['regex' => '/^[0-9]+$/', 'hint' => 'a whole number of bytes, or 0 for no limit'],
+
+        // AGENT_SELF_SERVICE.md R6: preferences with no effect on where data lives.
+        // NOT here, on purpose: admin_tools_enabled (an agent must not widen or
+        // switch off its own tool surface), storage paths, the user, schedules and
+        // every *_API_KEY.
+        'history'                         => ['min' => 100, 'max' => 10000],
+        'auto_continue_on_restart'        => ['0', '1'],
+        'transient_error_continue'        => ['recommended', 'all', 'off'],
+        'transient_error_backoff_minutes' => ['regex' => '/^(?:[1-9]\d?|1[01]\d|120)(?:,(?:[1-9]\d?|1[01]\d|120)){0,2}$/', 'hint' => 'one to three whole minutes from 1 to 120, separated by commas (for example 1,5,15)'],
+        'transient_error_max_continues'   => ['min' => 0, 'max' => 10],
+        'relay_gate_sampling_enabled'     => ['0', '1'],
     ];
+
+    /** AGENT_SELF_SERVICE.md R6: the one dynamic key family, `node_memory_<agentId>` (Store tab bounds). */
+    private const NODE_MEMORY_RULE = ['min' => 512, 'max' => 65536];
+
+    /**
+     * The rule for $key: a static allow-list entry, or the node_memory rule for
+     * an agent that exists. Null = not allowed.
+     *
+     * @return array<int|string,mixed>|null
+     */
+    private static function settingRule(string $key): ?array {
+        if (array_key_exists($key, self::SETTINGS_ALLOWLIST)) return self::SETTINGS_ALLOWLIST[$key];
+        if (preg_match('/^node_memory_([a-z0-9-]+)$/', $key, $m) && self::agentExists($m[1])) return self::NODE_MEMORY_RULE;
+        return null;
+    }
 
     /**
      * Every workspace record ConfigService::getWorkspaces() knows about, keyed by
@@ -1121,7 +1220,7 @@ class AdminService {
      *
      * @return array<string,mixed>
      */
-    public static function updateWorkspace(string $id, ?string $name = null, ?string $path = null, ?string $agentId = null, ?int $order = null, ?bool $voice = null, ?string $spokenName = null, ?string $voiceId = null): array {
+    public static function updateWorkspace(string $id, ?string $name = null, ?string $path = null, ?string $agentId = null, ?int $order = null, ?bool $voice = null, ?string $spokenName = null, ?string $voiceId = null, ?string $speed = null): array {
         try {
             $sessions = ConfigService::getWorkspaces()['sessions'] ?? [];
             $index = null;
@@ -1173,6 +1272,18 @@ class AdminService {
                 }
                 $record['tts_voice'] = $voiceId;
             }
+            if ($speed !== null) {
+                // AGENT_SELF_SERVICE.md R8: the workspace's own speech speed. '' clears it.
+                $speed = trim($speed);
+                if ($speed !== '') {
+                    $norm = VoiceService::normaliseSpeed($speed);
+                    if ($norm === null) {
+                        return ['error' => "'$speed' is not a valid speed. Use a number from 0.5 (slower) to 2.0 (faster), for example 1.2."];
+                    }
+                    $speed = $norm;
+                }
+                $record['tts_speed'] = $speed;
+            }
 
             // Remove the (unmodified-position) old entry, then reinsert the updated
             // $record either back at its own index (no reorder asked for — this
@@ -1189,10 +1300,37 @@ class AdminService {
             if (!$ok) {
                 return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the workspace change.'];
             }
+            // AGENT_SELF_SERVICE.md R4: warn, never block, when the listener could
+            // confuse this workspace with another one.
+            $warnings = self::voiceCollisionWarnings($record, $sessions, $spokenName !== null || $name !== null, $voiceId !== null);
+            if ($warnings) $record['warnings'] = $warnings;
             return $record;
         } catch (\Throwable $e) {
             return self::failure('updateWorkspace', $e);
         }
+    }
+
+    /**
+     * @param array<string,mixed> $record the workspace just saved
+     * @param array<int,mixed> $sessions every saved workspace (including $record)
+     * @return list<string>
+     */
+    private static function voiceCollisionWarnings(array $record, array $sessions, bool $checkName, bool $checkVoice): array {
+        $out = [];
+        $id = (string)($record['id'] ?? '');
+        $mine = mb_strtolower(VoiceMailService::spokenNameFor($record));
+        $myVoice = VoiceService::workspaceVoiceFor($record);
+        foreach ($sessions as $w) {
+            if (!is_array($w) || (string)($w['id'] ?? '') === $id) continue;
+            $other = (string)($w['name'] ?? $w['id'] ?? '');
+            if ($checkName && $mine !== '' && mb_strtolower(VoiceMailService::spokenNameFor($w)) === $mine) {
+                $out[] = "Workspace '$other' is also announced as '" . VoiceMailService::spokenNameFor($w) . "'. The listener cannot tell them apart.";
+            }
+            if ($checkVoice && $myVoice !== '' && VoiceService::workspaceVoiceFor($w) === $myVoice) {
+                $out[] = "Workspace '$other' already uses the voice '$myVoice'. Pick another (aicli_list_voices).";
+            }
+        }
+        return $out;
     }
 
     /**
@@ -1503,7 +1641,7 @@ class AdminService {
 
     /** True when $value is acceptable for the already-allow-listed $key. */
     private static function settingValueAllowed(string $key, string $value): bool {
-        $rule = self::SETTINGS_ALLOWLIST[$key] ?? null;
+        $rule = self::settingRule($key);
         if ($rule === null) return false;
         if (isset($rule['min'], $rule['max'])) {
             return is_numeric($value) && (int)$value >= $rule['min'] && (int)$value <= $rule['max'];
@@ -1548,15 +1686,14 @@ class AdminService {
      */
     public static function setSetting(string $key, $value): array {
         try {
-            if (!array_key_exists($key, self::SETTINGS_ALLOWLIST)) {
+            if (self::settingRule($key) === null) {
                 return ['error' => "'$key' is not on the Tier 2 settings allow-list (docs/specs/PLUGIN_MANAGEMENT_TOOLS.md). "
-                    . 'Only these keys can be changed by a Plugin Management tool: ' . implode(', ', self::allowedSettingKeys()) . '. '
+                    . 'Only these keys can be changed by a Plugin Management tool: ' . implode(', ', self::allowedSettingKeys()) . ', node_memory_<agentId>. '
                     . 'Storage paths, the user account, and anything that moves or schedules data are not on this Tier 2 allow-list — change them from the Manager UI.'];
             }
             $value = (string)$value;
             if (!self::settingValueAllowed($key, $value)) {
-                $rule = self::SETTINGS_ALLOWLIST[$key];
-                $allowed = self::settingAllowedDescription($rule);
+                $allowed = self::settingAllowedDescription((array)self::settingRule($key));
                 return ['error' => "'$value' is not a valid value for '$key'. Allowed: $allowed."];
             }
 
@@ -1686,7 +1823,7 @@ class AdminService {
      *
      * @return array<string,mixed>
      */
-    public static function speak(string $text, ?string $workspaceId = null, ?string $voice = null): array {
+    public static function speak(string $text, ?string $workspaceId = null, ?string $voice = null, bool $audition = false, ?string $speed = null): array {
         try {
             $caller = self::callerIdentity();
             $wsId = ($workspaceId !== null && trim($workspaceId) !== '') ? trim($workspaceId) : $caller['workspaceId'];
@@ -1718,10 +1855,31 @@ class AdminService {
                 'agentId'     => $session['agentId'] ?? $caller['agentId'],
                 'name'        => $session['name'] ?? $caller['name'],
             ];
-            return VoiceService::speak($text, $actorContext, $voice);
+            return VoiceService::speak($text, $actorContext, $voice, false, true, $audition, $speed);
         } catch (\Throwable $e) {
             return self::failure('speak', $e);
         }
+    }
+
+    /**
+     * AGENT_SELF_SERVICE.md R5: hear one voice before choosing it. Speaks one short
+     * line in $voice (the voice asked for, even when this workspace has its own)
+     * and saves nothing. Every switch and limit of speak() still applies.
+     *
+     * @return array<string,mixed>
+     */
+    public static function previewVoice(string $voice, ?string $workspaceId = null, ?string $text = null, ?string $speed = null): array {
+        $voice = trim($voice);
+        if ($voice === '' || !VoiceService::isValidVoiceId($voice)) {
+            return ['error' => "'$voice' is not a valid voice id. Ask aicli_list_voices for the ids (lowercase letters, digits and underscores, for example af_heart)."];
+        }
+        $text = trim((string)$text);
+        if ($text === '') $text = 'Hello. This is how I would sound.';
+        $speed = $speed === null ? null : trim($speed);
+        if ($speed !== null && $speed !== '' && VoiceService::normaliseSpeed($speed) === null) {
+            return ['error' => "'$speed' is not a valid speed. Use a number from 0.5 (slower) to 2.0 (faster), for example 1.2."];
+        }
+        return self::speak($text, $workspaceId, $voice, true, $speed === '' ? null : $speed);
     }
 
     /** WORKSPACE_SEND_INPUT.md R4: hard cap on one send-input call's text length. */
@@ -1942,6 +2100,8 @@ class AdminService {
         // HOME_PERSIST_CONSOLIDATE_TOOLS.md Tier row (2026-09-17): closes every
         // session of the user and relaunches them — destructive-proposal.
         'aicli_consolidate_home' => 'executeApprovedConsolidateHome',
+        // ARTEFACTS.md: a purge removes a notebook file. Only a person's Approve runs it.
+        'aicli_purge_artefact'   => 'executeApprovedPurgeArtefact',
     ];
 
     /**
@@ -2568,6 +2728,269 @@ class AdminService {
             return ['error' => "No pending approval item with id '$opId' was found (it may already have been approved, rejected, or dismissed)."];
         }
         return ['opId' => $opId, 'rejected' => true];
+    }
+
+    // ------------------------------------------------------------------
+    // NOTEBOOK / ARTEFACTS (docs/specs/ARTEFACTS.md, ARTEFACTS_CONTRACT.md)
+    //
+    // Thin wrappers over NotebookService for the aicli_*_artefact tools. Same
+    // single-wrapper rule as every method above: an ['error'=>...] array on
+    // refusal, the bare payload on success; AdminMcpTools wraps once.
+    //
+    // Scope rules (this version): a tool reaches the caller's OWN workspace
+    // notebook, or the `global` notebook. Another workspace's notebook is
+    // refused. Settings notebook_* are NOT on SETTINGS_ALLOWLIST, so an agent
+    // cannot change them. There is no method here that reads a secret back.
+    // ------------------------------------------------------------------
+
+    /**
+     * Resolve the notebook context and the author for one tool call.
+     * @return array{ctx:array<string,mixed>,author:array<string,mixed>}|array{error:string}
+     */
+    private static function notebookGate(string $scope = 'notebook', string $workspaceId = ''): array {
+        $config = ConfigService::getConfig();
+        if ((string)($config['notebook_enabled'] ?? '1') !== '1') {
+            return ['error' => 'The Notebook is turned off. A person turns it on in Settings > Notebook.'];
+        }
+        if (!class_exists('\AICliAgents\Services\NotebookService')) {
+            $file = __DIR__ . '/NotebookService.php';
+            if (is_file($file)) require_once $file;
+        }
+        if (!class_exists('\AICliAgents\Services\NotebookService')) {
+            return ['error' => 'The Notebook service is not installed on this server yet.'];
+        }
+        $scope = $scope === '' ? 'notebook' : $scope;
+        if (!in_array($scope, ['notebook', 'global'], true)) {
+            return ['error' => "Unknown scope '$scope'. Use 'notebook' (this workspace's notebook, the default) or 'global'."];
+        }
+        $caller = self::callerIdentity();
+        $sid = $caller['workspaceId'];
+        if ($sid === '') {
+            return ['error' => 'The artefact tools need a workspace session (AICLI_SESSION_ID is not set for this process). Run them from inside a workspace.'];
+        }
+        $workspaceId = trim($workspaceId);
+        if ($workspaceId !== '' && $workspaceId !== $sid && $workspaceId !== 'global') {
+            return ['error' => "You can use only your own workspace's notebook, or scope 'global'. Another workspace's notebook is not open to tools in this version."];
+        }
+        $record = self::findSession($sid);
+        $author = [
+            'kind'        => 'agent',
+            'agentId'     => $caller['agentId'],
+            'name'        => VoiceMailService::spokenNameFor($record),
+            'workspace'   => (string)($record['name'] ?? ''),
+            'workspaceId' => $sid,
+        ];
+        $ctx = NotebookService::contextFor($scope === 'global' ? 'global' : $sid);
+        if (isset($ctx['error'])) return ['error' => (string)$ctx['error']];
+        return ['ctx' => $ctx, 'author' => $author];
+    }
+
+    /**
+     * Run one NotebookService call behind the gate. $fn gets (ctx, author) and
+     * returns the service result; an exception becomes a scrubbed failure().
+     *
+     * @param callable(array<string,mixed>,array<string,mixed>):array<string,mixed> $fn
+     * @return array<string,mixed>
+     */
+    private static function notebookCall(string $method, string $scope, callable $fn): array {
+        try {
+            $gate = self::notebookGate($scope);
+            if (isset($gate['error'])) return $gate;
+            $res = $fn($gate['ctx'], $gate['author']);
+            return is_array($res) ? $res : ['error' => 'The Notebook service returned no result.'];
+        } catch (\Throwable $e) {
+            return self::failure($method, $e);
+        }
+    }
+
+    /** @param array<string,mixed> $filters scope, area, type, tag, q, madeBy, changedSince @return array<string,mixed> */
+    public static function listArtefacts(array $filters = []): array {
+        $scope = (string)($filters['scope'] ?? 'notebook');
+        unset($filters['scope']);
+        $keep = [];
+        foreach (['area', 'type', 'tag', 'q', 'madeBy', 'changedSince'] as $k) {
+            if (isset($filters[$k]) && (string)$filters[$k] !== '') $keep[$k] = (string)$filters[$k];
+        }
+        return self::notebookCall('listArtefacts', $scope, fn($ctx) => NotebookService::listArtefacts($ctx, $keep));
+    }
+
+    /** One artefact: content, meta, committed flag and the unresolved comments. Never a secret value. @return array<string,mixed> */
+    public static function getArtefact(string $id, string $scope = 'notebook'): array {
+        return self::notebookCall('getArtefact', $scope, function ($ctx) use ($id) {
+            $got = NotebookService::get($ctx, $id);
+            if (isset($got['error'])) return $got;
+            $out = $got;
+            $c = NotebookService::comments($ctx, $id);
+            $unresolved = [];
+            if (!isset($c['error'])) {
+                foreach ((array)($c['comments'] ?? []) as $cm) {
+                    if (is_array($cm) && empty($cm['resolved'])) $unresolved[] = $cm;
+                }
+            }
+            $out['unresolvedComments'] = $unresolved;
+            return $out;
+        });
+    }
+
+    /** @return array<string,mixed> */
+    public static function searchArtefacts(string $q, string $scope = 'notebook'): array {
+        $q = trim($q);
+        if ($q === '') return ['error' => 'Give a search text (q).'];
+        return self::notebookCall('searchArtefacts', $scope, fn($ctx) => NotebookService::search($ctx, $q));
+    }
+
+    /** @return array<string,mixed> */
+    public static function listArtefactTemplates(): array {
+        return self::notebookCall('listArtefactTemplates', 'notebook', fn($ctx) => NotebookService::templates());
+    }
+
+    /** @param array<string,mixed> $p title,type,content,area,tags,template,needsYou,open,confirmSecret,scope @return array<string,mixed> */
+    public static function createArtefact(array $p): array {
+        $scope = (string)($p['scope'] ?? 'notebook');
+        unset($p['scope']);
+        return self::notebookCall('createArtefact', $scope, function ($ctx, $author) use ($p) {
+            $res = NotebookService::create($ctx, $p, $author);
+            if (!isset($res['error']) && isset($res['artefact']['id']) && !isset($res['link'])) {
+                $res['link'] = 'artefact:' . $res['artefact']['id'];
+            }
+            return $res;
+        });
+    }
+
+    /**
+     * Whole-file replace ($content, needs $expectedVersion) or a patch ($ops).
+     *
+     * @param array<int,array<string,mixed>>|null $ops
+     * @return array<string,mixed>
+     */
+    public static function updateArtefact(string $id, ?string $content, ?string $expectedVersion, ?array $ops, ?string $title, ?array $tags, bool $confirmSecret = false, string $scope = 'notebook'): array {
+        if ($ops === []) $ops = null;
+        $hasMeta = $title !== null || $tags !== null;
+        if ($content !== null && ($ops !== null || $hasMeta)) {
+            return ['error' => 'Send either `content` (the whole file) or `ops`/`title`/`tags`, not both in one call.'];
+        }
+        if ($content !== null && ($expectedVersion === null || $expectedVersion === '')) {
+            return ['error' => 'Replacing the whole content needs expectedVersion: the `version` you read with aicli_get_artefact. Read it again, then retry.'];
+        }
+        if ($content === null && $ops === null && !$hasMeta) {
+            return ['error' => 'Nothing to change. Send `content` with expectedVersion, or `ops`, or `title`/`tags`.'];
+        }
+        return self::notebookCall('updateArtefact', $scope, function ($ctx, $author) use ($id, $content, $expectedVersion, $ops, $title, $tags, $confirmSecret) {
+            if ($confirmSecret) $author['confirmSecret'] = true;
+            if ($content !== null) {
+                return NotebookService::save($ctx, $id, $content, (string)$expectedVersion, $author);
+            }
+            $all = $ops ?? [];
+            if ($title !== null) $all[] = ['op' => 'setTitle', 'title' => $title];
+            if ($tags !== null) $all[] = ['op' => 'setTags', 'tags' => array_values($tags)];
+            if (count($all) > 50) return ['error' => 'At most 50 ops in one call.'];
+            return NotebookService::patch($ctx, $id, $all, ($expectedVersion !== null && $expectedVersion !== '') ? $expectedVersion : null, $author);
+        });
+    }
+
+    /** @return array<string,mixed> */
+    public static function moveArtefact(string $id, string $area, string $scope = 'notebook'): array {
+        return self::notebookCall('moveArtefact', $scope, fn($ctx, $a) => NotebookService::move($ctx, $id, $area, $a));
+    }
+
+    /** @return array<string,mixed> */
+    public static function pinArtefact(string $id, bool $pinned, string $scope = 'notebook'): array {
+        return self::notebookCall('pinArtefact', $scope, fn($ctx, $a) => NotebookService::pin($ctx, $id, $pinned, $a));
+    }
+
+    /** Archive = move to archive/. Nothing is deleted. @return array<string,mixed> */
+    public static function archiveArtefact(string $id, string $scope = 'notebook'): array {
+        return self::notebookCall('archiveArtefact', $scope, fn($ctx, $a) => NotebookService::archive($ctx, $id, $a));
+    }
+
+    /** @return array<string,mixed> */
+    public static function restoreArtefact(string $id, ?string $area = null, string $scope = 'notebook'): array {
+        return self::notebookCall('restoreArtefact', $scope, fn($ctx, $a) => NotebookService::restore($ctx, $id, ($area !== null && $area !== '') ? $area : null, $a));
+    }
+
+    /** Add a comment, or reply to one with $parent. @return array<string,mixed> */
+    public static function commentArtefact(string $id, string $kind, string $ref, string $text, ?string $parent = null, string $scope = 'notebook'): array {
+        if (trim($text) === '') return ['error' => 'Give the comment text.'];
+        return self::notebookCall('commentArtefact', $scope, fn($ctx, $a) => NotebookService::addComment($ctx, $id, $kind, $ref, $text, ($parent !== null && $parent !== '') ? $parent : null, $a));
+    }
+
+    /**
+     * Store one secret of a connection card in the vault. The value is passed to
+     * NotebookService and nowhere else: it is not logged, not audited, not echoed.
+     * A global card refuses: it may not hold a secret.
+     *
+     * @return array<string,mixed>
+     */
+    public static function setArtefactSecret(string $id, string $field, string $value, string $scope = 'notebook'): array {
+        if ($scope === 'global') {
+            return ['error' => 'A global card may not hold a secret. Make the connection card in your own workspace notebook.'];
+        }
+        if (trim($field) === '' || $value === '') {
+            return ['error' => 'Give the field (for example password, token or apiKey) and a non-empty value.'];
+        }
+        $res = self::notebookCall('setArtefactSecret', 'notebook', fn($ctx, $a) => NotebookService::secretSet($ctx, $id, $field, $value, $a));
+        if (isset($res['error'])) return ['error' => str_replace($value, '[hidden]', (string)$res['error'])];
+        // Whatever the service returned, the value never leaves here.
+        return ['ok' => true, 'id' => $id, 'field' => $field, 'stored' => true];
+    }
+
+    /** The wiki view: home page, section tree, recent changes, unlinked pages, link graph, Things you should know. @return array<string,mixed> */
+    public static function wikiIndex(string $scope = 'notebook'): array {
+        return self::notebookCall('wikiIndex', $scope, fn($ctx) => NotebookService::wikiIndex($ctx));
+    }
+
+    /**
+     * Add one dated "what I did and why" line to the Agent journal page. Refused with a plain
+     * sentence when a person has not switched the journal on in Settings > Notebook.
+     * @return array<string,mixed>
+     */
+    public static function journalArtefact(string $text, string $scope = 'notebook'): array {
+        if (trim($text) === '') return ['error' => 'Give the journal text: what you did and why, in one or two sentences.'];
+        return self::notebookCall('journalArtefact', $scope, fn($ctx, $a) => NotebookService::journalAppend($ctx, $text, $a));
+    }
+
+    /** Copy an artefact into another workspace's notebook inbox. @return array<string,mixed> */
+    public static function shareArtefact(string $id, string $targetWorkspaceId, string $scope = 'notebook'): array {
+        $targetWorkspaceId = trim($targetWorkspaceId);
+        if ($targetWorkspaceId === '') return ['error' => 'Give targetWorkspaceId (a workspace id from aicli_list_workspaces).'];
+        $gate = self::notebookGate($scope);
+        if (isset($gate['error'])) return $gate; // off or no session: say so before the target id is looked up
+        if (self::findSession($targetWorkspaceId) === null) return ['error' => "No workspace with id '$targetWorkspaceId' was found."];
+        return self::notebookCall('shareArtefact', $scope, fn($ctx, $a) => NotebookService::share($ctx, $id, $targetWorkspaceId, $a));
+    }
+
+    /**
+     * Tier 3. Ask a person to approve removing the file. Never removes. The
+     * pending item is written by NotebookService::purgeRequest(); a person's
+     * Approve click reaches executeApprovedPurgeArtefact() through approvePending().
+     *
+     * @return array<string,mixed>
+     */
+    public static function proposePurgeArtefact(string $id, string $scope = 'notebook'): array {
+        return self::notebookCall('proposePurgeArtefact', $scope, fn($ctx, $a) => NotebookService::purgeRequest($ctx, $id, $a));
+    }
+
+    /**
+     * Runs ONLY from approvePending(), after a person approves. The params are
+     * exactly what purgeRequest() recorded. NotebookService::purgeExecute() does
+     * the removal (see the report: the contract has no executor yet).
+     *
+     * @param array<string,mixed> $params
+     * @return array<string,mixed>
+     */
+    public static function executeApprovedPurgeArtefact(array $params): array {
+        try {
+            if (!class_exists('\AICliAgents\Services\NotebookService')) {
+                $file = __DIR__ . '/NotebookService.php';
+                if (is_file($file)) require_once $file;
+            }
+            if (!class_exists('\AICliAgents\Services\NotebookService') || !method_exists('\AICliAgents\Services\NotebookService', 'purgeExecute')) {
+                return ['error' => 'The Notebook service cannot carry out a purge on this server yet.'];
+            }
+            return NotebookService::purgeExecute($params);
+        } catch (\Throwable $e) {
+            return self::failure('executeApprovedPurgeArtefact', $e);
+        }
     }
 
     /**

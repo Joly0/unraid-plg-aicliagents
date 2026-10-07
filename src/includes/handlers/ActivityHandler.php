@@ -205,6 +205,13 @@ class ActivityHandler
             return ['status' => 'ok'];
         }
 
+        // STORAGE_RECLAIM_NOTICE.md: "Later" on the storage tidy-up ask. Remember it for
+        // this wait only, so the same wait does not ask again; a new wait does.
+        if (strpos($opId, \AICliAgents\Services\StorageReclaimNoticeService::OP_PREFIX) === 0) {
+            $e = ActivityService::get($opId);
+            \AICliAgents\Services\StorageReclaimNoticeService::markDismissed($opId, (int)($e['meta']['startedAt'] ?? 0));
+        }
+
         return ActivityService::dismiss($opId)
             ? ['status' => 'ok']
             : ['status' => 'error', 'message' => 'cannot dismiss a running activity — cancel it first'];

@@ -894,6 +894,68 @@ $autoSave = 'onchange="autoSaveConfig()"';
                 </div>
             </div>
 
+            <!-- ARTEFACTS.md: the Notebook card. Plain form fields, saved through the
+                 same autoSaveConfig()/`save` path as the card above (UtilityHandler::save
+                 checks notebook_folder). Only a person changes these: none of the five
+                 keys is on AdminService::SETTINGS_ALLOWLIST, so an agent cannot. -->
+            <div class="aicli-card" id="notebook-settings-card">
+                <div class="aicli-card-header"><i class="fa fa-book text-orange-500"></i> Notebook</div>
+                <div class="aicli-card-body">
+                    <dl>
+                        <dt>Notebook</dt>
+                        <dd>
+                            <select name="notebook_enabled" aria-label="Notebook" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['notebook_enabled'] ?? '1', "1", _('On (default)'))?>
+                                <?=mk_option($config['notebook_enabled'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The Notebook drawer beside the terminal, and the tools that let an agent put pages in it. Off hides the drawer and refuses the tools. Nothing is deleted.</div>
+                        </dd>
+                        <dt>Open the Notebook when an agent asks</dt>
+                        <dd>
+                            <select name="notebook_auto_open" aria-label="Open the Notebook when an agent asks" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['notebook_auto_open'] ?? '0', "1", _('Yes'))?>
+                                <?=mk_option($config['notebook_auto_open'] ?? '0', "0", _('No (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">When an agent adds a page and asks to show it, open the drawer for you. With No, the button only shows a badge.</div>
+                        </dd>
+                        <dt>Notebook folder name</dt>
+                        <dd>
+                            <input type="text" name="notebook_folder" aria-label="Notebook folder name" value="<?=htmlspecialchars((string)($config['notebook_folder'] ?? 'notebook'), ENT_QUOTES, 'UTF-8')?>" maxlength="40" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]{0,39}" style="width: 100%;" <?=$autoSave?>>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The folder, inside each project folder, that holds its notebook. Letters, digits, dot, dash and underscore; up to 40 characters; not starting with a dot; not "assets". Changing it does not move an existing notebook.</div>
+                        </dd>
+                        <dt>Allow production keys on connection cards</dt>
+                        <dd>
+                            <select name="notebook_allow_prod_secrets" aria-label="Allow production keys on connection cards" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['notebook_allow_prod_secrets'] ?? '0', "1", _('Allow'))?>
+                                <?=mk_option($config['notebook_allow_prod_secrets'] ?? '0', "0", _('Refuse (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">A secret on a connection card goes to the encrypted vault, never to the file. With Refuse, a value that looks like a live production key is turned away.</div>
+                        </dd>
+                        <dt>Speak a notice when something needs you</dt>
+                        <dd>
+                            <select name="notebook_spoken_notice" aria-label="Speak a notice when something needs you" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['notebook_spoken_notice'] ?? '0', "1", _('Yes'))?>
+                                <?=mk_option($config['notebook_spoken_notice'] ?? '0', "0", _('No (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Needs Agent voice to be on. Speaks one short sentence when an agent adds a page that waits for you.</div>
+                        </dd>
+                        <dt>Quiet hours for spoken notices</dt>
+                        <dd>
+                            <input type="text" name="notebook_quiet_hours" aria-label="Quiet hours for spoken notices" value="<?=htmlspecialchars((string)($config['notebook_quiet_hours'] ?? ''), ENT_QUOTES, 'UTF-8')?>" maxlength="11" placeholder="22:00-07:00" pattern="([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]" style="width: 100%;" <?=$autoSave?>>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">From and to, as HH:MM-HH:MM in the server's local time, for example 22:00-07:00. The window may cross midnight. No notebook notice is spoken in these hours. Leave it empty for none.</div>
+                        </dd>
+                        <dt>Agent journal</dt>
+                        <dd>
+                            <select name="notebook_journal" aria-label="Agent journal" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['notebook_journal'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['notebook_journal'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">With On, an agent may add short "what I did and why" lines to a page called Agent journal in the working area. Off by default. The page keeps the newest 500 lines; older lines move to the archive and are never deleted.</div>
+                        </dd>
+                    </dl>
+                </div>
+            </div>
+
             <div class="aicli-card">
                 <div class="aicli-card-header" style="display:flex; align-items:center; justify-content:space-between; padding:5px 15px;">
                     <span><i class="fa fa-key text-orange-500"></i> SSH Keys</span>

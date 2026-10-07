@@ -46,6 +46,8 @@ class EventBus {
         'voice'            => 1,
         'favourites'       => 1,
         'voicemail'        => 1,
+        // ARTEFACTS_CONTRACT.md section 5: one message per notebook change, any surface.
+        'notebook'         => 8,
     ];
 
     /**
@@ -120,6 +122,15 @@ class EventBus {
             'ledgerKinds' => [
                 'voicemail.kept', 'voicemail.heard', 'voicemail.deleted',
                 'voicemail.updated',
+            ],
+        ],
+        'notebook' => [
+            'channel'     => 'notebook',
+            'depth'       => 8,
+            'ledgerKinds' => [
+                'artefact.created', 'artefact.updated', 'artefact.moved', 'artefact.archived',
+                'artefact.restored', 'artefact.item_changed', 'artefact.answered',
+                'artefact.commented', 'artefact.secret_revealed',
             ],
         ],
     ];

@@ -72,6 +72,16 @@ if [ -f "/tmp/aicli-src.tar.gz" ]; then
             exit 1
         }
 
+        # HARD_STOP_RESILIENCE R2: after a reboot the RAM copy of the layout
+        # marker is gone and the PLG passes "0". Use the flash copy as the OLD
+        # layout version so a normal reboot is not read as a layout change.
+        # No flash copy yet (first run after this change): nothing changes.
+        _LV_FLASH="${AICLI_LAYOUT_MARKER_DIR:-$CONFIG_DIR}/.layout-version"
+        if [ "${OLD_LAYOUT_VERSION:-0}" = "0" ] && [ -f "$_LV_FLASH" ]; then
+            _LV_F=$(tr -d '[:space:]' < "$_LV_FLASH" 2>/dev/null || true)
+            [[ "$_LV_F" =~ ^[0-9]+$ ]] && [ "$_LV_F" != "0" ] && OLD_LAYOUT_VERSION="$_LV_F"
+        fi
+
         # A layout migration is intentionally destructive.  Defer it while any
         # ttyd session is alive rather than closing agents behind the user's
         # back.  The staged payload remains inert and the migration sentinel is
@@ -88,6 +98,13 @@ if [ -f "/tmp/aicli-src.tar.gz" ]; then
             exit 1
         fi
         log_ok "Backend generation $GENERATION_ID validated and activated atomically."
+        # Keep a copy of the new layout marker on flash (temp file + mv).
+        _LV_NEW=$(tr -d '[:space:]' < "$EMHTTP_DEST/src/.layout-version" 2>/dev/null || true)
+        if [[ "$_LV_NEW" =~ ^[0-9]+$ ]] && mkdir -p "$(dirname "$_LV_FLASH")" 2>/dev/null; then
+            printf '%s\n' "$_LV_NEW" > "$_LV_FLASH.tmp.$$" 2>/dev/null \
+                && mv -f "$_LV_FLASH.tmp.$$" "$_LV_FLASH" 2>/dev/null \
+                || rm -f "$_LV_FLASH.tmp.$$" 2>/dev/null || true
+        fi
     else
         log_fail "Failed to extract source payload; active plugin left unchanged."
         exit 1
@@ -106,13 +123,16 @@ fi
 # README.md is included so it lands at plugins/<name>/README.md where the Unraid
 # Plugins page renders it as the plugin description (see ShowPlugins.php:96).
 log_status "  > Deploying UI entry points..."
-for f in AICliAjax.php AICliAgentsManager.page AICliAgents.page AICliMenuIcon.page AICliOpenFile.page AICliRelayMcp.page ArrayStopWarning.page README.md; do
+for f in AICliAjax.php AICliAgentsManager.page AICliAgents.page AICliMenuIcon.page AICliOpenFile.page ArrayStopWarning.page README.md; do
     if [ -f "src/$f" ]; then
         cp -f "src/$f" "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
     else
         log_warn "Source file missing: src/$f"
     fi
 done
+# The Relay MCP endpoint moved to src/AICliRelayMcp.php. The old root .page copy has no page header, so Unraid
+# logged "Invalid .page format" for it on every page. Remove it (it is this plugin's own file).
+rm -f AICliRelayMcp.page
 
 # Directory mappings have stable targets through the src generation pointer.
 # Replace an existing symlink with one rename. A legacy physical directory is

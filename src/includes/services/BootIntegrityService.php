@@ -896,7 +896,7 @@ class BootIntegrityService {
                 'created_at' => date('c'),
                 'persist_path' => $activePath,
             ];
-            LayerManifestService::addLayer($entity, $layerEntry);
+            self::addRecoveredLayer($entity, $layerEntry);
 
             LifecycleLogService::log(
                 LifecycleLogService::LEVEL_INFO,
@@ -977,6 +977,235 @@ class BootIntegrityService {
         }
 
         return [$candidateDirs];
+    }
+
+    // --- R7: a newer recovered layer replaces the older rolling busy snapshot ---
+
+    /** Folder of the busy-snapshot marker files. Tests may override it. */
+    private static function busySnapshotDir(): string {
+        $e = getenv('AICLI_BUSY_SNAPSHOT_DIR');
+        return ($e !== false && $e !== '') ? rtrim($e, '/') : '/tmp/unraid-aicliagents';
+    }
+
+    /** Folder of the mount-operation lock files. Tests may override it. */
+    private static function mountOpLockDir(): string {
+        $e = getenv('AICLI_MOUNT_OP_LOCK_DIR');
+        return ($e !== false && $e !== '') ? rtrim($e, '/') : '/var/run';
+    }
+
+    /** Sequence number of a delta layer name of this home, or null if the name does not fit. */
+    private static function homeDeltaSeq(string $id, string $name): ?int {
+        if ($name === '' || basename($name) !== $name) {
+            return null;
+        }
+        $prefix = 'home_' . $id . '_delta_';
+        if (strpos($name, $prefix) !== 0) {
+            return null;
+        }
+        if (!preg_match('/^(\d{10})_\d{8}T\d{6}Z\.sqsh$/', substr($name, strlen($prefix)), $m)) {
+            return null;
+        }
+        return (int)$m[1];
+    }
+
+    /**
+     * True when the file looks like a complete squashfs: not empty, starts with
+     * the magic 'hsqs', and the size the header claims (bytes_used, offset 40)
+     * is above zero and not larger than the file. A layer that is still being
+     * written has no valid bytes_used yet.
+     */
+    private static function looksLikeCompleteSquashfs(string $path): bool {
+        if (!is_file($path) || is_link($path)) {
+            return false;
+        }
+        $size = (int)@filesize($path);
+        if ($size < 96) {
+            return false;
+        }
+        $fh = @fopen($path, 'rb');
+        if ($fh === false) {
+            return false;
+        }
+        $head = @fread($fh, 48);
+        @fclose($fh);
+        if (!is_string($head) || strlen($head) < 48 || substr($head, 0, 4) !== 'hsqs') {
+            return false;
+        }
+        $u = @unpack('Pused', substr($head, 40, 8));
+        $used = is_array($u) ? (int)$u['used'] : 0;
+        return $used > 0 && $used <= $size;
+    }
+
+    private static function logRecoveredKept(string $entity, string $name, string $reason): void {
+        LifecycleLogService::log(
+            LifecycleLogService::LEVEL_INFO,
+            self::COMPONENT,
+            'recovered_layer_kept_as_layer',
+            ['entity' => $entity, 'basename' => $name, 'reason' => $reason]
+        );
+    }
+
+    /**
+     * Add a recovered layer to the manifest.
+     *
+     * Normal case: add it as a layer (kind 'recovered'), as always.
+     * R7 case: the entity is a HOME, the layer is a delta, the busy-snapshot
+     * marker of that home names an older delta that the manifest lists, the
+     * recovered layer has a higher sequence number and is a complete squashfs.
+     * Then the older snapshot is fully contained in the recovered layer (a busy
+     * home never trims its upper), so the recovered layer REPLACES it:
+     * manifest write first, then the old file is removed, then the marker is
+     * rewritten. Same rule as _replace_busy_snapshot in common.sh.
+     *
+     * Never throws. Any doubt means the normal add.
+     *
+     * @param array<string, mixed> $layerEntry
+     */
+    public static function addRecoveredLayer(string $entity, array $layerEntry): bool {
+        $name = (string)($layerEntry['filename'] ?? '');
+        try {
+            $reason = self::tryReplaceBusySnapshot($entity, $layerEntry);
+            if ($reason === null) {
+                return true; // replaced; already logged
+            }
+            self::logRecoveredKept($entity, $name, $reason);
+        } catch (\Throwable $e) {
+            self::logRecoveredKept($entity, $name, 'exception');
+        }
+        return LayerManifestService::addLayer($entity, $layerEntry, true);
+    }
+
+    /**
+     * Try the R7 replace. Returns null when it replaced the old snapshot, or a
+     * short reason string when the rule did not apply (nothing was changed).
+     *
+     * @param array<string, mixed> $layerEntry
+     */
+    private static function tryReplaceBusySnapshot(string $entity, array $layerEntry): ?string {
+        [$type, $id] = self::parseEntity($entity);
+        if ($type !== 'home' || $id === null) {
+            return 'not_a_home';
+        }
+        $new    = (string)($layerEntry['filename'] ?? '');
+        $newSeq = self::homeDeltaSeq($id, $new);
+        if ($newSeq === null) {
+            return 'not_a_home_delta_layer';
+        }
+        $safe   = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
+        $marker = self::busySnapshotDir() . '/.bake_busy_snapshot_home_' . $safe;
+        if (!is_file($marker)) {
+            return 'no_marker';
+        }
+
+        // Where the layers live.
+        $dir = (string)($layerEntry['persist_path'] ?? '');
+        if ($dir === '') {
+            $ent = LayerManifestService::getEntity($entity);
+            $dir = (string)($ent['current_persistence_path'] ?? '');
+        }
+        if ($dir === '' || !is_file($dir . '/' . $new)) {
+            return 'layer_file_not_found';
+        }
+        // The recovered layer must be complete and readable.
+        if (!self::looksLikeCompleteSquashfs($dir . '/' . $new)) {
+            return 'recovered_layer_not_verified';
+        }
+        $size = (int)@filesize($dir . '/' . $new);
+        if (isset($layerEntry['bytes']) && (int)$layerEntry['bytes'] > 0 && (int)$layerEntry['bytes'] !== $size) {
+            return 'recovered_layer_size_mismatch';
+        }
+        if (LayerManifestService::computeFileSha256($dir . '/' . $new) === null) {
+            return 'recovered_layer_unreadable';
+        }
+
+        // Take the same mount-operation lock the bake and op_mount take. Non-blocking poll.
+        $lockPath = self::mountOpLockDir() . '/aicli-mount-op-home-' . $safe . '.lock';
+        $lockFd   = @fopen($lockPath, 'c');
+        if ($lockFd === false) {
+            return 'mount_lock_unavailable';
+        }
+        try {
+            $got      = false;
+            $deadline = microtime(true) + 5.0;
+            do {
+                if (@flock($lockFd, LOCK_EX | LOCK_NB)) {
+                    $got = true;
+                    break;
+                }
+                usleep(100000);
+            } while (microtime(true) < $deadline);
+            if (!$got) {
+                return 'mount_lock_busy';
+            }
+
+            // Read the marker UNDER the lock. A missing marker means op_mount cleared it:
+            // the old snapshot may now be mounted, so keep everything.
+            $old = @file_get_contents($marker);
+            if (!is_string($old) || $old === '') {
+                return 'no_marker';
+            }
+            $old = trim($old);
+            if ($old === '__none__') {
+                return 'marker_has_no_snapshot';
+            }
+            $oldSeq = self::homeDeltaSeq($id, $old);
+            if ($oldSeq === null) {
+                return 'marker_name_invalid';
+            }
+            if ($old === $new) {
+                return 'marker_names_this_layer';
+            }
+            if ($newSeq <= $oldSeq) {
+                return 'recovered_layer_not_newer';
+            }
+            $oldPath = $dir . '/' . $old;
+            if (!is_file($oldPath) || is_link($oldPath)) {
+                return 'old_snapshot_file_missing';
+            }
+            // The old snapshot must be listed in the manifest.
+            $ent    = LayerManifestService::getEntity($entity);
+            $listed = false;
+            foreach (($ent['expected_layers'] ?? []) as $l) {
+                if ((string)($l['filename'] ?? '') === $old) {
+                    $listed = true;
+                    break;
+                }
+            }
+            if (!$listed) {
+                return 'marker_layer_not_in_manifest';
+            }
+
+            // Record the new layer and drop the old one in one atomic manifest write.
+            $entry = $layerEntry;
+            $entry['sha256']       = LayerManifestService::computeFileSha256($dir . '/' . $new);
+            $entry['bytes']        = $size;
+            $entry['persist_path'] = $dir;
+            if (!LayerManifestService::replaceLayer($entity, $entry, $old)) {
+                return 'manifest_replace_failed';
+            }
+
+            // The manifest no longer lists the old file. Only now remove it.
+            $removed = @unlink($oldPath);
+
+            // Marker names the new layer. Write a temp file and rename it.
+            $tmp = $marker . '.tmp.' . getmypid();
+            if (@file_put_contents($tmp, $new) === false || !@rename($tmp, $marker)) {
+                @unlink($tmp);
+                // A stale marker would name a deleted file. No marker is safe (bake keeps all layers).
+                @unlink($marker);
+            }
+
+            LifecycleLogService::log(
+                LifecycleLogService::LEVEL_INFO,
+                self::COMPONENT,
+                'recovered_layer_replaced_busy_snapshot',
+                ['entity' => $entity, 'previous' => $old, 'current' => $new, 'old_file_removed' => $removed]
+            );
+            return null;
+        } finally {
+            @flock($lockFd, LOCK_UN);
+            @fclose($lockFd);
+        }
     }
 
     /** @return array{0: string|null, 1: string|null} */

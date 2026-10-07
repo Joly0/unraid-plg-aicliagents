@@ -586,12 +586,20 @@ class TerminalService {
         if ($dbs === [] || !class_exists('SQLite3')) return null;
 
         $dir = rtrim(str_replace('\\', '/', $path), '/');
+        // The same folder has two names on Unraid: /mnt/user/<share>/... and the pool
+        // path /mnt/cache/<share>/.... A workspace launched through one name stores its
+        // sessions under that name, so a lookup by only the configured name misses the
+        // newest sessions and returns an old one from a stale store (2026-10-02, #387:
+        // OpenCode "Session not found"). Match every name of the folder.
+        $dirs = self::equivalentWorkspacePaths($dir);
         // Prepared statements (bound params) — no SQL escaping, no shell-out, and it
         // works from the sqlite3 PHP extension the host + runner already ship.
         // LIMIT 5 (not 1): a stray corrupt/foreign row at the top must not hide the
         // newest VALID session — we take the first well-formed id in DESC order.
+        $in = [];
+        foreach ($dirs as $i => $_) { $in[] = ":d$i"; $in[] = ":e$i"; }
         $sql = $dir !== ''
-            ? "SELECT id, time_updated FROM session WHERE (directory = :d OR directory = :d2) AND (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5"
+            ? "SELECT id, time_updated FROM session WHERE directory IN (" . implode(',', $in) . ") AND (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5"
             // No workspace context (older call-site): last-resort global newest,
             // matching the historical behaviour rather than returning nothing.
             : "SELECT id, time_updated FROM session WHERE (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5";
@@ -605,8 +613,10 @@ class TerminalService {
             $stmt = @$db->prepare($sql);
             if ($stmt === false) { $db->close(); continue; }
             if ($dir !== '') {
-                $stmt->bindValue(':d', $dir, SQLITE3_TEXT);
-                $stmt->bindValue(':d2', $dir . '/', SQLITE3_TEXT);
+                foreach ($dirs as $i => $d) {
+                    $stmt->bindValue(":d$i", $d, SQLITE3_TEXT);
+                    $stmt->bindValue(":e$i", $d . '/', SQLITE3_TEXT);
+                }
             }
             $res = @$stmt->execute();
             if ($res) {
@@ -622,6 +632,22 @@ class TerminalService {
             $db->close();
         }
         return $bestId;
+    }
+
+    /**
+     * Every name one workspace folder goes by: the path itself plus its /mnt/user and
+     * /mnt/cache twin. Pure. Other pools are not guessed: only the two forms the plugin
+     * itself produces (the configured share path and its pool path).
+     *
+     * @return list<string>
+     */
+    public static function equivalentWorkspacePaths(string $dir): array
+    {
+        $dir = rtrim($dir, '/');
+        $out = [$dir];
+        if (strpos($dir, '/mnt/user/') === 0) $out[] = '/mnt/cache/' . substr($dir, strlen('/mnt/user/'));
+        elseif (strpos($dir, '/mnt/cache/') === 0) $out[] = '/mnt/user/' . substr($dir, strlen('/mnt/cache/'));
+        return array_values(array_unique($out));
     }
 
     public static function antigravityResumeId(string $home, string $path): ?string {

@@ -1465,6 +1465,12 @@ class StorageHandler {
             ['type' => $type, 'id' => $id, 'job_id' => $jobId]
         );
 
+        // STORAGE_RECLAIM_NOTICE.md: the ask in the tray hands over to this job's own entry now,
+        // not at the next supervisor publish.
+        if ($type === 'home') {
+            \AICliAgents\Services\StorageReclaimNoticeService::sync(self::forceReclaimState(), $id);
+        }
+
         $msg = $type === 'home'
             ? "Consolidation queued. Sessions will be closed and automatically resumed on completion. Watch the activity tray for progress."
             : "Consolidation queued. It runs on the next storage cycle. Watch the activity tray for progress.";

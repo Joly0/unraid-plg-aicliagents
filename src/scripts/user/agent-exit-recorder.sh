@@ -22,5 +22,11 @@ aicli_dynamic_record_agent_exit() {
     # relaunch loop this function runs inside.
     if [ -n "${BRIDGE_SCRIPT:-}" ] && [ -n "${ID:-}" ] && [ -f "$BRIDGE_SCRIPT" ]; then
         php "$BRIDGE_SCRIPT" workspace_exited "$ID" "$_rc" 2>/dev/null || true
+        # HARD_STOP_RESILIENCE.md R4: separate call, so the exit event line above is unchanged.
+        # A failed start counts: under 3 s, or non-zero before 60 s (the PHP side decides and
+        # alerts for Relay actors only). Three failed exits in a row are a launcher give-up.
+        if [ "${last_launch_duration:-999}" -lt 3 ] || { [ "$_rc" -ne 0 ] && [ "${last_launch_duration:-999}" -lt 60 ]; }; then
+            php "$BRIDGE_SCRIPT" actor_exit_immediate "$ID" "$_rc" "$last_launch_duration" 2>/dev/null || true
+        fi
     fi
 }

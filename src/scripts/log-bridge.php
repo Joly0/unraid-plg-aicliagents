@@ -12,6 +12,7 @@
  *   log <message> <level> [context]   - Log a message via aicli_log
  *   init <username> [force]           - Initialize working directory
  *   stop <session_id> [sync]          - Stop a terminal session
+ *   actor_exit_immediate <session_id> <exit_code> <duration_s> - R4 Relay actor down alert
  *   workspace_exited <session_id> <exit_code> - Publish the WORKSPACE_LIFECYCLE_EVENTS.md
  *                                        `exited` event (agent process exit inside a
  *                                        live session; see agent-exit-recorder.sh)
@@ -79,6 +80,31 @@ switch ($action) {
                 'id'    => $sessionId,
                 'code'  => $exitCode,
             ]);
+        }
+        break;
+
+    // HARD_STOP_RESILIENCE.md R4: the agent exited in under 3 s (the launcher's
+    // "Agent Exited Immediately"). For a Relay actor, twice in 10 minutes raises
+    // an alert. Called by agent-exit-recorder.sh. Best effort.
+    case 'actor_exit_immediate':
+        $sessionId = $argv[2] ?? '';
+        $exitCode = (int)($argv[3] ?? 1);
+        $duration = (int)($argv[4] ?? 999);
+        if ($sessionId !== '' && class_exists('\\AICliAgents\\Services\\ActorDownAlertService')
+            && \AICliAgents\Services\ActorDownAlertService::isFailedStart($duration, $exitCode)) {
+            try {
+                \AICliAgents\Services\ActorDownAlertService::recordExit($sessionId, \AICliAgents\Services\ConfigService::workspaceName($sessionId), time(), null);
+            } catch (\Throwable $e) { /* best effort */ }
+        }
+        break;
+
+    // The launcher gave up after repeated failed starts: the actor is down at once.
+    case 'actor_gave_up':
+        $sessionId = $argv[2] ?? '';
+        if ($sessionId !== '' && class_exists('\\AICliAgents\\Services\\ActorDownAlertService')) {
+            try {
+                \AICliAgents\Services\ActorDownAlertService::recordExit($sessionId, \AICliAgents\Services\ConfigService::workspaceName($sessionId), time(), null, true);
+            } catch (\Throwable $e) { /* best effort */ }
         }
         break;
 

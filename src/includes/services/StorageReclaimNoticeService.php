@@ -1,0 +1,174 @@
+<?php
+/**
+ * <module_context>
+ *     <name>StorageReclaimNoticeService</name>
+ *     <description>The Activity tray entry for a storage tidy-up that waits on open
+ *     workspaces. One entry per home user, derived from the supervisor's maintenance
+ *     state (StorageHandler::forceReclaimState()), so the tray and the banner on the
+ *     terminal page always agree. Phases: ask (workspaces open, with a button that
+ *     closes them all and tidies), tidying (no workspace open, the tidy-up is starting
+ *     or running), finished (state gone). Spec: docs/specs/STORAGE_RECLAIM_NOTICE.md.</description>
+ *     <dependencies>ActivityService, TerminalService</dependencies>
+ *     <constraints>Best effort: sync() never throws and never blocks the supervisor tick
+ *     that calls it. The button runs the existing consolidate_storage flow
+ *     (StorageHandler::consolidate): it closes every session of the home with its resume
+ *     id, tidies, and relaunches them. A person dismissing the ask ("Later") is
+ *     remembered for that episode only (the started_at of the wait), so a new wait asks
+ *     again but the same wait never nags.</constraints>
+ * </module_context>
+ */
+
+namespace AICliAgents\Services;
+
+class StorageReclaimNoticeService
+{
+    public const OP_PREFIX = 'storage_reclaim_';
+
+    /** AJAX action the tray button calls (the Storage tab's own Consolidate action). */
+    public const ACTION = 'consolidate_storage';
+
+    public static function opId(string $user): string
+    {
+        return self::OP_PREFIX . preg_replace('/[^A-Za-z0-9_-]/', '_', $user);
+    }
+
+    private static function dismissPath(string $user): string
+    {
+        $dir = getenv('AICLI_ACTIVITY_DIR');
+        $base = ($dir !== false && $dir !== '') ? $dir : '/tmp/unraid-aicliagents/activity';
+        return rtrim($base, '/') . '/.' . self::opId($user) . '.dismissed';
+    }
+
+    /** Remember that a person chose "Later" for the wait that began at $startedAt. */
+    public static function markDismissed(string $opId, int $startedAt): void
+    {
+        try {
+            if (strpos($opId, self::OP_PREFIX) !== 0) return;
+            $user = substr($opId, strlen(self::OP_PREFIX));
+            @file_put_contents(self::dismissPath($user), (string)$startedAt);
+        } catch (\Throwable $e) {
+            // best effort
+        }
+    }
+
+    /** started_at of the wait episode a person dismissed, or 0. */
+    private static function dismissedEpisode(string $user): int
+    {
+        $raw = @file_get_contents(self::dismissPath($user));
+        return $raw === false ? 0 : (int)trim($raw);
+    }
+
+    /**
+     * Decide what the tray should show. Pure: no I/O, so it is unit-testable.
+     *
+     * @param array<string,mixed> $maintenance StorageHandler::forceReclaimState()
+     * @param list<string>        $openNames   names of the workspaces open on this home
+     * @return array{phase:string,label:string,step:string,meta:array<string,mixed>}|null
+     *         null = no entry should exist; phase 'handoff' = remove it, a job entry follows the work
+     */
+    public static function plan(array $maintenance, array $openNames, string $user, int $dismissedEpisode = 0): ?array
+    {
+        $waiting = (($maintenance['state'] ?? 'none') === 'waiting');
+        if (!$waiting) return null;
+
+        // A consolidate a person started (this notice's own button, or the Storage tab)
+        // has its own tray entry that follows the real job. Hand over to it.
+        if (!empty($maintenance['consolidating'])) {
+            return ['phase' => 'handoff', 'label' => '', 'step' => '', 'meta' => []];
+        }
+        // No workspace is open and the tidy-up has not started yet, or the automatic
+        // tidy-up is running: nothing else shows it, so this entry does.
+        if (count($openNames) === 0) {
+            return [
+                'phase' => 'tidying',
+                'label' => 'Tidying up storage',
+                'step'  => 'All workspaces are closed. The tidy-up is starting and can take a few minutes.',
+                'meta'  => ['chip' => 'in progress', 'user' => $user, 'phase' => 'tidying'],
+            ];
+        }
+
+        $startedAt = (int)($maintenance['started_at'] ?? 0);
+        if ($dismissedEpisode > 0 && $dismissedEpisode === $startedAt) return null;
+
+        $n = count($openNames);
+        $shown = array_slice($openNames, 0, 4);
+        $list = implode(', ', $shown) . ($n > count($shown) ? ' and ' . ($n - count($shown)) . ' more' : '');
+        $why = (($maintenance['reason'] ?? '') === 'space_pressure') ? 'Disk space is low.' : 'Workspace memory is nearly full.';
+        return [
+            'phase' => 'ask',
+            'label' => 'Storage tidy-up needs your workspaces closed',
+            'step'  => "$why $n workspace" . ($n === 1 ? ' is' : 's are') . " open: $list. They are closed, saved and started again by themselves.",
+            'meta'  => [
+                'chip' => 'needs you', 'user' => $user, 'phase' => 'ask', 'count' => $n,
+                'startedAt' => $startedAt,
+                'action' => 'consolidate_home',
+            ],
+        ];
+    }
+
+    /**
+     * Bring the tray entry in line with the maintenance state. Called by the
+     * supervisor's storage-status publisher (publish-storage-status.php) every time
+     * the state changes, and by tests.
+     *
+     * @param array<string,mixed> $maintenance
+     * @param list<string>|null   $openNames   null = look them up
+     */
+    public static function sync(array $maintenance, string $user = 'root', ?array $openNames = null): void
+    {
+        try {
+            $opId = self::opId($user);
+            if ($openNames === null) {
+                $openNames = [];
+                foreach (TerminalService::listActiveSessionsForHome($user) as $s) {
+                    $openNames[] = self::workspaceName((string)($s['id'] ?? ''), (string)($s['path'] ?? ''));
+                }
+            }
+            $plan = self::plan($maintenance, $openNames, $user, self::dismissedEpisode($user));
+            $existing = ActivityService::get($opId);
+
+            if ($plan !== null && $plan['phase'] === 'handoff') {
+                if ($existing !== null) ActivityService::dismiss($opId);
+                return;
+            }
+            if ($plan === null) {
+                if ($existing !== null && ($existing['status'] ?? '') !== 'done') {
+                    ActivityService::finish($opId, 'Storage tidy-up finished');
+                }
+                return;
+            }
+            if ($existing === null) {
+                ActivityService::register($opId, 'storage', $plan['label'], ['step' => $plan['step'], 'meta' => $plan['meta']]);
+                $existing = ActivityService::get($opId);
+            }
+            // A 'waiting' entry is exempt from the stall watchdog and stays until finished
+            // or dismissed: right for both phases (the tidy-up has no heartbeat to send).
+            // Write only when something changed, so repeated syncs do not flood the push channel.
+            $progress = $plan['phase'] === 'ask' ? 1 : 50;
+            if ($existing !== null
+                && ($existing['status'] ?? '') === ActivityService::STATUS_WAITING
+                && ($existing['step'] ?? '') === $plan['step']
+                && ($existing['meta'] ?? []) == $plan['meta']) {
+                return;
+            }
+            ActivityService::update($opId, [
+                'status' => ActivityService::STATUS_WAITING, 'step' => $plan['step'],
+                'progress' => $progress, 'meta' => $plan['meta'], 'error' => null,
+            ]);
+        } catch (\Throwable $e) {
+            // best effort: a tray fault must never wedge the supervisor tick
+        }
+    }
+
+    private static function workspaceName(string $id, string $path): string
+    {
+        try {
+            foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+                if ((string)($w['id'] ?? '') === $id && (string)($w['name'] ?? '') !== '') return (string)$w['name'];
+            }
+        } catch (\Throwable $e) {
+            // fall through
+        }
+        return $path !== '' ? basename($path) : $id;
+    }
+}

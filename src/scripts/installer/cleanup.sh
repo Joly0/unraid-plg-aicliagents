@@ -40,6 +40,198 @@ graceful_kill() {
     fi
 }
 
+# --- Layout-version marker on flash (HARD_STOP_RESILIENCE R2) ---
+# The old layout version used to live only in RAM (src/.layout-version under the
+# plugin directory, snapshotted by the PLG into OLD_LAYOUT_VERSION). After a
+# reboot the RAM copy is gone, the PLG snapshots "0", and every boot looked like
+# a layout change, which forced the destructive full teardown. A copy of the
+# marker is now kept on flash. When the RAM snapshot is missing ("0"), the flash
+# copy is used as the OLD layout version. A real difference between OLD and NEW
+# still forces the full teardown.
+#
+# First run after this change: no flash copy exists yet, so nothing changes.
+# OLD stays "0" and the behaviour is exactly as before (one full teardown). The
+# flash copy is written at the end of that run, so later reboots are quiet.
+_sanitize_layout_ver() {
+    local v
+    v=$(printf '%s' "${1:-}" | tr -d '[:space:]')
+    [ -z "$v" ] && v="0"
+    [[ "$v" =~ ^[0-9]+$ ]] || v="0"
+    printf '%s' "$v"
+}
+_layout_flash_file() {
+    printf '%s/.layout-version' "${AICLI_LAYOUT_MARKER_DIR:-${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}}"
+}
+# Sets OLD_LAYOUT_VERSION (sanitised). Falls back to the flash copy when the
+# RAM snapshot is missing or "0".
+_resolve_old_layout_version() {
+    local f flash_raw flash_v
+    OLD_LAYOUT_VERSION=$(_sanitize_layout_ver "${OLD_LAYOUT_VERSION:-0}")
+    if [ "$OLD_LAYOUT_VERSION" = "0" ]; then
+        f=$(_layout_flash_file)
+        if [ -f "$f" ]; then
+            flash_raw=$(cat "$f" 2>/dev/null || true)
+            flash_v=$(_sanitize_layout_ver "$flash_raw")
+            if [ "$flash_v" != "0" ]; then
+                OLD_LAYOUT_VERSION="$flash_v"
+                log_status "    > Layout marker in RAM is missing; using the copy on flash (v$flash_v)."
+            fi
+        fi
+    fi
+}
+# Write the flash copy: temp file + mv, so a power cut never leaves half a file.
+_write_layout_flash_marker() {
+    local v f tmp
+    v=$(_sanitize_layout_ver "${1:-}")
+    [ "$v" = "0" ] && return 0
+    f=$(_layout_flash_file)
+    mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+    tmp="$f.tmp.$$"
+    if printf '%s\n' "$v" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    return 0
+}
+
+# --- SQLite WAL checkpoint, made safe (HARD_STOP_RESILIENCE R2) ---
+# Rules: never touch a database a process holds open; never checkpoint a
+# database that fails quick_check (a checkpoint can write damaged pages into the
+# main file); every sqlite3 call has a timeout; never abort the caller; skip the
+# whole section when a bake or consolidate holds a storage lock.
+# Bake and consolidate use one lock file per entity: /var/run/aicli-bake-<type>-<id>.lock
+# (fd 9 in bake, fd 8 in consolidate). We try each one without blocking.
+_sqlite_checkpoint_section() {
+    local root="${1:-/tmp/unraid-aicliagents/work}"
+    local lockdir="${AICLI_BAKE_LOCK_DIR:-/var/run}"
+    command -v sqlite3 >/dev/null 2>&1 || return 0
+
+    local -a lock_fds=()
+    local lf fd lock_held=""
+    if command -v flock >/dev/null 2>&1; then
+        for lf in "$lockdir"/aicli-bake-*.lock; do
+            [ -e "$lf" ] || continue
+            fd=""
+            { exec {fd}>>"$lf"; } 2>/dev/null || continue
+            if flock -n "$fd" 2>/dev/null; then
+                lock_fds+=("$fd")
+            else
+                lock_held="$lf"
+                { exec {fd}>&-; } 2>/dev/null || true
+                break
+            fi
+        done
+    fi
+    if [ -n "$lock_held" ]; then
+        for fd in "${lock_fds[@]}"; do { exec {fd}>&-; } 2>/dev/null || true; done
+        log_status "    > SQLite checkpoint skipped: storage lock held (${lock_held##*/}); a bake or consolidate is running."
+        return 0
+    fi
+
+    local have_fuser=0
+    command -v fuser >/dev/null 2>&1 && have_fuser=1
+    local n_ok=0 n_held=0 n_damaged=0 n_timeout=0 n_error=0 n_total=0
+    local db out rc
+
+    while IFS= read -r -d '' db; do
+        n_total=$((n_total + 1))
+        if [ "$have_fuser" = "1" ] && fuser -s "$db" >/dev/null 2>&1; then
+            n_held=$((n_held + 1))
+            log_status "      [SQLite] skipped-held: $db"
+            continue
+        fi
+        out=$(timeout 10 sqlite3 -readonly "$db" 'PRAGMA quick_check(1);' 2>&1)
+        rc=$?
+        if [ "$rc" = "124" ] || [ "$rc" = "137" ]; then
+            n_timeout=$((n_timeout + 1))
+            log_status "      [SQLite] timeout (quick_check): $db"
+            continue
+        fi
+        if [ "$out" != "ok" ]; then
+            if printf '%s' "$out" | grep -qiE 'database is locked|database table is locked|busy'; then
+                n_error=$((n_error + 1))
+                log_status "      [SQLite] error (locked): $db"
+            else
+                n_damaged=$((n_damaged + 1))
+                log_status "      [SQLite] damaged (left untouched): $db"
+            fi
+            continue
+        fi
+        out=$(timeout 20 sqlite3 "$db" 'PRAGMA wal_checkpoint(TRUNCATE);' 2>&1)
+        rc=$?
+        if [ "$rc" = "124" ] || [ "$rc" = "137" ]; then
+            n_timeout=$((n_timeout + 1))
+            log_status "      [SQLite] timeout (checkpoint): $db"
+        elif [ "$rc" != "0" ]; then
+            n_error=$((n_error + 1))
+            log_status "      [SQLite] error (checkpoint rc=$rc): $db"
+        else
+            n_ok=$((n_ok + 1))
+            log_status "      [SQLite] ok: $db"
+        fi
+    done < <(find "$root" -type f \( -name '*.db' -o -name '*.sqlite' \) -print0 2>/dev/null || true)
+
+    for fd in "${lock_fds[@]}"; do { exec {fd}>&-; } 2>/dev/null || true; done
+    log_status "    > SQLite checkpoint summary: $n_total database(s): ok=$n_ok skipped-held=$n_held damaged=$n_damaged timeout=$n_timeout error=$n_error"
+    return 0
+}
+
+# HARD_STOP_RESILIENCE R6: a plugin update must not stop storage work while a
+# save is running. A save (bake) or a consolidate holds one lock file per entity:
+# /var/run/aicli-bake-<type>-<id>.lock. This function waits until no such lock is
+# held. It polls without blocking. It gives up after AICLI_BAKE_WAIT_S seconds
+# (default 600) and the caller goes on. It never fails the caller.
+# AICLI_BAKE_WAIT_POLL_S (default 2) sets the poll step; tests make it small.
+_wait_for_running_save() {
+    local lockdir="${AICLI_BAKE_LOCK_DIR:-/var/run}"
+    local limit="${AICLI_BAKE_WAIT_S:-600}"
+    local step="${AICLI_BAKE_WAIT_POLL_S:-2}"
+    command -v flock >/dev/null 2>&1 || return 0
+    case "$limit" in ''|*[!0-9]*) limit=600 ;; esac
+    case "$step" in ''|*[!0-9.]*) step=2 ;; esac
+
+    local start=$SECONDS held="" announced=0 lf fd
+    while :; do
+        held=""
+        for lf in "$lockdir"/aicli-bake-*.lock; do
+            [ -e "$lf" ] || continue
+            fd=""
+            { exec {fd}>>"$lf"; } 2>/dev/null || continue
+            if flock -n "$fd" 2>/dev/null; then
+                { exec {fd}>&-; } 2>/dev/null || true
+            else
+                { exec {fd}>&-; } 2>/dev/null || true
+                held="${lf##*/}"
+                break
+            fi
+        done
+        [ -z "$held" ] && break
+        if [ "$announced" -eq 0 ]; then
+            log_status "    > waiting for a running save ($held)" || true
+            announced=1
+        fi
+        if [ $((SECONDS - start)) -ge "$limit" ]; then
+            log_status "    > gave up waiting for a running save ($held) after ${limit}s; going on." || true
+            return 0
+        fi
+        sleep "$step" || true
+    done
+    if [ "$announced" -eq 1 ]; then
+        log_status "    > running save finished; waited $((SECONDS - start))s." || true
+    fi
+    return 0
+}
+
+# Sourcing this file (tests) loads the functions above and stops here; running
+# it (the PLG) continues into the teardown flow below.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
+
+# --- 0. WAIT FOR A RUNNING SAVE (R6) ---
+# Runs before the first stop or kill, in both the hot-swap and full-teardown paths.
+_wait_for_running_save || true
+
 # --- 0a. STOP STORAGE DURABILITY SUPERVISOR ---
 # The supervisor must be stopped before persistence + eviction so the installer
 # does not race the new supervisor instance launched at the end of the PLG.
@@ -116,17 +308,10 @@ MIGRATION_NEEDED=0
 # empty/whitespace-only/non-numeric .layout-version file that would otherwise
 # cause a spurious scorched-earth teardown (e.g. `cat` of an empty file yields
 # "" which fails the `!= "0"` test and trips the gate). Strip whitespace,
-# default empty to "0", validate as pure integer.
-_sanitize_layout_ver() {
-    local v
-    v=$(printf '%s' "${1:-}" | tr -d '[:space:]')
-    [ -z "$v" ] && v="0"
-    [[ "$v" =~ ^[0-9]+$ ]] || v="0"
-    printf '%s' "$v"
-}
+# default empty to "0", validate as pure integer (_sanitize_layout_ver, defined above).
 NEW_LAYOUT_VERSION_RAW=$(cat "${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/.layout-version" 2>/dev/null || true)
 NEW_LAYOUT_VERSION=$(_sanitize_layout_ver "$NEW_LAYOUT_VERSION_RAW")
-OLD_LAYOUT_VERSION=$(_sanitize_layout_ver "${OLD_LAYOUT_VERSION:-0}")
+_resolve_old_layout_version
 MIGRATION_SENTINEL="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/.migration_required"
 if [ -f "$MIGRATION_SENTINEL" ]; then
     MIGRATION_NEEDED=1
@@ -194,6 +379,7 @@ if [ "$MIGRATION_NEEDED" = "0" ] && [ "$UPGRADE_MODE" = "1" ]; then
     # mandatory flush, the same class as a shutdown/array-stop teardown event.
 
     lifecycle_log "info" "installer_cleanup" "installer_hotswap" "{\"layout_version\":\"$NEW_LAYOUT_VERSION\"}" 2>/dev/null || true
+    _write_layout_flash_marker "$NEW_LAYOUT_VERSION"
     log_ok "Pre-upgrade cleanup complete (hot-swap path — no bake; ZRAM persists in RAM)."
     exit 0
 fi
@@ -248,19 +434,9 @@ if [ "$UPGRADE_MODE" = "1" ]; then
 
 fi
 
-# --- 1. SQLite WAL Checkpoint ---
+# --- 1. SQLite WAL Checkpoint (safe: lock-aware, quick_check first, timeouts) ---
 # Merge WAL journals into main .db files before killing agent processes.
-if command -v sqlite3 > /dev/null 2>&1; then
-    DB_LIST=$(find /tmp/unraid-aicliagents/work -name "*.db" -o -name "*.sqlite" 2>/dev/null)
-    DB_COUNT=$(echo "$DB_LIST" | grep -v "^$" | wc -l)
-    if [ "$DB_COUNT" -gt 0 ]; then
-        log_status "    > Checkpointing $DB_COUNT active SQLite database(s)..."
-        for db in $DB_LIST; do
-            sqlite3 "$db" "PRAGMA wal_checkpoint(TRUNCATE);" > /dev/null 2>&1 || true
-        done
-        log_ok "Database checkpoint complete."
-    fi
-fi
+_sqlite_checkpoint_section /tmp/unraid-aicliagents/work || true
 
 log_step "Evicting legacy processes for a clean upgrade..."
 
@@ -322,4 +498,5 @@ if [ -d "$EMHTTP_DEST/agents/.runtime" ]; then
     rm -rf "$EMHTTP_DEST/agents/.runtime"
 fi
 
+_write_layout_flash_marker "$NEW_LAYOUT_VERSION"
 log_ok "Pre-upgrade cleanup complete."

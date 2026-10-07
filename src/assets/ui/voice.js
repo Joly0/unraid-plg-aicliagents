@@ -181,6 +181,8 @@
     var playingWorkspaceId = null;
     var currentFinish = null;
     var currentAudio = null;
+    // True while the piece in flight belongs to a note read aloud (see the reader section below).
+    var currentReaderPiece = false;
     function setPlayingWorkspace(id) {
         var next = id ? String(id) : null;
         if (next === playingWorkspaceId) return;
@@ -195,6 +197,7 @@
         currentUtt = null;
         currentFinish = null;
         currentAudio = null;
+        currentReaderPiece = false;
         playing = false;
         setPlayingWorkspace(null);
     }
@@ -245,10 +248,13 @@
             currentFinish = finish;
             currentAudio = null;
             utt.onend = function () { finish('ended'); };
+            utt.onstart = function () { if (typeof item.onStart === 'function') { try { item.onStart(); } catch (e) { /* noop */ } } };
             utt.onerror = function (evt) {
                 var code = evt && evt.error ? String(evt.error) : '';
                 if (code === 'not-allowed') {
-                    _queue.unshift(item);
+                    // A piece of a note read aloud is not a message: it stays with the reader (it plays again from the
+                    // same place after the click), never in the message queue.
+                    if (!item.reader) _queue.unshift(item);
                     waitForGesture();
                 }
                 // 'interrupted', 'canceled', 'not-allowed' … — never heard.
@@ -277,7 +283,7 @@
     // session cookie still applies (REVIEW_2026-09-13_EVENTS_AND_SECURITY.md#S4).
     // Carrying the token here would only have put a live secret in the
     // browser's own network log and any proxy access log.
-    function playAudio(url, done) {
+    function playAudio(url, done, onStart) {
         done = done || function () {};
         try {
             var audio = new Audio(url);
@@ -298,15 +304,19 @@
                 if (started) return;
                 started = true;
                 clearTimeout(startupTimer);
+                if (typeof onStart === 'function') { try { onStart(); } catch (e) { /* noop */ } }
             };
             audio.onended = function () { finish('ended'); };
-            audio.onerror = function () { finish('error'); };
+            // An error AFTER the clip started means the person already heard it (a late network or
+            // decode hiccup at the tail). Report that as ended, so the page does not repeat the same
+            // words in the browser voice right after. Only a clip that never played falls back.
+            audio.onerror = function () { finish(started ? 'ended' : 'error'); };
             audio.onplaying = markStarted;
             currentFinish = finish;
             currentAudio = audio;
             var p = audio.play();
             if (p && typeof p.then === 'function') {
-                p.then(markStarted).catch(function () { finish('error'); });
+                p.then(markStarted).catch(function () { finish(started ? 'ended' : 'error'); });
             }
         } catch (e) {
             done('error');
@@ -376,7 +386,7 @@
     function pump() {
         if (playing || needsGesture) return;
         var item = queueNext();
-        if (!item) return;
+        if (!item) { readerNext(); return; }
         playing = true;
         setPlayingWorkspace(item.workspaceId || null);
         var done = function (outcome) {
@@ -398,6 +408,168 @@
         } else {
             playSpeech(item, done);
         }
+    }
+
+    // ---- a note read aloud (docs/specs/NOTEBOOK_READ_ALOUD.md) -----------------
+    // One speaker in the page. A read is a list of short pieces. pump() above plays every workspace message
+    // FIRST and takes the next piece of a read only when no message waits, so the two never overlap: a message
+    // waits for the end of the piece that plays (about one sentence), plays, then the read goes on. The state of
+    // the read is sent as the `aicli-voice-reading` window event: idle | loading | playing | paused.
+
+    var reader = null;
+
+    function readerDispatch() {
+        try {
+            window.dispatchEvent(new CustomEvent('aicli-voice-reading', {
+                detail: { id: reader ? reader.id : null, state: reader ? reader.state : 'idle' }
+            }));
+        } catch (e) { /* noop */ }
+    }
+    function readerSetState(st) {
+        if (!reader || reader.state === st) return;
+        reader.state = st;
+        readerDispatch();
+    }
+    function readerEnd() {
+        if (!reader) return;
+        var held = reader.held;
+        reader = null;
+        if (held) { try { held.audio.pause(); } catch (e) { /* noop */ } }
+        readerDispatch();
+    }
+    /** The piece now at `index`: ask for it, and ask for the next one while this one plays. */
+    function readerClip(r, i) {
+        if (!r.engine || i >= r.chunks.length) return null;
+        if (!r.clips[i]) {
+            r.clips[i] = Promise.resolve().then(function () { return r.fetchClip(i); }).then(function (url) {
+                return url ? String(url) : null;
+            }, function () { return null; });
+        }
+        return r.clips[i];
+    }
+    function readerNext() {
+        var r = reader;
+        if (!r || r.paused || playing || needsGesture) return;
+        if (r.held) { readerResumeHeld(r); return; }
+        if (r.index >= r.chunks.length) { readerEnd(); return; }
+        playing = true;
+        currentReaderPiece = true;
+        setPlayingWorkspace(null);
+        var i = r.index;
+        var text = r.chunks[i];
+        r.pieceDone = false;
+        var onStart = function () { if (reader === r && !r.paused) readerSetState('playing'); };
+        readerSetState('loading');
+        var done = function (outcome) {
+            if (reader !== r) { finishPlaying(); pump(); return; }
+            if (outcome === 'paused') { finishPlaying(); pump(); return; }
+            if (outcome === 'stopped') { finishPlaying(); readerEnd(); pump(); return; }
+            // 'ended' goes on. A refused sound (waiting for a click) stays at this piece. Anything else skips it.
+            if (!(outcome !== 'ended' && needsGesture)) r.index = i + 1;
+            finishPlaying();
+            pump();
+        };
+        var speak = function () {
+            if (reader !== r) { done('stopped'); return; }
+            playSpeech({ mode: 'speech', text: text, intro: '', voice: r.voice, reader: true, onStart: onStart }, function (o) {
+                if (r.cancelForPause) { r.cancelForPause = false; done('paused'); return; }
+                done(o);
+            });
+        };
+        var p = readerClip(r, i);
+        readerClip(r, i + 1);
+        if (!p) { speak(); return; }
+        // `currentFinish` lets the operator's stop button reach a piece that is still being made.
+        var gone = false;
+        currentFinish = function (o) { gone = true; done(o); };
+        p.then(function (url) {
+            if (gone) return;
+            if (reader !== r) { currentFinish = null; done('stopped'); return; }
+            if (r.paused) { currentFinish = null; done('paused'); return; }
+            currentFinish = null;
+            if (!url) { speak(); return; }
+            playAudio(url, function (o) {
+                if (r.cancelForPause) { r.cancelForPause = false; done('paused'); return; }
+                // A piece that never played is spoken by the browser voice, so no sentence is lost.
+                if (o !== 'ended' && o !== 'stopped' && !needsGesture) { r.index = i; speak(); return; }
+                done(o);
+            }, onStart);
+        });
+    }
+    /** Go on with the audio that a pause kept, from the second where it stopped. */
+    function readerResumeHeld(r) {
+        var h = r.held;
+        r.held = null;
+        playing = true;
+        currentReaderPiece = true;
+        currentAudio = h.audio;
+        currentFinish = h.finish;
+        readerSetState('loading');
+        try {
+            var pr = h.audio.play();
+            if (pr && typeof pr.then === 'function') pr.then(function () { readerSetState('playing'); }, function () { if (h.finish) h.finish('error'); });
+        } catch (e) { if (h.finish) h.finish('error'); }
+    }
+    function readerPause() {
+        var r = reader;
+        if (!r || r.paused) return false;
+        r.paused = true;
+        readerSetState('paused');
+        if (currentReaderPiece && playing) {
+            if (currentAudio) {
+                // Audio: stop the element where it is and keep it, so a click goes on mid-sentence.
+                try { currentAudio.pause(); } catch (e) { /* noop */ }
+                r.held = { audio: currentAudio, finish: currentFinish };
+                currentAudio = null; currentFinish = null; currentReaderPiece = false;
+                if (playingTimer) { clearTimeout(playingTimer); playingTimer = null; }
+                playing = false;
+                setPlayingWorkspace(null);
+                pump(); // a message that waited may play now
+            } else if (currentUtt) {
+                r.cancelForPause = true; // the piece starts again from its first word after the pause
+                try { window.speechSynthesis.cancel(); } catch (e) { /* noop */ }
+            }
+        }
+        return true;
+    }
+    function readerResume() {
+        var r = reader;
+        if (!r || !r.paused) return false;
+        r.paused = false;
+        if (r.held && !playing) { readerResumeHeld(r); return true; }
+        readerSetState('loading');
+        pump();
+        return true;
+    }
+    function readerStop() {
+        var r = reader;
+        if (!r) return false;
+        if (currentReaderPiece && playing) {
+            var f = currentFinish;
+            var a = currentAudio;
+            r.paused = false;
+            try { if (a && typeof a.pause === 'function') a.pause(); } catch (e) { /* noop */ }
+            if (!a) { try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) { /* noop */ } }
+            currentFinish = null;
+            readerEnd();
+            if (f) f('stopped'); else { finishPlaying(); pump(); }
+            return true;
+        }
+        readerEnd();
+        pump();
+        return true;
+    }
+    function readerStart(opts) {
+        if (!opts || !opts.chunks || !opts.chunks.length) return false;
+        if (reader) readerStop();
+        unlock();
+        reader = {
+            id: String(opts.id || ''), chunks: opts.chunks.slice(), engine: !!opts.engine, fetchClip: opts.fetchClip || function () { return null; },
+            voice: opts.voice || null, index: 0, paused: false, state: 'loading', clips: {}, held: null, cancelForPause: false
+        };
+        readerDispatch();
+        pump();
+        return true;
     }
 
     // ---- voice mail (docs/specs/VOICE_MAIL.md R2) ---------------------------
@@ -1085,6 +1257,14 @@
         // Stop the clip in flight at once (optionally only when it belongs to
         // `workspaceId`). Returns true when something stopped.
         stop: function (workspaceId) { return stopPlaying(workspaceId); },
+        // ---- a note read aloud (docs/specs/NOTEBOOK_READ_ALOUD.md) ---------
+        // read({id, chunks, engine, fetchClip(i) -> Promise<url|null>, voice?}) starts a read (it replaces an older one).
+        // Workspace messages always play first; the read goes on after them. State: the `aicli-voice-reading` event.
+        read: function (opts) { return readerStart(opts); },
+        readPause: function () { return readerPause(); },
+        readResume: function () { return readerResume(); },
+        readStop: function () { return readerStop(); },
+        readState: function () { return { id: reader ? reader.id : null, state: reader ? reader.state : 'idle' }; },
         // ---- input (docs/specs/VOICE_INPUT.md) ----------------------------
         // Begin dictating — see startInput() above for `opts`. No-op while
         // already recording or transcribing.

@@ -59,6 +59,7 @@ require_once AICLI_GEN_SRC . '/includes/handlers/AgentRelayHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/VoiceHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/FavouritesHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/AutoContinueHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/NotebookHandler.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
@@ -67,7 +68,7 @@ if (isset($_GET['action'])) {
     // It must bypass CSRF only for this one dedicated endpoint.
     if ($action === 'relay_http_mcp') {
         ob_end_clean();
-        require AICLI_GEN_SRC . '/AICliRelayMcp.page';
+        require AICLI_GEN_SRC . '/AICliRelayMcp.php';
         exit;
     }
     if ($action !== 'filetree') {
@@ -78,7 +79,7 @@ if (isset($_GET['action'])) {
     // bigger than post_max_size and empties $_POST — that would otherwise
     // fail the CSRF check below and hide the real cause behind "Invalid CSRF
     // Token". Catch it here, before CSRF, for the two upload actions only.
-    if (($action === 'save_file' || $action === 'save_file_chunk')
+    if (($action === 'save_file' || $action === 'save_file_chunk' || $action === 'notebook_asset_upload' || $action === 'notebook_import')
         && !empty($_SERVER['CONTENT_LENGTH']) && empty($_POST)) {
         $postMaxBytes = \AICliAgents\Handlers\UtilityHandler::getUploadLimits()['post_max_bytes'];
         $contentLength = (int) $_SERVER['CONTENT_LENGTH'];
@@ -103,7 +104,9 @@ if (isset($_GET['action'])) {
     // session cookie still applies. A write action must NEVER appear here.
     // A `const` cannot be declared inside an `if` block in PHP, so this uses
     // `define()` instead — functionally the same fixed, explicit list.
-    define('CSRF_EXEMPT_READS', ['voice_clip']);
+    // notebook_asset: a media tag cannot send a token. Read only, path validated to the
+    // notebook's assets/ folder (NotebookHandler::rawAsset, NotebookService::assetPath).
+    define('CSRF_EXEMPT_READS', ['voice_clip', 'notebook_asset']);
 
     // CSRF Validation — see PLUGIN_STANDARDS.md Lesson 3.
     // local_prepend.php (auto_prepend_file) validates CSRF from $_POST or X-CSRF-TOKEN
@@ -153,7 +156,7 @@ if (isset($_GET['action'])) {
         // VOICE_INPUT.md R2: voice_transcribe posts a base64 clip up to 4 MiB
         // decoded (~5.4 MB base64) and its own engine call can take up to 30s,
         // so it shares this same allowance.
-        if (in_array($action, ['save_file', 'save_file_chunk', 'save_pasted_image', 'voice_transcribe'])) {
+        if (in_array($action, ['save_file', 'save_file_chunk', 'save_pasted_image', 'voice_transcribe', 'notebook_asset_upload', 'notebook_import'])) {
             @ini_set('post_max_size', '64M');
             @ini_set('upload_max_filesize', '64M');
             set_time_limit(120);
@@ -185,6 +188,16 @@ if (isset($_GET['action'])) {
             // against /^v_[0-9a-f]{16}$/ before it ever reaches a path).
             ob_end_clean();
             \AICliAgents\Handlers\VoiceHandler::rawVoiceClip();
+        } elseif ($action === 'notebook_asset') {
+            // ARTEFACTS_CONTRACT.md section 5: raw image/video/audio/pdf from the notebook's
+            // assets/ folder; the path is validated inside the handler. CSRF-exempt (read only).
+            ob_end_clean();
+            \AICliAgents\Handlers\NotebookHandler::rawAsset();
+        } elseif ($action === 'notebook_export') {
+            // Raw download. NOT CSRF-exempt: the link carries csrf_token in its query, like
+            // workspace_export_download.
+            ob_end_clean();
+            \AICliAgents\Handlers\NotebookHandler::rawExport();
         } elseif ($action === 'get_task_status') {
             // Task status file is already JSON - read and output directly.
             // SECURITY: $user gets interpolated into a filesystem path so
@@ -226,6 +239,7 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\VoiceHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\FavouritesHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\AutoContinueHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\NotebookHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
 
             ob_end_clean();

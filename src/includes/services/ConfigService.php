@@ -101,6 +101,19 @@ class ConfigService {
             // '0' here makes that explicit instead of relying on the service's
             // own fallback. Settings > Configuration > Plugin management.
             'admin_tools_enabled'                  => '0',
+            // ARTEFACTS.md (Notebook): humans change these on Settings > Notebook
+            // only. An agent may not: none of them is on AdminService::SETTINGS_ALLOWLIST.
+            // notebook_folder is the folder name in each project root
+            // (^[A-Za-z0-9._-]{1,40}$, no leading dot, never 'assets').
+            'notebook_enabled'                     => '1',
+            'notebook_auto_open'                   => '0',
+            'notebook_folder'                      => 'notebook',
+            'notebook_allow_prod_secrets'          => '0',
+            'notebook_spoken_notice'               => '0',
+            // ARTEFACTS_CONTRACT.md section 10: the agent journal (1 = on) and the quiet
+            // hours for spoken notices ("HH:MM-HH:MM", may wrap midnight, empty = none).
+            'notebook_journal'                     => '0',
+            'notebook_quiet_hours'                 => '',
             // CONTINUE_ON_RESTART.md (2026-09-09): moved here from the Relay's
             // settings.json — this governs whether a WORKSPACE resumes its own
             // work after a restart, not Relay messaging. On by default, same as
@@ -312,6 +325,7 @@ class ConfigService {
         $oldHealthSchedule  = $config['health_check_schedule'] ?? '*/30 * * * *';
         $oldAdminTools      = (string)($config['admin_tools_enabled'] ?? '0');
         $oldVoiceEnabled    = (string)($config['voice_enabled'] ?? '0');
+        $oldNotebookEnabled = (string)($config['notebook_enabled'] ?? '1');
 
         $changedKeys = [];
         foreach ($newConfig as $key => $val) {
@@ -374,6 +388,21 @@ class ConfigService {
                 AdminMcpTools::ensureMcpRegistered();
             } catch (\Throwable $e) {
                 LogService::log("AdminMcpTools::ensureMcpRegistered() failed after config save: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
+            }
+        }
+
+        // AGENT_INJECTED_GUIDANCE.md R6: the guidance block in each agent's instruction file names the Voice and
+        // Notebook features only while they are on, so a real change of one of the three switches writes it again.
+        // admin_tools_enabled already re-projects through ensureMcpRegistered(); this covers the other two keys.
+        $newNotebookEnabled = (string)($config['notebook_enabled'] ?? '1');
+        $guidanceChanged = ($newAdminTools !== $oldAdminTools)
+            || ((string)($config['voice_enabled'] ?? '0') !== $oldVoiceEnabled)
+            || ($newNotebookEnabled !== $oldNotebookEnabled);
+        if ($guidanceChanged && \class_exists(\AICliAgents\Services\Hub\HubProjector::class)) {
+            try {
+                \AICliAgents\Services\Hub\HubProjector::projectPolicy();
+            } catch (\Throwable $e) {
+                LogService::log("HubProjector::projectPolicy() failed after config save: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
             }
         }
 
@@ -1026,6 +1055,10 @@ class ConfigService {
                 // AGENT_VOICE.md R14: the same rule for the workspace's own voice.
                 if (!array_key_exists('tts_voice', $session) && array_key_exists('tts_voice', $prior)) {
                     $session['tts_voice'] = $prior['tts_voice'];
+                }
+                // AGENT_SELF_SERVICE.md R8: and for the workspace's own speed.
+                if (!array_key_exists('tts_speed', $session) && array_key_exists('tts_speed', $prior)) {
+                    $session['tts_speed'] = $prior['tts_speed'];
                 }
             } else {
                 // A genuinely new workspace — stamp it now if the caller did not.

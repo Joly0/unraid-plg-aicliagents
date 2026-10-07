@@ -76,6 +76,7 @@ class VoiceHandler
             case 'voicemail_set_spoken_name': return self::voicemailSetSpokenName();
             // AGENT_VOICE.md R14 — Forgejo #377.
             case 'voice_set_workspace_voice': return self::voiceSetWorkspaceVoice();
+            case 'voice_set_workspace_speed': return self::voiceSetWorkspaceSpeed();
             // AGENT_VOICE.md "#323 guided setup" — Forgejo #323.
             case 'voice_engine_prepare':return self::voiceEnginePrepare();
             case 'check_voice_engine':  return VoiceEngineSetupService::check(self::engineParam());
@@ -223,6 +224,22 @@ class VoiceHandler
             : ['status' => 'ok', 'voice' => $r['voice']];
     }
 
+    /**
+     * Set or clear one workspace's own speech speed (AGENT_SELF_SERVICE.md R8). An
+     * empty `speed` clears it, so the Settings speed is used again.
+     */
+    private static function voiceSetWorkspaceSpeed(): array
+    {
+        $workspaceId = trim((string)($_REQUEST['workspaceId'] ?? ''));
+        if ($workspaceId === '') {
+            return ['status' => 'error', 'message' => 'workspaceId is required.'];
+        }
+        $r = VoiceService::setWorkspaceSpeed($workspaceId, (string)($_REQUEST['speed'] ?? ''));
+        return isset($r['error'])
+            ? ['status' => 'error', 'message' => (string)$r['error']]
+            : ['status' => 'ok', 'speed' => $r['speed']];
+    }
+
     // ---- guided natural-voice setup (AGENT_VOICE.md "#323 guided setup") ------
     // The two writes accept POST only; CSRF is checked centrally in AICliAjax.php.
     // check_voice_engine is a read (the Settings page polls it). None of the three
@@ -274,6 +291,7 @@ class VoiceHandler
                 'voicemail_list', 'voicemail_mark_heard', 'voicemail_replay', 'voicemail_set_mode',
                 'voicemail_delete', 'voicemail_delete_all', 'voicemail_set_spoken_name',
                 'voice_set_workspace_voice',
+                'voice_set_workspace_speed',
                 'voice_engine_prepare', 'check_voice_engine', 'voice_engine_finish', 'voice_engine_status', 'voice_engine_download'];
     }
 
@@ -437,6 +455,15 @@ class VoiceHandler
         if ($voice !== '' && !VoiceService::isValidVoiceId($voice)) {
             return ['status' => 'error', 'message' => "'$voice' is not a valid voice id."];
         }
+        // AGENT_SELF_SERVICE.md R8: an optional speed to hear (a Test click in the Voice dialog).
+        $speedArg = null;
+        $speedRaw = trim((string)($_REQUEST['speed'] ?? ''));
+        if ($speedRaw !== '') {
+            $speedArg = VoiceService::normaliseSpeed($speedRaw);
+            if ($speedArg === null) {
+                return ['status' => 'error', 'message' => "'$speedRaw' is not a valid speed."];
+            }
+        }
         if ($purpose === 'announce') {
             $workspaceId = trim((string)($_REQUEST['workspaceId'] ?? ''));
             $record = $workspaceId !== '' ? VoiceMailService::resolveWorkspace($workspaceId)['record'] : null;
@@ -448,6 +475,8 @@ class VoiceHandler
                 ['spoken_name' => (string)($_REQUEST['spokenName'] ?? '')] + $record));
             $sentence = $intro !== '' ? $intro . ' ' . $sentence : $sentence;
             if ($voice === '') $voice = VoiceService::workspaceVoiceFor($record);
+            // The announce test plays at the speed the workspace will really use.
+            if (trim((string)($_REQUEST['speed'] ?? '')) === '') $speedArg = VoiceService::workspaceSpeedFor($record) ?: null;
         }
         $caller = AdminService::callerIdentity();
         $actorContext = [
@@ -459,7 +488,7 @@ class VoiceHandler
         // returned clip itself, so this one test must not also fan the same
         // confirmation out through the live voice channel to every open tab.
         $direct = ((string)($_REQUEST['direct'] ?? '0')) === '1' || $purpose === 'voice' || $purpose === 'announce';
-        $result = VoiceService::speak($sentence, $actorContext, $voice !== '' ? $voice : null, true, !$direct);
+        $result = VoiceService::speak($sentence, $actorContext, $voice !== '' ? $voice : null, true, !$direct, false, $speedArg);
         if ($direct) {
             $result['text'] = $sentence;
             if (($result['mode'] ?? '') === 'audio' && isset($result['clipId'])) {

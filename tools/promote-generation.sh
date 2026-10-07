@@ -63,11 +63,12 @@ aicli_activate_generation "$EMHTTP" "$STAGE" "$GEN_ID"
 # left the root AICliAjax.php and .page files on an older version (for #367,
 # on the version that loaded code through the src link twice). Temp file plus
 # rename, so a request reads the whole old file or the whole new one.
-for f in AICliAjax.php AICliAgentsManager.page AICliAgents.page AICliMenuIcon.page AICliOpenFile.page AICliRelayMcp.page ArrayStopWarning.page README.md; do
+for f in AICliAjax.php AICliAgentsManager.page AICliAgents.page AICliMenuIcon.page AICliOpenFile.page ArrayStopWarning.page README.md; do
   if [ -f "$EMHTTP/src/$f" ]; then
     cp -f "$EMHTTP/src/$f" "$EMHTTP/$f.tmp.$$" && mv -f "$EMHTTP/$f.tmp.$$" "$EMHTTP/$f"
   fi
 done
+rm -f "$EMHTTP/AICliRelayMcp.page"   # moved to src/AICliRelayMcp.php; the old root copy made Unraid log "Invalid .page format"
 echo "active=$(readlink "$EMHTTP/src")"
 grep -o 'version="[^"]*"' "/var/log/plugins/$NAME.plg" | head -1
 tmux list-sessions 2>/dev/null | wc -l | sed 's/^/tmux sessions: /'

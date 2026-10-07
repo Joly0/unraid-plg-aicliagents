@@ -165,6 +165,30 @@ class UtilityHandler {
     }
 
     private static function save() {
+        // ARTEFACTS.md: normalise the five Notebook settings (a person's form post).
+        // A bad folder name keeps the stored one; the rest of the form still saves.
+        foreach (['notebook_enabled', 'notebook_auto_open', 'notebook_allow_prod_secrets', 'notebook_spoken_notice', 'notebook_journal'] as $nbKey) {
+            if (array_key_exists($nbKey, $_POST)) $_POST[$nbKey] = ((string)$_POST[$nbKey] === '1') ? '1' : '0';
+        }
+        // Quiet hours: HH:MM-HH:MM (may wrap midnight) or empty. A bad value keeps the stored one.
+        if (array_key_exists('notebook_quiet_hours', $_POST)) {
+            $nbQuiet = trim((string)$_POST['notebook_quiet_hours']);
+            if ($nbQuiet === '' || preg_match('/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/', $nbQuiet) === 1) {
+                $_POST['notebook_quiet_hours'] = $nbQuiet;
+            } else {
+                $_POST['notebook_quiet_hours'] = (string)(\AICliAgents\Services\ConfigService::getConfig()['notebook_quiet_hours'] ?? '');
+            }
+        }
+        if (array_key_exists('notebook_folder', $_POST)) {
+            $nbFolder = is_array($_POST['notebook_folder']) ? '' : trim((string)$_POST['notebook_folder']);
+            $nbOk = preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,39}$/', $nbFolder) === 1 && strtolower($nbFolder) !== 'assets' && strpos($nbFolder, '..') === false;
+            if ($nbOk) {
+                $_POST['notebook_folder'] = $nbFolder;
+            } else {
+                $stored = (string)(\AICliAgents\Services\ConfigService::getConfig()['notebook_folder'] ?? 'notebook');
+                $_POST['notebook_folder'] = $stored !== '' ? $stored : 'notebook';
+            }
+        }
         saveAICliConfig($_POST);
         // HOME_BACKUP.md: the Manager UI no longer posts backup_* fields here
         // (#287: each home saves its own settings through

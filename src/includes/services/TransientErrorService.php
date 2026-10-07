@@ -173,6 +173,15 @@ final class TransientErrorService
                     ],
                     'chrome' => [
                         'codex-footer' => '/^(?:⏎|Enter)\s+send\b|\bctrl\s*\+\s*j\s+newline\b|^⌃J\s+newline\b/iu',
+                        // The idle prompt box and the status footer sit under every Codex error (2026-10-06, real pane
+                        // tests/fixtures/transient-error/codex-capacity-recap.txt): they are not new output.
+                        'codex-prompt-placeholder' => '/^Ask\s+Codex\s+to\s+do\s+anything\b/iu',
+                        'codex-status-footer' => '/^[\w.\-]+(?:\s+[\w.\-]+)?\s+(?:minimal|low|medium|high|xhigh)\s+·\s+[~\/]/iu',
+                    ],
+                    // Codex prints an idle "↳ Recap:" summary (and a "Next:" line) UNDER the error once it has been idle a
+                    // while. That is its own summary, not new work: the whole block is dropped before the walk.
+                    'dropBlocks' => [
+                        'codex-recap' => '/^↳\s*Recap:/u',
                     ],
                 ],
                 // Gemini CLI and its fork Qwen Code: "✕ [API Error: ... 503 ... overloaded ...]".
@@ -220,6 +229,21 @@ final class TransientErrorService
         $lines = array_slice($lines, -self::TAIL_LINES);
         $p = self::patterns();
         $agent = $p['agents'][$agentId] ?? [];
+
+        // An agent's own idle summary under the error (Codex "↳ Recap:") is not new output: drop its block (the start row
+        // and the rows after it up to a blank row) so the error stays the newest block.
+        foreach ((array)($agent['dropBlocks'] ?? []) as $dropRe) {
+            $kept = []; $dropping = false;
+            foreach ($lines as $row) {
+                $text = self::stripLead(self::primaryColumn((string)$row));
+                if (!$dropping && PaneInputRules::safeMatch($dropRe, $text)) { $dropping = true; continue; }
+                if ($dropping) {
+                    if (trim((string)$row) === '') { $dropping = false; } else { continue; }
+                }
+                $kept[] = $row;
+            }
+            $lines = $kept;
+        }
 
         // Busy or retrying: the markers sit in the bottom rows (footer, status).
         $busy = array_merge($p['busy'], (array)($agent['busy'] ?? []));

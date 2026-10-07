@@ -30,7 +30,7 @@ if (!function_exists('aicli_event_stream_channels')) {
     function aicli_event_stream_channels(array $agentIds): array {
         $channels = [
             'activity', 'workspaces', 'storage_status', 'deploy',
-            'favourites', 'voicemail', 'voice', 'migrate_progress',
+            'favourites', 'voicemail', 'voice', 'migrate_progress', 'notebook',
         ];
         foreach ($agentIds as $agentId) {
             $agentId = (string) $agentId;

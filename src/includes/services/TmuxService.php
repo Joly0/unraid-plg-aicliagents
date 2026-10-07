@@ -1264,6 +1264,8 @@ class TmuxService {
         $attempt = 0;
         foreach (self::ENTER_LADDER_US as $wait) {
             $attempt++;
+            // 2026-10-02: a pane in tmux copy mode takes Enter for tmux, not for the agent.
+            self::leaveCopyMode($name, $sock);
             $sent = self::runTmuxAt($sock, ['send-keys', '-t', $name, 'Enter']);
             if (($sent['rc'] ?? -1) !== 0) return ['sent' => false, 'confirmed' => false, 'attempts' => $attempt];
             self::pause($wait);
@@ -1298,6 +1300,29 @@ class TmuxService {
             if ($onLine === true && $attempt === self::STUCK_NUDGE_AFTER) self::nudgeStuckAgent($name, $sock);
         }
         return ['sent' => true, 'confirmed' => false, 'attempts' => $attempt];
+    }
+
+    /**
+     * 2026-10-02 (docs/specs/PASTE_ENTER_CONFIRM.md "Follow-up 2026-10-02"): a pane in tmux
+     * copy mode (the terminal's scroll gesture turns it on) handles `send-keys Enter` itself:
+     * the key never reaches the agent. The paste still lands in the agent's input box, so the
+     * notice sat there for ever and the log said "Enter did not take ... pane mode '1'"
+     * (saas-businessOS, 13:55). Before each Enter, a pane that is in a mode is taken out of it
+     * (`send-keys -X cancel`, the same call the phone scroll code uses to exit). A pane that
+     * is not in a mode is not touched. Never throws.
+     *
+     * @return bool true when copy mode was left
+     */
+    private static function leaveCopyMode(string $name, string $sock): bool {
+        try {
+            $r = self::runTmuxAt($sock, ['display-message', '-p', '-t', $name, '#{pane_in_mode}']);
+            if (trim((string)($r['out'] ?? '')) !== '1') return false;
+            self::runTmuxAt($sock, ['send-keys', '-t', $name, '-X', 'cancel']);
+            LogService::log("Pane $name was in tmux copy mode, which takes Enter for itself; left copy mode before pressing Enter.", LogService::LOG_INFO, "TmuxService");
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
     }
 
     /** #371: after this many Enters that did not take, the agent process is inspected and woken. */
@@ -1659,6 +1684,29 @@ class TmuxService {
     }
 
     /**
+     * PURE (2026-10-02): our own notice, complete, WITH other text after it. matchOwnNotice()
+     * refuses it on purpose (Enter is never pressed on words a person typed after our notice),
+     * but the pane then fell through to 'selector-cursor' and the tray said "a menu was open".
+     * This names the real state so the tray can say it. It changes no delivery rule.
+     *
+     * @return array{kind:string,marker:string,extra:string}|null
+     */
+    private static function ownNoticeWithText(string $text): ?array {
+        $flat = self::squashSpace($text);
+        if ($flat === '') return null;
+        foreach (self::OWN_NOTICE_OPENINGS as [$kind, $opening, $ending]) {
+            $o = self::squashSpace($opening); $e = self::squashSpace($ending);
+            if ($o === '' || $e === '' || strpos($flat, $o) !== 0) continue;
+            $p = strpos($flat, $e, strlen($o));
+            if ($p === false) continue;
+            $extra = substr($flat, $p + strlen($e));
+            if ($extra === '') continue;
+            return ['kind' => $kind, 'marker' => self::noticeMarker($opening), 'extra' => $extra];
+        }
+        return null;
+    }
+
+    /**
      * The last line that starts with a prompt glyph, as [index, text after the glyph];
      * [-1, null] when there is none. Same glyph set and rule as noticeStillOnInputLine().
      *
@@ -1849,7 +1897,7 @@ class TmuxService {
      * never land on top of half-typed text, so it says not-ready for these.
      * For a dictation Enter, that typed text is exactly what must be submitted.
      */
-    private const TYPED_INPUT_REASONS = ['selector-cursor', 'unknown-idle-shape', 'box-typing'];
+    private const TYPED_INPUT_REASONS = ['selector-cursor', 'task-list-selection', 'unknown-idle-shape', 'box-typing'];
 
     /**
      * A prompt line: indent, an optional box side "│", the glyph, the typed
@@ -1940,7 +1988,7 @@ class TmuxService {
 
         $isRule = static fn(string $l): bool => (bool)preg_match('/^[\s\x{00A0}─━═╌╍│┃╹╰╯╭╮_-]*$/u', $l);
         $isBorder = static fn(string $l): bool => $isRule($l) && trim($l, " \t\u{00A0}") !== '';
-        $blockOthers = array_diff_key($rules['block'] ?? [], ['selector-cursor' => 1, 'option-selector' => 1]);
+        $blockOthers = array_diff_key($rules['block'] ?? [], ['selector-cursor' => 1, 'task-list-selection' => 1, 'option-selector' => 1]);
         for ($i = $at - 1; $i >= $tailStart; $i--) {
             $line = (string)$lines[$i];
             if ($isRule($line)) break;
@@ -2116,6 +2164,19 @@ class TmuxService {
             if ($at === -1 && \AICliAgents\Services\PaneInputRules::safeMatch((string)$re, $tail)) $at = PHP_INT_MAX;
             if ($at > $blockAt) { $blockAt = $at; $blockReason = (string)$reason; }
         }
+        // Claude's footer task list while background agents run: a "↑/↓ to select" row, then "❯ ● main" and one row per agent
+        // ("❯ ◯ name  task"). The cursor row sits BELOW the hint row, so it wins by position as a plain selector cursor. The pane is
+        // just as blocked, but the person should be told what it is. Only that exact shape is relabelled: the pane must already be
+        // blocked as a plain selector cursor, the cursor row must be a task-list row, and the hint row must sit just above the list.
+        // A real menu (numbered options, its own hint) keeps its own reason (2026-10-06, saas-businessOS).
+        if ($blockReason === 'selector-cursor') {
+            $hintAt = -1; $listAt = -1;
+            foreach ($tailLines as $i => $line) {
+                if (preg_match('/^[^\S\r\n]*\x{2191}\/\x{2193}[^\S\r\n]+to[^\S\r\n]+select\b/u', (string)$line)) $hintAt = $i;
+                if (preg_match('/^[^\S\r\n]*[\x{276F}][^\S\r\n]+[\x{25CF}\x{25EF}\x{25CB}][^\S\r\n]+\S/u', (string)$line)) $listAt = $i;
+            }
+            if ($hintAt >= 0 && $listAt > $hintAt && $listAt - $hintAt <= 4) $blockReason = 'task-list-selection';
+        }
 
         // #320: a notice the PLUGIN typed is still on the input line, unsent (its Enter
         // did not take, or the PHP process died between the paste and the Enter). Its
@@ -2133,6 +2194,11 @@ class TmuxService {
             $noBlockBelow = $blockAt <= $ruled['bottom'] - (count($lines) - count($tailLines));
             if ($noBlockBelow && self::matchOwnNotice($ruled['text']) !== null) {
                 return ['ready'=>false, 'reason'=>'own-notice-unsent'];
+            }
+            // 2026-10-02: our notice with other text after it. Not ready, nothing is pressed;
+            // the reason says what the person sees instead of "a menu was open".
+            if ($noBlockBelow && self::ownNoticeWithText($ruled['text']) !== null) {
+                return ['ready'=>false, 'reason'=>'own-notice-with-text'];
             }
             // #371: our notice waits in Claude Code's message queue (the agent is busy).
             // Its queued "❯ [SYSTEM RELAY …" line matched selector-cursor ("a menu was
@@ -2942,6 +3008,7 @@ class TmuxService {
             'capture-failed'     => "the screen couldn't be read",
             'option-selector'    => 'a menu was open',
             'selector-cursor'    => 'a menu was open',
+            'task-list-selection' => "Claude's task list is showing and may have the selection — check the workspace, or use Force inject",
             'yes-no'             => 'it was asking a yes/no question',
             'do-you-want'        => 'it was asking a question',
             'proceed'            => 'it was asking you to confirm something',
@@ -2956,6 +3023,9 @@ class TmuxService {
             'own-notice-stuck'   => 'a Relay notice could not be submitted — open the workspace to check',
             // #371: Claude Code holds our notice in its message queue while it is busy.
             'own-notice-queued'  => 'the agent is busy — the notice is queued and is sent when its current step ends',
+            // 2026-10-02: our notice is in the input box and other text follows it. Enter is
+            // never pressed on words a person typed, so a person decides.
+            'own-notice-with-text' => 'the notice is in the input box with other text after it — press Enter in the workspace to send both, or clear the box',
         ];
         return $map[$reason] ?? 'the agent looked busy';
     }

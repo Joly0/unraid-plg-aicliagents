@@ -151,11 +151,14 @@ log_ok "Home backup schedule synced from config."
 # Verify UI entry points (D-186: Ensure entry points exist for emhttp)
 cd "$EMHTTP_DEST"
 MISSING_ENTRY=0
-for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php AICliMenuIcon.page AICliOpenFile.page AICliRelayMcp.page ArrayStopWarning.page; do
+for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php AICliMenuIcon.page AICliOpenFile.page ArrayStopWarning.page; do
     if [ ! -f "$f" ]; then
         cp -f "src/$f" "$f"
         MISSING_ENTRY=$((MISSING_ENTRY + 1))
     fi
 done
+# AICliRelayMcp.page was never a menu page (it has no page header). Unraid logged "Invalid .page format" for it on every
+# page. It is now src/AICliRelayMcp.php, loaded by AICliAjax.php, so the old root copy must go.
+rm -f AICliRelayMcp.page
 [ "$MISSING_ENTRY" -gt 0 ] && log_status "  > Restored $MISSING_ENTRY missing UI entry point(s)."
 cd - > /dev/null

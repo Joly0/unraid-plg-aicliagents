@@ -309,6 +309,60 @@ class VoiceService {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Per-workspace speed — AGENT_SELF_SERVICE.md R8
+    // ------------------------------------------------------------------
+
+    const SPEED_MIN = 0.5;
+    const SPEED_MAX = 2.0;
+
+    /**
+     * A speed as a clean string ("1.2"), or null when it is not a number from
+     * 0.5 to 2.0 with at most two decimals. The empty string is not a speed.
+     */
+    public static function normaliseSpeed(string $speed): ?string {
+        $speed = trim($speed);
+        if (!preg_match('/^\d(\.\d{1,2})?$/', $speed)) return null;
+        $f = (float)$speed;
+        if ($f < self::SPEED_MIN || $f > self::SPEED_MAX) return null;
+        return rtrim(rtrim(number_format($f, 2, '.', ''), '0'), '.');
+    }
+
+    /** The workspace's own speed, or '' when it has none or a stored value is bad (the default applies). */
+    public static function workspaceSpeedFor(?array $workspace): string {
+        if ($workspace === null) return '';
+        $s = trim((string)($workspace['tts_speed'] ?? ''));
+        return $s === '' ? '' : (self::normaliseSpeed($s) ?? '');
+    }
+
+    /**
+     * Set (or clear, with '') one workspace's speed. Same shape as setWorkspaceVoice().
+     * Returns ['speed' => ...] or ['error' => ...].
+     */
+    public static function setWorkspaceSpeed(string $workspaceId, string $speed): array {
+        try {
+            $speed = trim($speed);
+            if ($speed !== '') {
+                $norm = self::normaliseSpeed($speed);
+                if ($norm === null) {
+                    return ['error' => "'$speed' is not a valid speed. Use a number from 0.5 (slower) to 2.0 (faster), for example 1.2."];
+                }
+                $speed = $norm;
+            }
+            $record = self::findWorkspace($workspaceId);
+            if ($record === null) {
+                return ['error' => 'That workspace no longer exists.'];
+            }
+            $record['tts_speed'] = $speed;
+            if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
+                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the speed.'];
+            }
+            return ['speed' => $speed];
+        } catch (\Throwable $e) {
+            return ['error' => 'Could not save the speed.'];
+        }
+    }
+
     /** The speech (TTS) engine API key, or '' when none is stored. Never returned by any tool/AJAX result. */
     private static function apiKey(): string {
         return (string)(SecretService::getAgentSecrets()[self::TOKEN_KEY] ?? '');
@@ -347,7 +401,7 @@ class VoiceService {
      * @param array{workspaceId?:string,agentId?:string,name?:string} $actorContext
      * @return array{mode?:string,chars?:int,clipId?:string,error?:string,reason?:string,fallback?:bool,message?:string}
      */
-    public static function speak(string $text, array $actorContext, ?string $voice = null, bool $bypassSwitches = false, bool $publish = true): array {
+    public static function speak(string $text, array $actorContext, ?string $voice = null, bool $bypassSwitches = false, bool $publish = true, bool $voiceWins = false, ?string $speedOverride = null): array {
         try {
             if (!$bypassSwitches) {
                 $switchConfig = ConfigService::getConfig();
@@ -472,7 +526,8 @@ class VoiceService {
                 // over the agent's `voice`, which wins over the Settings default. It
                 // applies to the engine only; browser speech keeps the old rule.
                 $agentVoice = ($voice !== null && trim($voice) !== '') ? trim($voice) : '';
-                $workspaceVoice = ($ttsUrl !== '' && !$bypassSwitches) ? self::workspaceVoiceFor($workspaceRecord) : '';
+                // AGENT_SELF_SERVICE.md R5: an audition ($voiceWins) hears the voice that was asked for, not the workspace's own.
+                $workspaceVoice = ($ttsUrl !== '' && !$bypassSwitches && !$voiceWins) ? self::workspaceVoiceFor($workspaceRecord) : '';
                 if ($voiceMode === VoiceMailService::MODE_MAIL && !$bypassSwitches) {
                     // R14: Voice mail keeps the voice the message would have used,
                     // so a replay sounds like the workspace's own voice.
@@ -485,7 +540,13 @@ class VoiceService {
                 // The voice without the workspace's own: the agent's, else the default.
                 $baseVoiceId = $agentVoice !== '' ? $agentVoice : (string)($config['tts_voice'] ?? 'af_heart');
                 $voiceId = $workspaceVoice !== '' ? $workspaceVoice : $baseVoiceId;
+                // AGENT_SELF_SERVICE.md R8: the speed asked for (a preview or a test), else the
+                // workspace's own speed, else the Settings speed. Engine mode only.
                 $speed = (string)($config['tts_speed'] ?? '1.0');
+                $wsSpeed = ($ttsUrl !== '' && !$bypassSwitches) ? self::workspaceSpeedFor($workspaceRecord) : '';
+                if ($wsSpeed !== '') $speed = $wsSpeed;
+                $askedSpeed = $speedOverride !== null ? self::normaliseSpeed($speedOverride) : null;
+                if ($askedSpeed !== null) $speed = $askedSpeed;
                 $excerpt = self::excerpt($text);
 
                 // docs/specs/VOICE_MAIL.md — `speak` mode: play it exactly as before
@@ -1186,6 +1247,35 @@ class VoiceService {
             if (($synth['status'] ?? '') !== 'ok') {
                 return ['mode' => 'speech', 'message' => (string)($synth['message'] ?? 'The voice engine failed.')];
             }
+            return ['mode' => 'audio', 'clipId' => (string)$synth['clipId']];
+        } catch (\Throwable $e) {
+            return ['mode' => 'speech', 'message' => 'The voice engine failed.'];
+        }
+    }
+
+    /**
+     * One piece of a Notebook note read aloud (docs/specs/NOTEBOOK_READ_ALOUD.md R5). The person asked for it,
+     * so there is no rate limit, no queue cap, nothing is published to other tabs and nothing is kept as voice
+     * mail. The workspace's own voice and speed win over Settings. No engine set: `speech` (the page speaks).
+     *
+     * @param array<string,mixed>|null $workspace the workspace record (null = Settings voice)
+     * @return array{mode:string,clipId?:string,message?:string}
+     */
+    public static function readChunkClip(string $text, ?array $workspace): array {
+        try {
+            $config = ConfigService::getConfig();
+            $ttsUrl = trim((string)($config['tts_url'] ?? ''));
+            $text = trim($text);
+            if ($ttsUrl === '' || $text === '') return ['mode' => 'speech'];
+            $voiceId = self::workspaceVoiceFor($workspace);
+            if ($voiceId === '') $voiceId = (string)($config['tts_voice'] ?? 'af_heart');
+            $speed = self::workspaceSpeedFor($workspace);
+            if ($speed === '') $speed = (string)($config['tts_speed'] ?? '1.0');
+            $dir = self::dir();
+            if (!is_dir($dir)) @mkdir($dir, 0777, true);
+            self::sweepOldClips($dir);
+            $synth = self::synthesize($dir, $ttsUrl, self::capText($text), $voiceId, $speed);
+            if (($synth['status'] ?? '') !== 'ok') return ['mode' => 'speech', 'message' => (string)($synth['message'] ?? 'The voice engine failed.')];
             return ['mode' => 'audio', 'clipId' => (string)$synth['clipId']];
         } catch (\Throwable $e) {
             return ['mode' => 'speech', 'message' => 'The voice engine failed.'];

@@ -244,6 +244,24 @@ final class EventLedger {
             $known = ['favourite.added', 'favourite.updated', 'favourite.removed', 'favourite.opened'];
             return in_array($kind, $known, true) ? $kind : 'favourite.updated';
         }
+        if ($channel === 'notebook') {
+            // ARTEFACTS_CONTRACT.md section 5: NotebookService publishes {workspaceId, id, kind, ...}.
+            // kind: created|updated|moved|archived|restored|item|answer|comment|secret. An empty or
+            // garbled payload still maps to a real kind. A `secret` message is a reveal only when
+            // action=revealed; setting or clearing a secret is an ordinary update. No payload ever
+            // carries a secret value, a file's content or a comment's text.
+            switch ((string)($payload['kind'] ?? '')) {
+                case 'created':  return 'artefact.created';
+                case 'moved':    return 'artefact.moved';
+                case 'archived': return 'artefact.archived';
+                case 'restored': return 'artefact.restored';
+                case 'item':     return 'artefact.item_changed';
+                case 'answer':   return 'artefact.answered';
+                case 'comment':  return 'artefact.commented';
+                case 'secret':   return (string)($payload['action'] ?? '') === 'revealed' ? 'artefact.secret_revealed' : 'artefact.updated';
+                default:         return 'artefact.updated';
+            }
+        }
         return null;
     }
 
@@ -305,6 +323,25 @@ final class EventLedger {
                     $agentId = (string)($payload['agentId'] ?? $label);
                     $progress = (string)($payload['progress'] ?? '');
                     return trim("install $agentId" . ($progress !== '' ? " {$progress}%" : ''));
+                case strncmp($kind, 'artefact.', 9) === 0: {
+                    // Plain English, for the ledger and the tray. Title and author only: never content.
+                    $title = (string)($payload['title'] ?? '');
+                    $what = $title !== '' ? '"' . $title . '"' : 'a notebook item';
+                    $by = (string)($payload['by'] ?? '');
+                    $who = $by === '' ? 'Someone' : ($by === 'human' ? 'A person' : (strncmp($by, 'agent:', 6) === 0 ? substr($by, 6) : $by));
+                    switch ($kind) {
+                        case 'artefact.created':       return "$who added $what to the notebook";
+                        case 'artefact.moved':         return "$who moved $what to " . ((string)($payload['area'] ?? '') ?: 'another area');
+                        case 'artefact.archived':      return !empty($payload['purged']) ? "$what was removed from the notebook after approval" : "$who archived $what";
+                        case 'artefact.restored':      return "$who restored $what from the archive";
+                        case 'artefact.item_changed':  return "$who changed the result of a step in $what";
+                        case 'artefact.answered':      return "$who answered a question in $what";
+                        case 'artefact.commented':     return "$who commented on $what";
+                        case 'artefact.secret_revealed':
+                            return "$who revealed the " . ((string)($payload['field'] ?? '') ?: 'secret') . " of $what";
+                        default:                       return "$who changed $what";
+                    }
+                }
                 case $kind === 'storage.status':
                     return 'storage status published';
                 case $kind === 'storage.maintenance':

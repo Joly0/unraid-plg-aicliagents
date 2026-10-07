@@ -462,6 +462,16 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    # Forgejo #433 (docs/specs/WORKSPACE_SESSION_END_TRACE.md): the session is gone. If the tmux server that held it
+    # is gone too, with no "session closed" line in the debug log, it was killed from outside (a signal, the
+    # out-of-memory killer) or the box restarted. Say so, so a vanished session can be explained.
+    _OLD_SRV_PID_FILE="${TMUX_TMPDIR:-/tmp/unraid-aicliagents/tmux/s-$ID}/server.pid"
+    if [ -r "$_OLD_SRV_PID_FILE" ]; then
+        _OLD_SRV_PID="$(cat "$_OLD_SRV_PID_FILE" 2>/dev/null)"
+        if [ -n "$_OLD_SRV_PID" ] && ! kill -0 "$_OLD_SRV_PID" 2>/dev/null; then
+            log_aicli "WARN" 2 "The tmux server (pid $_OLD_SRV_PID) that held session $SESSION ended with no 'session closed' record. It was killed from outside or the box restarted. Last kernel kill lines: $(dmesg 2>/dev/null | grep -i -E 'killed process|out of memory' | tail -n 2 | tr '\n' ';')"
+        fi
+    fi
     RUN_SCRIPT="$USER_WORK_DIR/aicli-run-$ID.sh"
 
     # 1. Minimal Header (Safe injections only)
@@ -742,6 +752,14 @@ _build_fresh_cmd() {
     [ -n "$_eff" ]    && _cmd="$_cmd $_eff"
     [ -n "$_plugin" ] && _cmd="$_cmd $_plugin"
     printf '%s' "$_cmd"
+}
+
+# Deterministic repair of agent state at every start (damaged SQLite files,
+# an OpenCode resume id its store does not hold). Spec: docs/specs/AGENT_STATE_PREFLIGHT.md
+[ -r "$PLUGIN_SRC/scripts/agent-state-preflight.sh" ] && . "$PLUGIN_SRC/scripts/agent-state-preflight.sh"
+_aicli_preflight_notice() {
+    [ -n "${AICLI_PREFLIGHT_NOTICE:-}" ] || return 0
+    printf '\033[33m[AI Cli Agents] %s Your saved conversation is kept.\033[0m\n' "$AICLI_PREFLIGHT_NOTICE"
 }
 
 # Return the newest Claude conversation id for THIS workspace only. Claude's
@@ -1073,6 +1091,34 @@ while true; do
        else
            log_aicli "WARN" 1 "OpenCode #144: DB still held after guard — SKIPPING WAL cleanup to avoid corruption"
        fi
+
+       # --- Preflight: repair a damaged store, then make sure the resume id is in
+       #     THE store this launch uses (the id may have been found in another one).
+       if declare -f aicli_sqlite_preflight >/dev/null 2>&1; then
+           if [ -z "$(_oc_db_holders)" ]; then
+               aicli_sqlite_preflight opencode OpenCode "$db_file"
+               _aicli_preflight_notice
+           fi
+           _oc_chat_checked="$(aicli_opencode_resume_guard "$db_file" "$frozen_chat_id" "$_oc_ws_path" "${AICLI_ROOT:-}" "${AICLI_CWD:-}" "$PWD")"
+           if [ -n "$_oc_chat_checked" ] && [ "$_oc_chat_checked" != "$frozen_chat_id" ]; then
+               log_aicli "WARN" 1 "OpenCode preflight: resume id changed $frozen_chat_id -> $_oc_chat_checked"
+               frozen_chat_id="$_oc_chat_checked"
+           fi
+       fi
+    fi
+
+    # Codex keeps several SQLite files in ~/.codex (thread history, logs, state).
+    # A hard stop can leave one malformed, and Codex then exits on resume.
+    if [ "$AGENT_ID" = "codex-cli" ] && declare -f aicli_sqlite_preflight >/dev/null 2>&1; then
+        aicli_sqlite_preflight codex Codex "$HOME_DIR"/.codex/*.sqlite
+        _aicli_preflight_notice
+    fi
+
+    # Every other agent that keeps SQLite files in the home (Goose, Kilo, Copilot,
+    # Grok, Antigravity) gets the same check. Spec: AGENT_STATE_PREFLIGHT.md R6.
+    if [ "$AGENT_ID" != "codex-cli" ] && [ "$AGENT_ID" != "opencode" ] && declare -f aicli_agent_preflight >/dev/null 2>&1; then
+        aicli_agent_preflight "$AGENT_ID" "$HOME_DIR" "${AGENT_NAME:-$AGENT_ID}"
+        _aicli_preflight_notice
     fi
 
     # D-159: Metadata Alignment - Ensure agent config directories are accessible.
@@ -1542,6 +1588,10 @@ EOF
         log_aicli "ERROR" 1 "Failed to create tmux session $SESSION. Check $DEBUG_LOG"
     fi
     perf_log tmux.new.done
+    # Forgejo #433: log the end of this session, and remember the server pid so a later start can tell a killed server
+    # from an agent that simply exited.
+    tmux set-hook -g session-closed "run-shell -b '$PLUGIN_SRC/scripts/tmux-session-closed.sh #{hook_session_name} $DEBUG_LOG'" 2>/dev/null
+    tmux display-message -p '#{pid}' > "${TMUX_TMPDIR:-/tmp/unraid-aicliagents/tmux/s-$ID}/server.pid" 2>/dev/null
 fi
 
 log_aicli "DEBUG" 3 "Attaching to tmux session $SESSION..."

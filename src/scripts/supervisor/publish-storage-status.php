@@ -36,6 +36,11 @@ try {
     $snapshot['maintenance'] = $maintenance;
 
     \AICliAgents\Services\EventBus::publish('storage.status', [], $snapshot);
+
+    // STORAGE_RECLAIM_NOTICE.md: keep the Activity tray entry in line with the same
+    // maintenance state the banner shows. Best effort inside; never fails this publish.
+    $cfgUser = (string)(function_exists('getAICliConfig') ? (getAICliConfig()['user'] ?? 'root') : 'root');
+    \AICliAgents\Services\StorageReclaimNoticeService::sync($maintenance, $cfgUser !== '' ? $cfgUser : 'root');
 } catch (\Throwable $e) {
     // Best-effort — never fail the supervisor tick that spawned this script.
 }

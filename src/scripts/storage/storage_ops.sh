@@ -26,6 +26,83 @@
 _SO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 [ -d "$_SO_DIR" ] || _SO_DIR="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage"
 
+# lock_holder_describe <lockfile>   (R8, HARD_STOP_RESILIENCE.md)
+#
+# Print ONE line that names the process which holds <lockfile> open:
+#   pid=<pid> cmd=<command line, 120 chars> age=<seconds since it started> [orphan]
+# or the word `unknown` when no holder is found. "orphan" means the parent pid is 1:
+# the process that started it is gone, but it still holds the lock (for example a
+# mksquashfs left over from a killed bake). The lock is NEVER released by force:
+# an orphan that still writes a layer holds it for a reason. This helper only READS.
+# Order of search: fuser, then /proc/locks (by inode), then a scan of /proc/*/fd.
+# Our own pid and our parent are skipped. Always returns 0 and is fast.
+lock_holder_describe() {
+    local _f="${1:-}" _skip _p _pids="" _inode _fd _cmd _stat _ppid _start _clk _up _age _line
+    if [ -z "$_f" ] || [ ! -e "$_f" ]; then echo "unknown"; return 0; fi
+    # Pids that are us or our parents (a $( ) subshell has its own pid).
+    _skip=" $$ ${BASHPID:-$$} ${PPID:-0} "
+    _stat="$(cat "/proc/${BASHPID:-$$}/stat" 2>/dev/null | sed 's/^.*) //')" || _stat=""
+    _ppid="$(printf '%s' "$_stat" | awk '{print $2}')" || _ppid=""
+    [ -z "$_ppid" ] || _skip="$_skip$_ppid "
+    _pick_holder() {
+        local _c
+        for _c in "$@"; do
+            case "$_c" in ''|*[!0-9]*) continue ;; esac
+            case "$_skip" in *" $_c "*) continue ;; esac
+            [ -d "/proc/$_c" ] || continue
+            printf '%s' "$_c"; return 0
+        done
+        return 1
+    }
+    _p=""
+    # 1. fuser
+    if command -v fuser >/dev/null 2>&1; then
+        _pids="$(fuser "$_f" 2>/dev/null | grep -oE '[0-9]+' | tr '\n' ' ')" || _pids=""
+        # shellcheck disable=SC2086
+        _p="$(_pick_holder $_pids)" || _p=""
+    fi
+    # 2. /proc/locks: the pid column of the line for this inode
+    if [ -z "$_p" ] && [ -r /proc/locks ]; then
+        _inode="$(stat -c %i "$_f" 2>/dev/null)" || _inode=""
+        if [ -n "$_inode" ]; then
+            _pids="$(awk -v ino="$_inode" '{n=split($6,a,":"); if (a[n]==ino) print $5}' /proc/locks 2>/dev/null | tr '\n' ' ')" || _pids=""
+            # shellcheck disable=SC2086
+            _p="$(_pick_holder $_pids)" || _p=""
+        fi
+    fi
+    # 3. scan the open files of every process
+    if [ -z "$_p" ]; then
+        _pids=""
+        for _fd in /proc/[0-9]*/fd/*; do
+            if [ "$_fd" -ef "$_f" ] 2>/dev/null; then
+                _c="${_fd#/proc/}"; _pids="$_pids ${_c%%/*}"
+            fi
+        done
+        # shellcheck disable=SC2086
+        _p="$(_pick_holder $_pids)" || _p=""
+    fi
+    if [ -z "$_p" ]; then echo "unknown"; return 0; fi
+    # Command line: NUL to space, no quote or backslash (the text goes into JSON).
+    _cmd="$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | tr -d '"\\\n\r' | cut -c1-120)" || _cmd=""
+    [ -n "$_cmd" ] || _cmd="$(tr -d '"\\\n\r' < "/proc/$_p/comm" 2>/dev/null)" || _cmd=""
+    _stat="$(sed 's/^.*) //' "/proc/$_p/stat" 2>/dev/null)" || _stat=""
+    _ppid="$(printf '%s' "$_stat" | awk '{print $2}')" || _ppid=""
+    _start="$(printf '%s' "$_stat" | awk '{print $20}')" || _start=""
+    _clk="$(getconf CLK_TCK 2>/dev/null)" || _clk=""
+    case "$_clk" in ''|*[!0-9]*|0) _clk=100 ;; esac
+    _age="?"
+    read -r _up _ < /proc/uptime 2>/dev/null || _up=""
+    _up="${_up%%.*}"
+    case "$_start:$_up" in
+        *[!0-9:]*|:*|*:) ;;
+        *) _age=$(( _up - _start / _clk )); [ "$_age" -ge 0 ] || _age=0 ;;
+    esac
+    _line="pid=$_p cmd=${_cmd:-?} age=$_age"
+    [ "$_ppid" != "1" ] || _line="$_line orphan"
+    printf '%s\n' "$_line"
+    return 0
+}
+
 # _sweep_agent_generations <agent_id> <persist_path>
 #
 # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15). Release superseded
@@ -1411,7 +1488,12 @@ if ! flock -n 9; then
     case "$_lock_wait_s" in ''|*[!0-9]*) _lock_wait_s=30 ;; esac
     [ "$_lock_wait_s" -le 120 ] || _lock_wait_s=120
     _lock_holder="$(_bake_lock_holder_desc)"
-    lifecycle_log "info" "commit_stack" "bake_lock_wait" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"holder\":\"${_lock_holder%% *}\",\"limit_s\":$_lock_wait_s}" 2>/dev/null || true
+    # R8: when the owner record names no live process, name the real holder.
+    if [ "$_lock_holder" = "unknown" ] && declare -f lock_holder_describe >/dev/null 2>&1; then
+        _lock_holder="$(lock_holder_describe "$_BAKE_LOCK" 2>/dev/null)" || _lock_holder="unknown"
+        [ -n "$_lock_holder" ] || _lock_holder="unknown"
+    fi
+    lifecycle_log "info" "commit_stack" "bake_lock_wait" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"holder\":\"$_lock_holder\",\"limit_s\":$_lock_wait_s}" 2>/dev/null || true
     _lock_start=$SECONDS
     _lock_deadline=$((SECONDS + _lock_wait_s))
     _lock_got=0
@@ -1425,8 +1507,12 @@ if ! flock -n 9; then
     done
     if [ "$_lock_got" -ne 1 ]; then
         _lock_holder="$(_bake_lock_holder_desc)"
+        if [ "$_lock_holder" = "unknown" ] && declare -f lock_holder_describe >/dev/null 2>&1; then
+            _lock_holder="$(lock_holder_describe "$_BAKE_LOCK" 2>/dev/null)" || _lock_holder="unknown"
+            [ -n "$_lock_holder" ] || _lock_holder="unknown"
+        fi
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)] [WARN] [COMMIT] bake for $TYPE/$ID NOT saved: another storage operation ($_lock_holder) still holds the lock after ${_lock_wait_s}s. The changes stay in the writable layer; the next save captures them."
-        lifecycle_log "warn" "commit_stack" "bake_deferred_locked" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"holder\":\"${_lock_holder%% *}\",\"waited_s\":$((SECONDS - _lock_start))}" 2>/dev/null || true
+        lifecycle_log "warn" "commit_stack" "bake_deferred_locked" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"holder\":\"$_lock_holder\",\"waited_s\":$((SECONDS - _lock_start))}" 2>/dev/null || true
         if declare -f write_defer_reason >/dev/null 2>&1; then
             write_defer_reason "$TYPE" "$ID" "bake_lock_held"
         fi
@@ -1614,6 +1700,21 @@ sleep 0.05
 # path below uses a no-mount mksquashfs pseudo-file merge because its source is
 # the live merged view rather than a plain filesystem directory.
 SQLITE_DBS=$(detect_sqlite_dbs "$UPPER_DIR" 2>/dev/null)
+# #388: the mounted view of a live upper (the agents open files through it).
+# sqlite_dbs_needing_stage also checks it for open handles.
+_SQLITE_READ_ROOT=""
+if [ -z "$_UPPER_OVERRIDE" ] && [ "${ENTITY_UPPER_SOURCE:-}" = "live" ] && [ -d "$MNT_POINT" ]; then
+    _SQLITE_READ_ROOT="$MNT_POINT"
+fi
+# #388: stage ONLY the databases that need a copy (open, or a -wal with
+# content). The others are consistent: the hardlink in the merge tree is used
+# as it is, and the space check counts only the staged ones.
+_SQLITE_ALL_COUNT=$(printf '%s\n' "$SQLITE_DBS" | awk 'NF{c++}END{print c+0}')
+if [ "$_SQLITE_ALL_COUNT" -gt 0 ]; then
+    # shellcheck disable=SC2086 — intentional word-splitting on the path list
+    SQLITE_DBS=$(AICLI_SQLITE_READ_ROOT="$_SQLITE_READ_ROOT" sqlite_dbs_needing_stage "$UPPER_DIR" $SQLITE_DBS 2>/dev/null)
+    log "SQLite: $_SQLITE_ALL_COUNT database(s) in upper, $(printf '%s\n' "$SQLITE_DBS" | awk 'NF{c++}END{print c+0}') need a staged copy"
+fi
 # Count non-empty lines. Previous `echo | grep -c -v` produced "0\n0" when
 # SQLITE_DBS was empty (grep -c outputs "0" AND returns exit 1, triggering the
 # `|| echo 0`), breaking the integer comparison below with a benign-but-noisy
@@ -1629,6 +1730,9 @@ if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
     if ! sqlite_stage_fits "$_SQLITE_STAGE_ROOT" $SQLITE_DBS; then
         rm -f "$MARKER"
         error "Not enough room to stage $SQLITE_DB_COUNT SQLite backup(s) in $_SQLITE_STAGE_ROOT: need about ${STAGE_NEED_MB} MB (${STAGE_DB_MB} MB of databases plus margin), ${STAGE_FREE_MB} MB free. Nothing was saved; the changes stay in the writable layer."
+        # #388: the figures for the supervisor's notification ("need free").
+        printf '%s %s\n' "${STAGE_NEED_MB:-0}" "${STAGE_FREE_MB:-unknown}" \
+            > "/tmp/unraid-aicliagents/.bake_no_space_${TYPE}_${ID//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
         _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_deferred" "no_space" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_stage_no_space\",\"db_count\":$SQLITE_DB_COUNT,\"need_mb\":$STAGE_NEED_MB,\"free_mb\":\"$STAGE_FREE_MB\",\"stage_root\":\"$_SQLITE_STAGE_ROOT\",\"on_ram\":$STAGE_ON_RAM}" "warn"
     fi
@@ -1649,10 +1753,7 @@ if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
     # database through the mounted view (AICLI_SQLITE_READ_ROOT), the way the
     # agents open it. The upper path shows overlay whiteouts for deleted
     # -wal/-shm files, and sqlite3 cannot open a database beside them.
-    _SQLITE_READ_ROOT=""
-    if [ -z "$_UPPER_OVERRIDE" ] && [ "${ENTITY_UPPER_SOURCE:-}" = "live" ] && [ -d "$MNT_POINT" ]; then
-        _SQLITE_READ_ROOT="$MNT_POINT"
-    fi
+    # (_SQLITE_READ_ROOT is set above, before the stage filter.)
     _sba_rc=0
     # shellcheck disable=SC2086 — intentional word-splitting on the path list
     AICLI_SQLITE_READ_ROOT="$_SQLITE_READ_ROOT" sqlite_backup_all "$UPPER_DIR" "$SQLITE_STAGE" $SQLITE_DBS || _sba_rc=$?
@@ -2874,7 +2975,13 @@ _CONSOL_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
 _CONSOL_LOCK="/var/run/aicli-bake-${TYPE}-${_CONSOL_LOCK_ID}.lock"
 exec 8>"$_CONSOL_LOCK"
 if ! flock -n 8; then
-    error "Per-entity storage lock held (a bake is in flight) — deferring consolidate."
+    _cons_holder="unknown"
+    if declare -f lock_holder_describe >/dev/null 2>&1; then
+        _cons_holder="$(lock_holder_describe "$_CONSOL_LOCK" 2>/dev/null)" || _cons_holder="unknown"
+        [ -n "$_cons_holder" ] || _cons_holder="unknown"
+    fi
+    error "Per-entity storage lock held (a bake is in flight; holder: $_cons_holder) — deferring consolidate."
+    lifecycle_log "warn" "consolidate" "consolidate_deferred_locked" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"holder\":\"$_cons_holder\"}" 2>/dev/null || true
     rm -f "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null
     rm -f "$CONSOLIDATE_MARKER"
     update_task_status "Deferred" 0 "Bake in progress — retry later"

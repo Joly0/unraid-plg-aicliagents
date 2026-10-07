@@ -104,7 +104,21 @@ class LayerManifestService {
         return $out;
     }
 
-    public static function addLayer(string $entity, array $layerEntry): bool {
+    /**
+     * @param bool $plain true = add exactly as given. A layer of kind 'recovered' is
+     *                    normally routed through BootIntegrityService::addRecoveredLayer
+     *                    first (R7: it may replace an older rolling busy snapshot).
+     *                    That method calls back here with $plain = true.
+     */
+    public static function addLayer(string $entity, array $layerEntry, bool $plain = false): bool {
+        if (!$plain && ($layerEntry['kind'] ?? '') === 'recovered'
+            && class_exists(__NAMESPACE__ . '\\BootIntegrityService')) {
+            try {
+                return BootIntegrityService::addRecoveredLayer($entity, $layerEntry);
+            } catch (\Throwable $e) {
+                // Never fail on the new rule: fall back to the plain add below.
+            }
+        }
         return self::withLock(function () use ($entity, $layerEntry) {
             $manifest = self::readManifest() ?? self::emptyManifest();
             if (!self::checkSchemaVersion($manifest)) {
@@ -152,6 +166,60 @@ class LayerManifestService {
                     ['entity' => $entity, 'filename' => $layerEntry['filename'] ?? '?']
                 );
             }
+            return $ok;
+        });
+    }
+
+    /**
+     * R7: in ONE locked atomic write, record $newEntry and drop the layer named
+     * $oldFilename. Returns false (and writes nothing) when the entity is absent,
+     * when $oldFilename is not in the manifest, or when both names are the same.
+     * The caller deletes the old layer FILE only after this returns true.
+     *
+     * @param array<string, mixed> $newEntry
+     */
+    public static function replaceLayer(string $entity, array $newEntry, string $oldFilename): bool {
+        $newName = (string)($newEntry['filename'] ?? '');
+        if ($newName === '' || $oldFilename === '' || $newName === $oldFilename) {
+            return false;
+        }
+        return self::withLock(function () use ($entity, $newEntry, $newName, $oldFilename) {
+            $manifest = self::readManifest() ?? self::emptyManifest();
+            if (!self::checkSchemaVersion($manifest)) {
+                return false;
+            }
+            $layers = $manifest['entities'][$entity]['expected_layers'] ?? null;
+            if (!is_array($layers)) {
+                return false;
+            }
+            $found = false;
+            foreach ($layers as $l) {
+                if ((string)($l['filename'] ?? '') === $oldFilename) {
+                    $found = true;
+                    break;
+                }
+            }
+            if (!$found) {
+                return false;
+            }
+            $kept = array_values(array_filter(
+                $layers,
+                static fn($l) => (string)($l['filename'] ?? '') !== $oldFilename
+            ));
+            $manifest['entities'][$entity]['expected_layers'] = self::upsertLayer($kept, $newEntry);
+            $manifest['entities'][$entity]['last_known_good_at'] = self::now();
+            if (isset($newEntry['persist_path'])) {
+                $manifest['entities'][$entity]['current_persistence_path'] = $newEntry['persist_path'];
+            }
+            $manifest['updated_at'] = self::now();
+
+            $ok = self::atomicWrite($manifest);
+            LifecycleLogService::log(
+                $ok ? LifecycleLogService::LEVEL_INFO : LifecycleLogService::LEVEL_ERROR,
+                self::COMPONENT,
+                $ok ? 'layer_replaced' : 'layer_replace_failed',
+                ['entity' => $entity, 'filename' => $newName, 'dropped' => $oldFilename]
+            );
             return $ok;
         });
     }

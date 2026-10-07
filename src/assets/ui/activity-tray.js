@@ -537,7 +537,12 @@
          * is what tells the two pages apart.
          */
         _gotoWorkspace(sessionId) {
-            if (!sessionId) return;
+            // Returns '' when the route was started, or a short sentence the row
+            // shows when it cannot be (#431: a silent no-op looked like a broken
+            // button). Same id shape as ui-build/src/lib/workspaceRoute.ts.
+            if (!sessionId || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) {
+                return 'This notice does not name a workspace, so nothing was opened.';
+            }
             var hash = '#aicli-workspace=' + encodeURIComponent(sessionId);
             if (document.getElementById('aicliagents-root')) {
                 // Same page: assigning an unchanged hash fires no hashchange, so
@@ -547,9 +552,20 @@
                     window.history.replaceState(null, '', window.location.pathname + window.location.search);
                 }
                 window.location.hash = hash;
-                return;
+                return '';
             }
             window.location.href = '/AICliAgents' + hash;
+            return '';
+        }
+
+        /**
+         * After a same-page "Go to": the terminal page removes the hash as soon as
+         * it reads it. A hash still there after a short wait means nothing read it
+         * (an old page, or the app is not running). Returns true when it is stuck.
+         */
+        _gotoStuck(sessionId) {
+            return !!document.getElementById('aicliagents-root')
+                && window.location.hash === '#aicli-workspace=' + encodeURIComponent(sessionId);
         }
 
         // ---- rendering -------------------------------------------------------
@@ -644,10 +660,41 @@
                     // takes the operator to the workspace the message is waiting for,
                     // and only then does the button become Force inject.
                     if (act === 'goto_relay_workspace') {
-                        self._gotoWorkspace(el.getAttribute('data-session') || '');
+                        var sid = el.getAttribute('data-session') || '';
+                        var why = self._gotoWorkspace(sid);
+                        if (why) {
+                            // Not armed: the operator has not been taken anywhere.
+                            self._relayNote[opId] = why;
+                            self._render();
+                            return;
+                        }
                         self._relayArmed[opId] = true;
                         delete self._relayNote[opId];
                         self._render();
+                        setTimeout(function () {
+                            if (self._gotoStuck(sid)) {
+                                self._relayNote[opId] = 'The workspace did not open. Reload the page and try again.';
+                                self._render();
+                            }
+                        }, 1500);
+                        return;
+                    }
+                    // STORAGE_RECLAIM_NOTICE.md: one click closes every open workspace of the
+                    // home, tidies the storage and starts them again (the Storage tab's own
+                    // consolidate flow). Confirm first: it closes sessions.
+                    if (act === 'consolidate_home') {
+                        var user = el.getAttribute('data-user') || 'root';
+                        var n = parseInt(el.getAttribute('data-count'), 10) || 0;
+                        var msg = 'Close ' + (n === 1 ? 'the open workspace' : 'all ' + (n || '') + ' open workspaces')
+                            + ', tidy up the storage, then start ' + (n === 1 ? 'it' : 'them') + ' again?\n\n'
+                            + 'Each agent is closed gracefully and its conversation is saved, so it can carry on.';
+                        if (!window.confirm(msg)) return;
+                        el.disabled = true;
+                        el.textContent = 'Starting…';
+                        fetch(ajaxUrl('consolidate_storage', { type: 'home', id: user }))
+                            .then(function (r) { return r.json(); })
+                            .then(function () { self._poll(); })
+                            .catch(function () { self._poll(); });
                         return;
                     }
                     self._action(act, opId, isLocal);
@@ -696,10 +743,22 @@
                 btns += '<button class="btn" data-act="dismiss_relay_waiting" data-opid="' + esc(a.opId) + '" data-count="' + esc(a.count) + '"'
                     + ' title="Hides this until a new message arrives. Nothing is discarded — it stays in the inbox.">Dismiss</button>';
             }
+            // STORAGE_RECLAIM_NOTICE.md: the storage tidy-up that waits on open workspaces.
+            // "ask" phase: one button does the whole job; "Later" hides it for this wait.
+            // "tidying" phase: state only, no buttons.
+            var reclaimAsk = a.status === 'waiting' && a.meta && a.meta.action === 'consolidate_home';
+            var reclaimTidy = a.status === 'waiting' && a.meta && a.meta.phase === 'tidying';
+            if (reclaimAsk) {
+                btns += '<button class="btn force" data-act="consolidate_home" data-opid="' + esc(a.opId) + '"'
+                    + ' data-user="' + esc(a.meta.user || 'root') + '" data-count="' + esc(a.meta.count || 0) + '"'
+                    + ' title="Closes every open workspace, tidies the storage, then starts them again. Conversations are saved first.">Close all and tidy up</button>';
+                btns += '<button class="btn" data-act="dismiss_activity" data-opid="' + esc(a.opId) + '"'
+                    + ' title="Hides this notice. The banner on the terminal page stays until the tidy-up is done.">Later</button>';
+            }
             if (active) {
                 btns += '<button class="btn" data-act="cancel_activity" data-opid="' + esc(a.opId) + '">Cancel</button>';
             }
-            if (!pending && !relayWaiting && (!active || a.status === 'stalled')) {
+            if (!pending && !relayWaiting && !reclaimAsk && !reclaimTidy && (!active || a.status === 'stalled')) {
                 btns += '<button class="btn" data-act="dismiss_activity" data-opid="' + esc(a.opId) + '"'
                     + (isLocal ? ' data-local="1"' : '') + '>Dismiss</button>';
             }
@@ -715,7 +774,7 @@
             // before clicking Approve.
             return '<div class="row">'
                 + '<div class="top"><span class="label" title="' + esc(a.label) + '">' + esc(a.label || a.opId) + '</span>'
-                + '<span class="status ' + esc(a.status) + '">' + esc(a.status === 'pending_approval' ? 'needs approval' : (relayWaiting ? 'waiting' : a.status)) + '</span></div>'
+                + '<span class="status ' + esc(a.status) + '">' + esc(a.status === 'pending_approval' ? 'needs approval' : (relayWaiting ? 'waiting' : (a.meta && a.meta.chip ? a.meta.chip : a.status))) + '</span></div>'
                 + (pending && a.label ? '<div class="consequence">' + esc(a.label) + '</div>' : '')
                 // Plain-language reason the notice was held (TmuxService::relayHeldReasonLabel()).
                 + (relayWaiting && a.reason ? '<div class="consequence">Held because ' + esc(a.reason) + '.</div>' : '')

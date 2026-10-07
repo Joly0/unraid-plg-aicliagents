@@ -73,6 +73,8 @@ require_once __DIR__ . '/services/NchanService.php';
 // it is kept explicit so the load order reads correctly on its own.
 require_once __DIR__ . '/services/EventBus.php';
 require_once __DIR__ . '/services/ActivityService.php';
+require_once __DIR__ . '/services/ActorDownAlertService.php';   // HARD_STOP_RESILIENCE.md R4 — tray entry + notice when a Relay actor cannot start
+require_once __DIR__ . '/services/StorageReclaimNoticeService.php';   // STORAGE_RECLAIM_NOTICE.md — tray entry for a tidy-up that waits on open workspaces
 require_once __DIR__ . '/services/VersionClassifier.php';
 require_once __DIR__ . '/services/VersionCheckService.php';
 require_once __DIR__ . '/services/PaneInputRules.php';

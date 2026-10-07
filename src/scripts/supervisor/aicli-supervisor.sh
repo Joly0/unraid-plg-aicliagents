@@ -179,6 +179,19 @@ fi
 # shellcheck source=../storage/backup_home.sh
 [ -f "$STORAGE_DIR/backup_home.sh" ] && { source "$STORAGE_DIR/backup_home.sh" 2>/dev/null || true; }
 
+# #392: keep a copy of the system log on the flash drive (_syslog_keep_tick).
+# Sourced from the folder of this script first, then the installed path.
+_SYSLOG_KEEP_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/syslog-keep.sh"
+[ -f "$_SYSLOG_KEEP_SH" ] || _SYSLOG_KEEP_SH="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/syslog-keep.sh"
+# shellcheck source=syslog-keep.sh
+[ -f "$_SYSLOG_KEEP_SH" ] && { source "$_SYSLOG_KEEP_SH" 2>/dev/null || true; }
+
+# #393: warn early when the boot disk fills (_pool_space_tick).
+_POOL_SPACE_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/pool-space.sh"
+[ -f "$_POOL_SPACE_SH" ] || _POOL_SPACE_SH="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/pool-space.sh"
+# shellcheck source=pool-space.sh
+[ -f "$_POOL_SPACE_SH" ] && { source "$_POOL_SPACE_SH" 2>/dev/null || true; }
+
 # ---------------------------------------------------------------------------
 # Logging helpers (stderr only — stdout is reserved for --status JSON)
 # ---------------------------------------------------------------------------
@@ -1458,8 +1471,12 @@ _op_bake() {
         log_warn "Bake NOT saved: $entity (exit=2, reason=$_bk_reason) — the changes stay in RAM until the next bake"
         lifecycle_log "warn" "supervisor" "bake_not_saved" \
             "{\"entity\":\"$entity\",\"exit_code\":$exit_code,\"defer_reason\":\"$_bk_reason\"}" 2>/dev/null || true
+        # #388: a bake that cannot save for lack of space is told to the person.
+        [ "$_bk_reason" = "no_space" ] && { _bake_no_space_alert "$type" "$id" || true; }
     elif [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 2 ]; then
         log_info "Bake completed: $entity (exit=$exit_code)"
+        # #388: a saved bake closes the "not enough space" tray entry.
+        _bake_no_space_clear "$type" "$id" || true
         lifecycle_log "info" "supervisor" "bake_ok" \
             "{\"entity\":\"$entity\",\"exit_code\":$exit_code}" 2>/dev/null || true
     else
@@ -1483,6 +1500,72 @@ _op_bake() {
         lifecycle_log "error" "supervisor" "bake_failed" \
             "{\"entity\":\"$entity\",\"exit_code\":$exit_code,\"stderr_tail\":\"$stderr_tail\"}" 2>/dev/null || true
     fi
+}
+
+# #388 (docs/specs/HARD_STOP_RESILIENCE.md R1): a bake that cannot save for lack
+# of space must not stay silent. The supervisor sends ONE warning per 6 hours
+# for that home and shows one Activity tray entry (status waiting) until a bake
+# of that home succeeds. The supervisor cannot call PHP in-process, so the tray
+# entry is made by a short php child, like _publish_storage_status. All of it
+# is best effort.
+AICLI_MANAGER_PHP="${AICLI_MANAGER_PHP:-/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php}"
+
+# _bake_no_space_tray <open|close> <id> <need_mb> <free_mb> — create/finish the
+# tray entry bake_no_space_<id>. Skipped in a sandboxed test run (AICLI_JOBS_DIR
+# set), without php, or without the manager include.
+_bake_no_space_tray() {
+    [ -z "${AICLI_JOBS_DIR:-}" ] || return 0
+    [ -f "$AICLI_MANAGER_PHP" ] || return 0
+    command -v php >/dev/null 2>&1 || return 0
+    local safe_id="${2//[^a-zA-Z0-9_-]/_}"
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 20 php -d display_errors=0 -r '
+            require_once $argv[1];
+            \AICliAgents\Services\EventActor::$override = ["type" => "system"];
+            $op = "bake_no_space_" . $argv[3];
+            if ($argv[2] === "open") {
+                \AICliAgents\Services\ActivityService::register($op, "storage", "Saving the home is blocked: not enough space",
+                    ["meta" => ["entity" => "home/" . $argv[3], "need_mb" => $argv[4], "free_mb" => $argv[5]]]);
+                \AICliAgents\Services\ActivityService::wait($op, "Waiting for free space");
+            } else {
+                \AICliAgents\Services\ActivityService::finish($op);
+            }' -- "$AICLI_MANAGER_PHP" "$1" "$safe_id" "${3:-0}" "${4:-unknown}" >/dev/null 2>&1
+    ) || true
+}
+
+# _bake_no_space_alert <type> <id> — the bake of <type>/<id> was deferred for
+# no_space. Notify (once per 6 hours) and make the tray entry (once, until a
+# bake succeeds).
+_bake_no_space_alert() {
+    local type="${1:-}" id="${2:-}" safe_id need="0" free="unknown" f
+    [ -n "$id" ] || return 0
+    safe_id="${id//[^a-zA-Z0-9_-]/_}"
+    f="/tmp/unraid-aicliagents/.bake_no_space_${type}_${safe_id}"
+    [ -f "$f" ] && read -r need free < "$f" 2>/dev/null
+    _supervisor_notify "warning" "AICliAgents: saving the home is blocked: not enough space" \
+        "Saving '$id' needs about ${need} MB of free space and only ${free} MB is free. Nothing was saved; the changes stay in RAM. Free some space on the storage device." \
+        "bake_no_space_${id}" 21600
+    mkdir -p "$_NOTIFIED_DIR" 2>/dev/null || true
+    if [ ! -f "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" ]; then
+        : > "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" 2>/dev/null || true
+        _bake_no_space_tray open "$id" "$need" "$free"
+    fi
+    return 0
+}
+
+# _bake_no_space_clear <type> <id> — a bake of <type>/<id> was saved: finish the
+# tray entry and forget the figures. A cheap file test when nothing is open.
+_bake_no_space_clear() {
+    local type="${1:-}" id="${2:-}" safe_id
+    safe_id="${id//[^a-zA-Z0-9_-]/_}"
+    rm -f "/tmp/unraid-aicliagents/.bake_no_space_${type}_${safe_id}" 2>/dev/null || true
+    [ -f "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" ] || return 0
+    rm -f "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" 2>/dev/null || true
+    _bake_no_space_tray close "$id"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -3264,6 +3347,27 @@ _relaunch_home_sessions() {
     _publish_storage_status
 }
 
+# STORAGE_RECLAIM_NOTICE.md R2. The home is idle but the tidy-up is still recommended.
+# Rewrites the marker once as "busy":0 + idle_since, then keeps it. Returns 0 to keep
+# the marker, 1 to let the caller remove it (idle for over RECLAIM_IDLE_GRACE seconds).
+RECLAIM_IDLE_GRACE="${RECLAIM_IDLE_GRACE:-600}"
+_reclaim_keep_while_idle() {
+    local state_file="$1" id="$2" now="$3" idle_since started reason
+    idle_since="$(sed -n 's/.*"idle_since":\([0-9]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)"
+    if [ -z "$idle_since" ]; then
+        started="$(sed -n 's/.*"started_at":\([0-9]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)"
+        reason="$(sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' "$state_file" 2>/dev/null | head -1)"
+        _atomic_json_write "$state_file" \
+            "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting","busy":0,"idle_since":%d}' \
+                "$id" "${reason:-$_RECLAIM_REASON}" "${started:-$now}" "$now")" || true
+        lifecycle_log "info" "supervisor" "reclaim_home_idle" "{\"entity\":\"home/$id\"}" 2>/dev/null || true
+        _publish_storage_status
+        return 0
+    fi
+    [ $(( now - idle_since )) -le "$RECLAIM_IDLE_GRACE" ] && return 0
+    return 1
+}
+
 # The wait-state machine. See block comment above. Stub-overridable helpers:
 # _now_epoch, _manifest_home_ids, home_persist_path, home_mount,
 # _home_reclaim_recommended and _supervisor_overlay_busy.
@@ -3295,7 +3399,7 @@ _check_force_reclaim_escalation() {
                 # Record the wait + notify the user once.
                 mkdir -p "$esc_dir" 2>/dev/null || true
                 _atomic_json_write "$state_file" \
-                    "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting"}' \
+                    "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting","busy":1}' \
                         "$id" "$_RECLAIM_REASON" "$now")" || true
                 _supervisor_notify "warning" "AICliAgents: storage maintenance waiting" \
                     "Home '$id' needs storage maintenance but has live sessions. Maintenance will wait; close those sessions when convenient." \
@@ -3309,19 +3413,33 @@ _check_force_reclaim_escalation() {
             else
                 # Normalize an old countdown/closing state left in /tmp by a
                 # previous plugin version. It must not retain auto-close semantics.
-                local prior_state
+                local prior_state prior_started
                 prior_state="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$state_file" 2>/dev/null | head -1)"
+                prior_started="$(sed -n 's/.*"started_at":\([0-9]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)"
                 if [ "$prior_state" != "waiting" ]; then
                     _atomic_json_write "$state_file" \
-                        "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting"}' \
+                        "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting","busy":1}' \
                             "$id" "$_RECLAIM_REASON" "$now")" || true
+                    _publish_storage_status
+                elif ! grep -q '"busy":1' "$state_file" 2>/dev/null; then
+                    # A workspace opened again while the tidy-up was starting: same
+                    # episode (keep started_at), but the home is busy once more.
+                    _atomic_json_write "$state_file" \
+                        "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting","busy":1}' \
+                            "$id" "$_RECLAIM_REASON" "${prior_started:-$now}")" || true
                     _publish_storage_status
                 fi
             fi
         else
-            # Condition no longer holds (home went idle, or pressure relieved):
-            # Stand down once the home is idle or pressure has cleared.
-            if [ -f "$state_file" ]; then
+            # STORAGE_RECLAIM_NOTICE.md R2: the last workspace closing does NOT end the
+            # wait. While the tidy-up is still recommended, the marker stays (now
+            # "busy":0) so the banner and the tray entry stay up until it is done.
+            # It stands down when pressure clears (the tidy-up finished) or, as a
+            # safety net, 10 minutes after the home went idle with nothing started.
+            if [ -f "$state_file" ] && [ "$recommended" -eq 1 ] && [ "$busy" -eq 0 ] \
+               && _reclaim_keep_while_idle "$state_file" "$id" "$now"; then
+                :
+            elif [ -f "$state_file" ]; then
                 rm -f "$state_file" 2>/dev/null || true
                 lifecycle_log "info" "supervisor" "force_reclaim_cleared" \
                     "{\"entity\":\"home/$id\",\"recommended\":$recommended,\"busy\":$busy}" 2>/dev/null || true
@@ -3773,6 +3891,12 @@ _work_tick() {
     _activity_sweep_tick
     _scheduled_continue_tick
     _quota_detect_tick
+
+    # Step 1d2: #392 — keep the system log on flash (acts every 300 s).
+    declare -f _syslog_keep_tick >/dev/null 2>&1 && { _syslog_keep_tick || true; }
+
+    # Step 1d3: #393 — warn when the boot disk fills (acts every 300 s).
+    declare -f _pool_space_tick >/dev/null 2>&1 && { _pool_space_tick || true; }
 
     # Step 1e: SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 — release superseded agent
     # versions once nothing is running them, rate-limited to 5 min internally.

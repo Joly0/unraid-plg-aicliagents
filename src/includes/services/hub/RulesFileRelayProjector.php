@@ -12,7 +12,7 @@ namespace AICliAgents\Services\Hub;
 
 class RulesFileRelayProjector extends RelayInstructionProjector {
     public function desired(array $servers): array {
-        return [self::FENCE_KEY => rtrim(self::BODY, "\n") . "\n"];
+        return [self::FENCE_KEY => self::body() . "\n"];
     }
 
     public function current(string $file, array $keys): array {

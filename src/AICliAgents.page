@@ -78,6 +78,11 @@ require_once "$ui_path/EventStream.php";
 <?php foreach ($css_files as $css_file): ?>
 <link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/<?= htmlspecialchars(basename($css_file)) ?>?v=<?= htmlspecialchars($asset_ver) ?>">
 <?php endforeach; ?>
+<?php // The lazy chunks (Notebook renderers) import "./index.js" WITHOUT the ?v= below. Without this import map the browser
+      // loads that as a SECOND copy of the bundle, which boots the whole app again (a new React root: the page
+      // re-initialises and falls back to the server's last-used workspace). The map makes both URLs one module.
+      // Spec: docs/specs/NOTEBOOK_TESTING.md (R7). ?>
+<script type="importmap">{"imports":{"/plugins/unraid-aicliagents/assets/ui/index.js":"/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($asset_ver) ?>"}}</script>
 <script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($asset_ver) ?>"></script>
 <!-- T-08 (ACTIVITY_TRAY.md): activity tray web component — self-mounts to body -->
 <script src="/plugins/unraid-aicliagents/assets/ui/activity-tray.js?v=<?= htmlspecialchars($asset_ver) ?>"></script>

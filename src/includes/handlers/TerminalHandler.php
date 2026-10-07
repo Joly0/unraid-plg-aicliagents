@@ -116,16 +116,44 @@ class TerminalHandler {
         $message = (string)($_REQUEST['message'] ?? '');
         $source = (string)($_REQUEST['source'] ?? 'user');
         $r = \AICliAgents\Services\AdminService::setScheduledContinue((string)$id, $at, $repeat, $message, $source);
-        return isset($r['error'])
-            ? ['status' => 'error', 'message' => (string)$r['error']]
-            : array_merge(['status' => 'ok'], $r);
+        if (isset($r['error'])) return ['status' => 'error', 'message' => (string)$r['error']];
+        // The Drawer used to confirm with a page-corner popup. The Activity tray is
+        // the one place a person looks, so the change is recorded there instead.
+        // Only a person's save is recorded: a quota-detect schedule is the plugin
+        // acting by itself and already has its own trail.
+        if ($source === 'user') {
+            $when = date('D j M, H:i', (int)($r['at'] ?? $at));
+            $every = ($r['repeat'] ?? 'none') === 'none' ? '' : ' (repeats ' . (($r['repeat'] ?? '') === 'daily' ? 'every day' : 'every week') . ')';
+            self::recordScheduleActivity((string)$id, "Scheduled Continue set for {$when}{$every}");
+        }
+        return array_merge(['status' => 'ok'], $r);
     }
 
     private static function clearScheduledContinueAction($id): array {
         $r = \AICliAgents\Services\AdminService::clearScheduledContinue((string)$id);
-        return isset($r['error'])
-            ? ['status' => 'error', 'message' => (string)$r['error']]
-            : array_merge(['status' => 'ok'], $r);
+        if (isset($r['error'])) return ['status' => 'error', 'message' => (string)$r['error']];
+        self::recordScheduleActivity((string)$id, 'Scheduled Continue cancelled');
+        return array_merge(['status' => 'ok'], $r);
+    }
+
+    /**
+     * Write one finished Activity tray entry for a Scheduled Continue change made
+     * from the Drawer. The label names the workspace the way a person knows it.
+     * Best effort: a tray write must never fail a save that already worked.
+     * Spec: docs/specs/SCHEDULED_CONTINUE.md
+     */
+    private static function recordScheduleActivity(string $id, string $what): void {
+        try {
+            $name = $id;
+            foreach (\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+                if ((string)($w['id'] ?? '') === $id) { $name = (string)($w['name'] ?? '') !== '' ? (string)$w['name'] : $id; break; }
+            }
+            $opId = 'schedule_continue_' . preg_replace('/[^a-z0-9_]/i', '_', $id) . '_' . bin2hex(random_bytes(4));
+            \AICliAgents\Services\ActivityService::register($opId, 'admin', "$what — $name", ['meta' => ['tool' => 'schedule_continue', 'workspaceId' => $id]]);
+            \AICliAgents\Services\ActivityService::finish($opId, 'Applied');
+        } catch (\Throwable $e) {
+            // Swallowed on purpose — see doc comment above.
+        }
     }
 
     /** tmpfs directory holding one per-session cooldown marker file. */
@@ -223,6 +251,10 @@ class TerminalHandler {
             $id = (string)($w['id'] ?? '');
             if ($id === '') continue;
             $running[$id] = \AICliAgents\Services\ProcessManager::isRunning($id);
+            // HARD_STOP_RESILIENCE.md R4: only a workspace that has an actor_down state costs a probe.
+            if ($running[$id] && \AICliAgents\Services\ActorDownAlertService::hasState($id)) {
+                \AICliAgents\Services\ActorDownAlertService::recordHealthy($id, time(), \AICliAgents\Services\ProcessManager::tmuxSessionHasLiveAgent($id));
+            }
             if (!$running[$id]) continue; // a stopped session picks up current code when it starts
             $launched = \AICliAgents\Services\ProcessManager::sessionLaunchGeneration($id);
             // Forgejo #364: stale = the BRIDGE code differs, the same test the
@@ -1303,8 +1335,19 @@ class TerminalHandler {
             // elsewhere cannot be resumed into this drawer workspace.
             $dir = "$homeDir/.codex/sessions";
             if (!is_dir($dir)) return null;
-            $wantedCwd = rtrim(str_replace('\\', '/', $workspacePath), '/');
-            if ($wantedCwd === '') return null;
+            // Codex records the folder it was LAUNCHED in. A cache-only share launches in its pool path
+            // (/mnt/cache/<share>/...), while the workspace is known as /mnt/user/<share>/...: match every form, or the
+            // newest conversation is never found and Reload is refused (2026-10-06, model-qwen38-27b-ternary).
+            $wantedCwds = [rtrim(str_replace('\\', '/', $workspacePath), '/')];
+            if ($wantedCwds[0] !== '') {
+                $launch = \AICliAgents\Services\PoolPathService::launchDirectory($workspacePath, $config);
+                $pool = \AICliAgents\Services\PoolPathService::resolvePoolPath($workspacePath);
+                foreach ([$launch, $pool] as $form) {
+                    $form = rtrim(str_replace('\\', '/', (string)$form), '/');
+                    if ($form !== '' && !in_array($form, $wantedCwds, true)) $wantedCwds[] = $form;
+                }
+            }
+            if ($wantedCwds[0] === '') return null;
             $newestMtime = 0;
             $newestId = null;
             $it = new \RecursiveIteratorIterator(
@@ -1324,7 +1367,7 @@ class TerminalHandler {
                 $id = (string)($payload['id'] ?? '');
                 $cwd = rtrim(str_replace('\\', '/', (string)($payload['cwd'] ?? '')), '/');
                 if (!preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/', $id)) continue;
-                if ($cwd !== $wantedCwd) continue;
+                if (!in_array($cwd, $wantedCwds, true)) continue;
                 $mtime = $file->getMTime();
                 if ($mtime > $newestMtime) {
                     $newestMtime = $mtime;
@@ -1523,6 +1566,16 @@ class TerminalHandler {
         // close-time pane scrape/disk-fallback in captureResumeForClose finds
         // something new.
         $resumeId = \AICliAgents\Services\ConfigService::getResumeId($path, $agentId, (string)$id);
+        if (empty($resumeId)) {
+            // Nothing is on record yet: a conversation id is saved only when a workspace is CLOSED, so a workspace that has
+            // run since it started has none (Codex, 2026-10-06). Look in the agent's own session files first (read-only, the
+            // same lookup the close uses). Refuse only when no conversation of this workspace can be found.
+            $found = self::discoverLatestSessionId((string)$agentId, (string)$path);
+            if (!empty($found)) {
+                \AICliAgents\Services\ConfigService::saveDiskFallbackResumeId($path, $agentId, $found, (string)$id);
+                $resumeId = \AICliAgents\Services\ConfigService::getResumeId($path, $agentId, (string)$id);
+            }
+        }
         if (empty($resumeId)) {
             return ['status' => 'error', 'reason' => 'no_resume_target',
                 'message' => 'No saved conversation to resume for this workspace — reload was refused to avoid losing it.'];

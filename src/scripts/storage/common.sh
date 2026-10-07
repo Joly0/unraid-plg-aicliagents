@@ -1237,6 +1237,45 @@ detect_sqlite_dbs() {
         done
 }
 
+# sqlite_db_needs_stage <root> <db> — 0 when the bake must stage a consistent
+# copy of <db>, 1 when the file in the writable layer is already consistent.
+# #388 (2026-10-02): staging every database copied up to 2.5 GB and failed
+# the save on a full disk. A database needs a copy only when:
+#   - a process holds it open (it may be in the middle of a write), or
+#   - its -wal or -journal file has content (the merge tree drops those names,
+#     so committed pages in them would be lost), or
+#   - fuser is missing (the open check cannot be made: stage to be safe).
+# AICLI_SQLITE_READ_ROOT (the mounted view) is checked too: the agents open
+# their files through the view.
+sqlite_db_needs_stage() {
+    local root="${1%/}" db="$2" rel view s
+    for s in "$db-wal" "$db-journal"; do
+        [ -f "$s" ] && [ -s "$s" ] && return 0
+    done
+    command -v fuser >/dev/null 2>&1 || return 0
+    fuser -s "$db" 2>/dev/null && return 0
+    rel="${db#$root/}"
+    view="${AICLI_SQLITE_READ_ROOT:-}"
+    if [ -n "$view" ] && [ "$rel" != "$db" ] && [ -f "${view%/}/$rel" ]; then
+        fuser -s "${view%/}/$rel" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# sqlite_dbs_needing_stage <root> <db-paths...> — print, one per line, the
+# databases that need a staged copy (see sqlite_db_needs_stage). The caller
+# counts, space-checks and stages ONLY these. The rest stay as the hardlinks
+# in the merge tree.
+sqlite_dbs_needing_stage() {
+    local root="$1"; shift
+    local db
+    for db in "$@"; do
+        [ -f "$db" ] || continue
+        sqlite_db_needs_stage "$root" "$db" && printf '%s\n' "$db"
+    done
+    return 0
+}
+
 # sqlite_backup_all <root> <staging> <db-paths...>
 # For each db path, runs `sqlite3 X ".backup STAGING/relative/X"`. Online Backup
 # API works on a live DB without preventing concurrent writers. Returns:

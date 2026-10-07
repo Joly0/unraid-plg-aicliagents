@@ -249,6 +249,8 @@ class ProcessManager {
         'scripts/user/effective-env-export.php',
         'includes/AICliAgentsManager.php',
         'scripts/user/agent-exit-recorder.sh',
+        'scripts/agent-state-preflight.sh',
+        'scripts/tmux-session-closed.sh',
     ];
 
     /**
@@ -1061,6 +1063,23 @@ class ProcessManager {
                 LogService::log("Activation nudge for $closedAgentId skipped: " . $e->getMessage(), LogService::LOG_WARN, "ProcessManager");
             }
         }
+
+        // STORAGE_RECLAIM_NOTICE.md R4: a storage tidy-up that waits on open workspaces
+        // must start the moment the last one closes, not at the next 5 s supervisor tick
+        // plus the time to notice. A close with a wait marker present wakes the supervisor,
+        // whose tick sees the home idle and queues the tidy-up. Best effort.
+        try {
+            if (self::storageReclaimWaiting()) SupervisorService::wake();
+        } catch (\Throwable $e) {
+            // never break the close
+        }
+    }
+
+    /** True while the supervisor holds a "storage tidy-up is waiting" marker for any home. */
+    public static function storageReclaimWaiting(?string $dir = null): bool
+    {
+        $dir = $dir ?? (SupervisorService::SUPERVISOR_DIR . '/escalation');
+        return (glob($dir . '/home_*.json') ?: []) !== [];
     }
 
     /**
