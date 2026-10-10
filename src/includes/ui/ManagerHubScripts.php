@@ -527,6 +527,8 @@
         document.getElementById('hub-f-url').value = s ? (s.url || '') : '';
         clearNode(document.getElementById('hub-env-rows'));
         if (s && s.env) s.env.forEach(function (e) { window.hubAddEnvRow(e.key, e.set); });
+        hubLoadAuth(s);
+        document.getElementById('hub-test-result').textContent = '';
 
         var checks = document.getElementById('hub-agent-checks');
         clearNode(checks);
@@ -550,29 +552,157 @@
         document.getElementById('hub-f-remote').style.display = (t === 'stdio') ? 'none' : 'block';
     };
 
-    // Env row: existing (masked) values keep their stored value unless re-typed.
-    window.hubAddEnvRow = function (key, isSet) {
-        var rows = document.getElementById('hub-env-rows');
+    // Key/value row (env vars, HTTP headers): existing (masked) values keep their
+    // stored value unless re-typed. Existing rows lock the key.
+    function hubAddMaskedRow(rowsId, kind, keyPlaceholder, key, isSet, valuePlaceholder) {
+        var rows = document.getElementById(rowsId);
         var row = el('div', 'display:flex; gap:6px; align-items:center;');
-        row.className = 'hub-env-row';
+        row.className = 'hub-' + kind + '-row';
         var k = document.createElement('input');
-        k.type = 'text'; k.placeholder = 'KEY'; k.className = 'hub-env-key';
+        k.type = 'text'; k.placeholder = keyPlaceholder; k.className = 'hub-' + kind + '-key';
         k.style.cssText = 'width:180px; font-family:monospace; font-size:11px;';
         k.value = key || '';
         if (key) k.readOnly = true;
         var v = document.createElement('input');
-        v.type = 'password'; v.className = 'hub-env-val'; v.autocomplete = 'new-password';
+        v.type = 'password'; v.className = 'hub-' + kind + '-val'; v.autocomplete = 'new-password';
         v.style.cssText = 'flex:1; max-width:320px; font-family:monospace; font-size:11px;';
-        v.placeholder = isSet ? '•••••••• (unchanged)' : 'value or {SECRET_KEY}';
+        v.placeholder = isSet ? '•••••••• (unchanged)' : (valuePlaceholder || 'value or {SECRET_KEY}');
         v.dataset.keep = (key && isSet) ? '1' : '0';
         v.addEventListener('input', function () { v.dataset.keep = '0'; });
         var del = el('button', 'flex-shrink:0;');
-        del.type = 'button'; del.className = 'aicli-btn-slim'; del.title = 'Remove variable';
+        del.type = 'button'; del.className = 'aicli-btn-slim'; del.title = (kind === 'header') ? 'Remove header' : 'Remove variable';
         del.appendChild(Object.assign(document.createElement('i'), { className: 'fa fa-trash-o' }));
         del.addEventListener('click', function () { row.remove(); });
         row.appendChild(k); row.appendChild(v); row.appendChild(del);
         rows.appendChild(row);
+    }
+
+    window.hubAddEnvRow = function (key, isSet) {
+        hubAddMaskedRow('hub-env-rows', 'env', 'KEY', key, isSet);
     };
+
+    window.hubAddHeaderRow = function (key, isSet) {
+        hubAddMaskedRow('hub-header-rows', 'header', 'Header-Name', key, isSet);
+    };
+
+    // ---------- authentication ----------
+    // The canonical def only has a headers map. The editor shows one of them as
+    // "Authentication": the one named by s.authHeader, else an Authorization header.
+    // A Bearer Authorization value is shown as a bare token with a fixed prefix.
+
+    var hubAuthStored = null; // {key, set, bearer} of the stored auth header, if any
+
+    function hubMaskedInput(input, isSet, emptyPlaceholder) {
+        input.value = '';
+        input.placeholder = isSet ? '•••••••• (unchanged)' : emptyPlaceholder;
+        input.dataset.keep = isSet ? '1' : '0';
+        input.oninput = function () { input.dataset.keep = '0'; };
+    }
+
+    function hubLoadAuth(s) {
+        var headers = (s && s.headers) ? s.headers : [];
+        var authKey = (s && s.authHeader) || '';
+        hubAuthStored = null;
+        headers.forEach(function (h) {
+            if (authKey ? h.key === authKey : h.key.toLowerCase() === 'authorization') hubAuthStored = h;
+        });
+        var mode = !hubAuthStored ? 'none'
+            : ((hubAuthStored.bearer && hubAuthStored.key.toLowerCase() === 'authorization') ? 'bearer' : 'header');
+        document.querySelectorAll('input[name="hub-auth-mode"]').forEach(function (r) { r.checked = (r.value === mode); });
+        hubMaskedInput(document.getElementById('hub-f-bearer'), mode === 'bearer' && hubAuthStored.set, 'token or {SECRET_KEY}');
+        document.getElementById('hub-f-auth-name').value = (mode === 'header') ? hubAuthStored.key : '';
+        hubMaskedInput(document.getElementById('hub-f-auth-val'), mode === 'header' && hubAuthStored.set, 'value or {SECRET_KEY}');
+        clearNode(document.getElementById('hub-header-rows'));
+        headers.forEach(function (h) { if (h !== hubAuthStored) window.hubAddHeaderRow(h.key, h.set); });
+        window.hubAuthModeChanged();
+    }
+
+    function hubAuthMode() {
+        var r = document.querySelector('input[name="hub-auth-mode"]:checked');
+        return r ? r.value : 'none';
+    }
+
+    window.hubAuthModeChanged = function () {
+        var mode = hubAuthMode();
+        document.getElementById('hub-auth-bearer').style.display = (mode === 'bearer') ? 'block' : 'none';
+        document.getElementById('hub-auth-header').style.display = (mode === 'header') ? 'block' : 'none';
+    };
+
+    // Auth row + additional rows as [{key, value, keep}], plus authHeader.
+    // Returns {error} when the input cannot be saved.
+    function hubCollectHeaders() {
+        var mode = hubAuthMode();
+        var headers = [];
+        var authHeader = '';
+        var stored = hubAuthStored;
+        if (mode === 'bearer') {
+            var b = document.getElementById('hub-f-bearer');
+            // Tolerate a pasted "Bearer xyz": the prefix is added below, never doubled.
+            var token = b.value.trim().replace(/^bearer\s+/i, '');
+            var keepBearer = b.dataset.keep === '1' && token === '' && stored && stored.bearer;
+            if (!keepBearer && token === '') return { error: 'Enter the bearer token, or choose None.' };
+            authHeader = keepBearer ? stored.key : 'Authorization';
+            headers.push(keepBearer ? { key: authHeader, value: '', keep: true }
+                                    : { key: authHeader, value: 'Bearer ' + token, keep: false });
+        } else if (mode === 'header') {
+            var name = document.getElementById('hub-f-auth-name').value.trim();
+            var v = document.getElementById('hub-f-auth-val');
+            if (!name) return { error: 'Enter the header name for authentication, or choose None.' };
+            var keepVal = v.dataset.keep === '1' && v.value === '' && stored && stored.key === name;
+            if (!keepVal && v.value === '') return { error: 'Enter a value for the ' + name + ' header.' };
+            authHeader = name;
+            headers.push({ key: name, value: keepVal ? '' : v.value, keep: !!keepVal });
+        }
+        var extra = hubCollectMaskedRows('header');
+        for (var i = 0; i < extra.length; i++) {
+            var k = extra[i].key.toLowerCase();
+            if (k === 'authorization' && mode === 'bearer') {
+                return { error: 'The Authorization header is already set by the bearer token. Remove it from Additional headers.' };
+            }
+            if (authHeader && k === authHeader.toLowerCase()) {
+                return { error: 'The ' + authHeader + ' header is already set under Authentication. Remove it from Additional headers.' };
+            }
+            headers.push(extra[i]);
+        }
+        return { headers: headers, authHeader: authHeader };
+    }
+
+    function hubUnresolvedNote(keys) {
+        return 'These placeholders are not in the secrets vault, so they would be sent as literal text: '
+            + keys.map(function (k) { return '{' + k + '}'; }).join(', ')
+            + '. Add them under Secrets, or check the spelling.';
+    }
+
+    window.hubTestServer = function () {
+        var out = document.getElementById('hub-test-result');
+        var built = hubBuildServer();
+        if (built.error) { out.style.color = '#e06c75'; out.textContent = built.error; return; }
+        var btn = document.getElementById('hub-test-btn');
+        btn.disabled = true;
+        out.style.color = ''; out.textContent = 'Connecting…';
+        hubAjax('hub_test_mcp_server', { name: hubEditingName || '', server: JSON.stringify(built.server) }).then(function (res) {
+            btn.disabled = false;
+            if (res.status !== 'ok') { out.style.color = '#e06c75'; out.textContent = res.message || 'Test failed.'; return; }
+            var r = res.result || {};
+            out.style.color = r.ok ? '#3fb950' : '#e06c75';
+            out.textContent = (r.ok ? '✔ ' : '✘ ') + (r.message || '')
+                + ((res.unresolved || []).length ? ' ' + hubUnresolvedNote(res.unresolved) : '');
+        }, function () {
+            btn.disabled = false;
+            out.style.color = '#e06c75'; out.textContent = 'The test request itself failed.';
+        });
+    };
+
+    function hubCollectMaskedRows(kind) {
+        var out = [];
+        document.querySelectorAll('#hub-' + kind + '-rows .hub-' + kind + '-row').forEach(function (row) {
+            var k = row.querySelector('.hub-' + kind + '-key').value.trim();
+            if (!k) return;
+            var v = row.querySelector('.hub-' + kind + '-val');
+            out.push({ key: k, value: v.value, keep: v.dataset.keep === '1' && v.value === '' });
+        });
+        return out;
+    }
 
     window.hubSaveServer = function () {
         var name = document.getElementById('hub-f-name').value.trim();
@@ -580,30 +710,34 @@
             swal('Invalid name', 'Server names may use letters, digits, _ and - (max 64 chars).', 'error');
             return;
         }
-        var transport = document.getElementById('hub-f-transport').value;
-        var env = [];
-        document.querySelectorAll('#hub-env-rows .hub-env-row').forEach(function (row) {
-            var k = row.querySelector('.hub-env-key').value.trim();
-            if (!k) return;
-            var v = row.querySelector('.hub-env-val');
-            env.push({ key: k, value: v.value, keep: v.dataset.keep === '1' && v.value === '' });
+        var built = hubBuildServer();
+        if (built.error) { swal('Check the form', built.error, 'error'); return; }
+        hubAjax('hub_save_mcp_server', { name: name, server: JSON.stringify(built.server) }).then(function (res) {
+            if (res.status !== 'ok') { swal('Save failed', res.message || 'unknown error', 'error'); return; }
+            window.hubCloseEditor();
+            window.hubLoadState();
+            if ((res.unresolved || []).length) swal('Saved, with a warning', hubUnresolvedNote(res.unresolved), 'warning');
         });
+    };
+
+    // Editor fields → canonical server payload, or {error}.
+    function hubBuildServer() {
+        var transport = document.getElementById('hub-f-transport').value;
+        var auth = (transport === 'stdio') ? { headers: [], authHeader: '' } : hubCollectHeaders();
+        if (auth.error) return { error: auth.error };
         var enabledFor = [];
         document.querySelectorAll('.hub-agent-cb:checked').forEach(function (cb) { enabledFor.push(cb.value); });
-        var server = {
+        return { server: {
             transport: transport,
             command: document.getElementById('hub-f-command').value.trim(),
             args: document.getElementById('hub-f-args').value.split('\n').map(function (a) { return a.trim(); }).filter(Boolean),
             url: document.getElementById('hub-f-url').value.trim(),
-            env: env,
+            env: hubCollectMaskedRows('env'),
+            headers: auth.headers,
+            authHeader: auth.authHeader,
             enabledFor: enabledFor
-        };
-        hubAjax('hub_save_mcp_server', { name: name, server: JSON.stringify(server) }).then(function (res) {
-            if (res.status !== 'ok') { swal('Save failed', res.message || 'unknown error', 'error'); return; }
-            window.hubCloseEditor();
-            window.hubLoadState();
-        });
-    };
+        } };
+    }
 
     function hubDeleteServer(name) {
         swal({

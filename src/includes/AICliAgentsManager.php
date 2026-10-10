@@ -145,6 +145,7 @@ require_once __DIR__ . '/services/EventSubscriptionStore.php';
 require_once __DIR__ . '/services/RelayHttpService.php'; // #113 — plugin-owned HTTP listener request handling
 // Config Hub (OP #1362 / H-01 phase 1 — canonical MCP store + per-vendor projectors)
 require_once __DIR__ . '/services/hub/HubStore.php';
+require_once __DIR__ . '/services/hub/McpConnectionTester.php';
 require_once __DIR__ . '/services/hub/Transpiler.php';
 require_once __DIR__ . '/services/hub/VendorProjector.php';
 require_once __DIR__ . '/services/hub/JsonMcpProjector.php';

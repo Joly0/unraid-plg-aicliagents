@@ -10,6 +10,6 @@ class KimiCodeProjector extends JsonMcpProjector {
     protected function vendorValue(array $def): array {
         $transport = $def['transport'] ?? 'stdio';
         if ($transport === 'stdio') return ['transport' => 'stdio'] + $this->stdioShape($def);
-        return ['transport' => $transport, 'url' => (string)($def['url'] ?? '')];
+        return self::withHeaders(['transport' => $transport, 'url' => (string)($def['url'] ?? '')], $def);
     }
 }

@@ -27,6 +27,6 @@ class ClaudeProjector extends JsonMcpProjector {
         if ($transport === 'stdio') {
             return ['type' => 'stdio'] + $this->stdioShape($def);
         }
-        return ['type' => $transport, 'url' => (string)($def['url'] ?? '')];
+        return self::withHeaders(['type' => $transport, 'url' => (string)($def['url'] ?? '')], $def);
     }
 }

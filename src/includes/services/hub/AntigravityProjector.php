@@ -26,6 +26,6 @@ class AntigravityProjector extends JsonMcpProjector {
         $transport = $def['transport'] ?? 'stdio';
         if ($transport === 'stdio') return $this->stdioShape($def);
         // sse / websocket / http remote — Antigravity uses `serverUrl`, NOT url/httpUrl.
-        return ['serverUrl' => (string)($def['url'] ?? '')];
+        return self::withHeaders(['serverUrl' => (string)($def['url'] ?? '')], $def);
     }
 }

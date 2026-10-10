@@ -1269,7 +1269,7 @@ class HubProjector {
         return ['written' => $written, 'removed' => $removed, 'drift' => $drift];
     }
 
-    /** Servers enabled for an agent, env {KEY} placeholders resolved for projection. */
+    /** Servers enabled for an agent, env and header {KEY} placeholders resolved for projection. */
     private static function enabledServersFor(array $servers, string $agentId): array {
         $out = [];
         foreach ($servers as $name => $def) {
@@ -1277,17 +1277,20 @@ class HubProjector {
             if (!empty($def['env']) && is_array($def['env'])) {
                 $def['env'] = self::resolvePlaceholders($def['env']);
             }
+            if (!empty($def['headers']) && is_array($def['headers'])) {
+                $def['headers'] = self::resolvePlaceholders($def['headers']);
+            }
             $out[$name] = $def;
         }
         return $out;
     }
 
     /**
-     * Resolve {KEY} placeholders in env values from the SecretService vault at
+     * Resolve {KEY} placeholders in env or header values from the SecretService vault at
      * projection time. Resolved values go to vendor files only — the canonical
      * store always keeps the placeholder form. Unknown keys stay literal.
      */
-    private static function resolvePlaceholders(array $env): array {
+    public static function resolvePlaceholders(array $env): array {
         $secrets = null; // lazy — only read the vault if a placeholder exists
         foreach ($env as $k => $v) {
             $env[$k] = preg_replace_callback('/\{([A-Z][A-Z0-9_]{1,127})\}/', function ($m) use (&$secrets) {
@@ -1326,6 +1329,25 @@ class HubProjector {
     }
 
     /**
+     * {KEY} placeholders in env/header values that the SecretService vault does
+     * not hold. Projection sends those literally, so the editor warns about them.
+     * @return string[] sorted unique key names
+     */
+    public static function unresolvedPlaceholders(array $def): array {
+        $values = array_merge(array_values((array)($def['env'] ?? [])), array_values((array)($def['headers'] ?? [])));
+        $missing = [];
+        $secrets = null;
+        foreach ($values as $v) {
+            if (!preg_match_all('/\{([A-Z][A-Z0-9_]{1,127})\}/', (string)$v, $m)) continue;
+            if ($secrets === null) $secrets = SecretService::getAgentSecrets();
+            foreach ($m[1] as $key) if (!array_key_exists($key, $secrets)) $missing[$key] = true;
+        }
+        $missing = array_keys($missing);
+        sort($missing);
+        return $missing;
+    }
+
+    /**
      * Map a vendor mcpServers value back to a canonical def (adopt path).
      * Preserves the existing enabledFor; returns null when the shape is not
      * recognisably stdio/http/sse.
@@ -1344,7 +1366,13 @@ class HubProjector {
         if ($url !== '') {
             $transport = isset($v['httpUrl']) ? 'http'
                 : ((($v['type'] ?? '') === 'sse') ? 'sse' : ((($v['type'] ?? '') === 'http') ? 'http' : 'sse'));
-            return ['transport' => $transport, 'url' => $url, 'enabledFor' => $enabledFor];
+            $out = ['transport' => $transport, 'url' => $url, 'enabledFor' => $enabledFor];
+            // Codex-style TOML names the map http_headers; every JSON vendor uses headers.
+            $headers = $v['headers'] ?? $v['http_headers'] ?? null;
+            if (is_array($headers) && !empty($headers)) {
+                $out['headers'] = array_map('strval', array_filter($headers, 'is_scalar'));
+            }
+            return $out;
         }
         return null;
     }

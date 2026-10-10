@@ -23,6 +23,7 @@ namespace AICliAgents\Handlers;
 
 use AICliAgents\Services\AgentRegistry;
 use AICliAgents\Services\Hub\HubProjector;
+use AICliAgents\Services\Hub\McpConnectionTester;
 use AICliAgents\Services\Hub\HubStore;
 use AICliAgents\Services\TerminalService;
 
@@ -34,6 +35,7 @@ class HubHandler
             case 'hub_get_state':               return self::getState();
             case 'hub_save_mcp_server':         return self::saveMcpServer();
             case 'hub_delete_mcp_server':       return self::deleteMcpServer();
+            case 'hub_test_mcp_server':         return self::testMcpServer();
             case 'hub_set_server_targets':      return self::setServerTargets();
             case 'hub_get_instructions':        return self::getInstructions();
             case 'hub_save_instructions':       return self::saveInstructions();
@@ -61,7 +63,7 @@ class HubHandler
                 'hub_set_instruction_targets', 'hub_list_skills', 'hub_save_skill_file',
                 'hub_delete_skill', 'hub_list_commands', 'hub_save_command',
                 'hub_delete_command', 'hub_set_skills_targets', 'hub_set_commands_targets',
-                'hub_project', 'hub_get_drift', 'hub_resolve_drift'];
+                'hub_project', 'hub_get_drift', 'hub_resolve_drift', 'hub_test_mcp_server'];
     }
 
     // ---------- reads ----------
@@ -160,9 +162,16 @@ class HubHandler
             'url' => $def['url'] ?? '',
             'enabledFor' => $def['enabledFor'] ?? [],
             'env' => [],
+            'headers' => [],
+            'authHeader' => $def['authHeader'] ?? '',
         ];
         foreach (($def['env'] ?? []) as $k => $v) {
             $out['env'][] = ['key' => (string)$k, 'set' => ((string)$v !== '')];
+        }
+        foreach (($def['headers'] ?? []) as $k => $v) {
+            // `bearer` tells the editor it can show this as a token with a fixed "Bearer " prefix.
+            $out['headers'][] = ['key' => (string)$k, 'set' => ((string)$v !== ''),
+                                 'bearer' => (strcasecmp((string)$k, 'Authorization') === 0 && stripos((string)$v, 'Bearer ') === 0)];
         }
         return $out;
     }
@@ -170,7 +179,7 @@ class HubHandler
     // ---------- writes ----------
 
     /**
-     * Create/update a server. POST: name, server (JSON). env entries are
+     * Create/update a server. POST: name, server (JSON). env and headers entries are
      * [{key, value, keep}] — keep=true retains the already-stored value (the UI
      * shows masked values and only sends what the user re-typed).
      */
@@ -186,25 +195,63 @@ class HubHandler
         $err = self::validateTargets($raw['enabledFor'] ?? []);
         if ($err !== null) return ['status' => 'error', 'message' => $err];
 
-        // Merge masked env entries against the stored def.
-        $existing = HubStore::getServer($name);
-        $env = [];
-        foreach ((array)($raw['env'] ?? []) as $row) {
-            if (!is_array($row) || !isset($row['key'])) continue;
-            $k = (string)$row['key'];
-            if (!empty($row['keep'])) {
-                if (isset($existing['env'][$k])) $env[$k] = $existing['env'][$k];
-            } else {
-                $env[$k] = (string)($row['value'] ?? '');
-            }
-        }
-        $raw['env'] = $env;
+        $raw = self::mergeWithStored($name, $raw);
 
         $errors = [];
         if (!HubStore::saveServer($name, $raw, $errors)) {
             return ['status' => 'error', 'message' => implode('; ', $errors) ?: 'save failed'];
         }
-        return ['status' => 'ok', 'name' => $name, 'hint' => 'Run "Apply to agents" to project the change.'];
+        return ['status' => 'ok', 'name' => $name, 'hint' => 'Run "Apply to agents" to project the change.',
+                'unresolved' => HubProjector::unresolvedPlaceholders(HubStore::getServer($name) ?? [])];
+    }
+
+    /** Merge masked env and header entries against the stored def of $name (if any). */
+    private static function mergeWithStored(string $name, array $raw): array
+    {
+        $existing = ($name !== '' && preg_match(HubStore::NAME_RE, $name)) ? HubStore::getServer($name) : null;
+        $raw['env'] = self::mergeMasked((array)($raw['env'] ?? []), $existing['env'] ?? []);
+        $raw['headers'] = self::mergeMasked((array)($raw['headers'] ?? []), $existing['headers'] ?? []);
+        return $raw;
+    }
+
+    /**
+     * Probe a remote server with the editor's current (unsaved) values. POST: name
+     * (optional, lets masked "unchanged" values come from the stored def), server
+     * (JSON, same shape as hub_save_mcp_server). Nothing is saved.
+     */
+    private static function testMcpServer(): array
+    {
+        $raw = json_decode((string)($_REQUEST['server'] ?? ''), true);
+        if (!is_array($raw)) return ['status' => 'error', 'message' => 'server payload must be a JSON object'];
+        $raw['enabledFor'] = [];
+        $raw = self::mergeWithStored((string)($_REQUEST['name'] ?? ''), $raw);
+        $errors = [];
+        $def = HubStore::normalizeServer($raw, $errors);
+        if ($def === null) return ['status' => 'error', 'message' => implode('; ', $errors)];
+        if ($def['transport'] === 'stdio') return ['status' => 'error', 'message' => 'Only remote (http/sse) servers can be tested here.'];
+        $unresolved = HubProjector::unresolvedPlaceholders($def);
+        if (!empty($def['headers'])) $def['headers'] = HubProjector::resolvePlaceholders($def['headers']);
+        $result = McpConnectionTester::test($def);
+        return ['status' => 'ok', 'result' => $result, 'unresolved' => $unresolved];
+    }
+
+    /**
+     * Masked [{key, value, keep}] rows → key => value map. keep=true retains the
+     * stored value for that key (dropped if nothing is stored under it).
+     */
+    private static function mergeMasked(array $rows, array $stored): array
+    {
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_array($row) || !isset($row['key'])) continue;
+            $k = (string)$row['key'];
+            if (!empty($row['keep'])) {
+                if (isset($stored[$k])) $out[$k] = $stored[$k];
+            } else {
+                $out[$k] = (string)($row['value'] ?? '');
+            }
+        }
+        return $out;
     }
 
     private static function deleteMcpServer(): array

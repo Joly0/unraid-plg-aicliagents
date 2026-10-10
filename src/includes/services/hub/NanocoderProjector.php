@@ -24,6 +24,6 @@ class NanocoderProjector extends JsonMcpProjector {
         $transport = $def['transport'] ?? 'stdio';
         if ($transport === 'stdio') return ['transport' => 'stdio'] + $this->stdioShape($def);
         // remote: nanocoder uses transport "http" (de-facto) + url.
-        return ['transport' => ($transport === 'sse' ? 'sse' : 'http'), 'url' => (string)($def['url'] ?? '')];
+        return self::withHeaders(['transport' => ($transport === 'sse' ? 'sse' : 'http'), 'url' => (string)($def['url'] ?? '')], $def);
     }
 }
