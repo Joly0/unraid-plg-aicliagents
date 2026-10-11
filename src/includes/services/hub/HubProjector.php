@@ -1095,6 +1095,7 @@ class HubProjector {
                     return ['status' => 'ok', 'mode' => 'adopt', 'adopted' => 'deletion'];
                 }
                 $canonical = self::canonicalFromVendor($theirs, $mcp['servers'][$serverName] ?? null, $projector->agentId());
+                if ($canonical !== null && !empty($mcp['servers'][$serverName]['disabled'])) $canonical['disabled'] = true;
                 if ($canonical === null) {
                     return ['status' => 'error', 'message' => 'on-disk value could not be mapped back to a canonical server definition — use overwrite or release'];
                 }
@@ -1273,6 +1274,7 @@ class HubProjector {
     private static function enabledServersFor(array $servers, string $agentId): array {
         $out = [];
         foreach ($servers as $name => $def) {
+            if (!empty($def['disabled'])) continue; // switched off for every agent
             if (!in_array($agentId, $def['enabledFor'] ?? [], true)) continue;
             if (!empty($def['env']) && is_array($def['env'])) {
                 $def['env'] = self::resolvePlaceholders($def['env']);

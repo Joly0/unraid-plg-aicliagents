@@ -109,11 +109,14 @@
             var s = hubState.servers[name];
             var row = el('div', 'display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid rgba(128,128,128,0.25); border-radius:4px;');
             row.className = 'hub-row hub-server-row';
-            var info = el('div', 'flex:1; min-width:0;');
+            var info = el('div', 'flex:1; min-width:0;' + (s.disabled ? ' opacity:0.5;' : ''));
             info.className = 'hub-row-info';
             var head = el('div', 'display:flex; align-items:center; gap:8px;');
             head.appendChild(el('span', 'font-size:12px; font-weight:700;', name));
             head.appendChild(el('span', 'font-size:10px; opacity:0.55; border:1px solid rgba(128,128,128,0.4); border-radius:3px; padding:0 5px;', s.transport));
+            if (s.disabled) {
+                head.appendChild(el('span', 'font-size:10px; border:1px solid rgba(128,128,128,0.6); border-radius:3px; padding:0 5px;', 'off'));
+            }
             info.appendChild(head);
             var summary = (s.transport === 'stdio')
                 ? (s.command + (s.args && s.args.length ? ' ' + s.args.join(' ') : ''))
@@ -132,6 +135,22 @@
             info.appendChild(chips);
             row.appendChild(info);
             var acts = hubRowActions(row);
+
+            // On/off for every targeted agent at once; the agent selection is kept.
+            var onBtn = el('button', 'flex-shrink:0;');
+            onBtn.type = 'button'; onBtn.className = 'aicli-btn-slim';
+            onBtn.title = s.disabled
+                ? 'Off: removed from all agents at the next "Apply to agents". Click to switch on.'
+                : 'On: click to switch off for all agents without losing the agent selection.';
+            onBtn.setAttribute('aria-label', (s.disabled ? 'Switch on ' : 'Switch off ') + name);
+            onBtn.setAttribute('aria-pressed', s.disabled ? 'false' : 'true');
+            onBtn.appendChild(Object.assign(document.createElement('i'), {
+                className: 'fa ' + (s.disabled ? 'fa-toggle-off' : 'fa-toggle-on')
+            }));
+            if (!s.disabled) onBtn.firstChild.style.color = 'var(--orange-500, #ff8c2f)';
+            onBtn.appendChild(document.createTextNode(s.disabled ? ' Off' : ' On'));
+            onBtn.addEventListener('click', function () { hubSetServerDisabled(name, !s.disabled); });
+            acts.appendChild(onBtn);
 
             var editBtn = el('button', 'flex-shrink:0;');
             editBtn.type = 'button'; editBtn.className = 'aicli-btn-slim'; editBtn.title = 'Edit';
@@ -604,6 +623,13 @@
             window.hubLoadState();
         });
     };
+
+    function hubSetServerDisabled(name, disabled) {
+        hubAjax('hub_set_server_disabled', { name: name, disabled: disabled ? '1' : '0' }).then(function (res) {
+            if (res.status !== 'ok') { swal('Change failed', res.message || 'unknown error', 'error'); return; }
+            window.hubLoadState();
+        });
+    }
 
     function hubDeleteServer(name) {
         swal({

@@ -49,6 +49,7 @@ class HubHandler
             case 'hub_project':                 return self::project();
             case 'hub_get_drift':               return HubProjector::detectDrift();
             case 'hub_resolve_drift':           return self::resolveDrift();
+            case 'hub_set_server_disabled':     return self::setServerDisabled();
             default:                            return null;
         }
     }
@@ -58,6 +59,7 @@ class HubHandler
     {
         return ['hub_get_state', 'hub_save_mcp_server', 'hub_delete_mcp_server',
                 'hub_set_server_targets', 'hub_get_instructions', 'hub_save_instructions',
+                'hub_set_server_disabled',
                 'hub_set_instruction_targets', 'hub_list_skills', 'hub_save_skill_file',
                 'hub_delete_skill', 'hub_list_commands', 'hub_save_command',
                 'hub_delete_command', 'hub_set_skills_targets', 'hub_set_commands_targets',
@@ -155,6 +157,7 @@ class HubHandler
     {
         $out = [
             'transport' => $def['transport'] ?? 'stdio',
+            'disabled' => !empty($def['disabled']),
             'command' => $def['command'] ?? '',
             'args' => $def['args'] ?? [],
             'url' => $def['url'] ?? '',
@@ -185,6 +188,8 @@ class HubHandler
 
         $err = self::validateTargets($raw['enabledFor'] ?? []);
         if ($err !== null) return ['status' => 'error', 'message' => $err];
+        // The editor does not carry the on/off switch; an edit keeps the stored state.
+        if (!array_key_exists('disabled', $raw) && !empty(HubStore::getServer($name)['disabled'])) $raw['disabled'] = true;
 
         // Merge masked env entries against the stored def.
         $existing = HubStore::getServer($name);
@@ -228,6 +233,19 @@ class HubHandler
             return ['status' => 'error', 'message' => implode('; ', $errors) ?: 'save failed'];
         }
         return ['status' => 'ok'];
+    }
+
+    /** POST: name, disabled ('1'/'0'). Takes effect for every agent at the next projection. */
+    private static function setServerDisabled(): array
+    {
+        $name = (string)($_REQUEST['name'] ?? '');
+        if (!preg_match(HubStore::NAME_RE, $name)) return ['status' => 'error', 'message' => 'invalid server name'];
+        $disabled = in_array((string)($_REQUEST['disabled'] ?? ''), ['1', 'true'], true);
+        $errors = [];
+        if (!HubStore::setServerDisabled($name, $disabled, $errors)) {
+            return ['status' => 'error', 'message' => implode('; ', $errors) ?: 'save failed'];
+        }
+        return ['status' => 'ok', 'disabled' => $disabled];
     }
 
     // ---------- instructions (H-02) ----------
