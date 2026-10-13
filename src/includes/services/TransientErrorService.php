@@ -593,22 +593,31 @@ final class TransientErrorService
         $summary = self::sanitise((string)($info['summary'] ?? ''));
         $max = (int)($info['max'] ?? self::DEFAULT_MAX_CONTINUES);
         try {
+            // ACTIVITY_TRAY_PLAIN_NOTICES.md rows 45-48: the title says what happened,
+            // the grey line starts with the workspace name. Never a workspace name in
+            // the title, and no long tail about the cause (the grey line has the summary).
+            $attempt = (int)($info['attempt'] ?? 1);
             if ($event === 'scheduled') {
                 $mins = max(1, (int)round(((int)($info['delay'] ?? 60)) / 60));
-                ActivityService::register($opId, 'system', "Automatic continue for $name after a temporary model error", ['meta' => ['workspaceId' => $sid, 'agentId' => $agentId]]);
-                ActivityService::wait($opId, "Continue " . (int)($info['attempt'] ?? 1) . " of $max planned in $mins min" . ($summary !== '' ? " ($summary)" : ''));
+                ActivityService::register($opId, 'system', 'Automatic continue planned', ['meta' => ['workspaceId' => $sid, 'agentId' => $agentId]]);
+                ActivityService::wait($opId, "$name · $attempt of $max · in $mins min" . ($summary !== '' ? " · $summary" : ''));
             } elseif ($event === 'sent') {
-                ActivityService::update($opId, ['type' => 'system', 'label' => "Automatic continue for $name after a temporary model error"]);
-                ActivityService::finish($opId, 'Continue ' . (int)($info['attempt'] ?? 1) . " of $max sent");
+                // update() keeps the label a row was created with, so a new title needs
+                // a new register(). The row becomes a finished record of the send.
+                ActivityService::register($opId, 'system', 'Automatic continue sent', ['meta' => ['kind' => 'record', 'workspaceId' => $sid, 'agentId' => $agentId]]);
+                ActivityService::finish($opId, "$name · $attempt of $max");
             } elseif ($event === 'exhausted') {
+                ActivityService::register($opId, 'system', "$name stopped again", ['meta' => ['workspaceId' => $sid, 'agentId' => $agentId]]);
                 ActivityService::fail(
                     $opId,
-                    "Needs you: $name stopped again after $max automatic continues" . ($summary !== '' ? " ($summary)" : '') . '.',
-                    'Open the workspace, check the model provider, and continue by hand.',
-                    ['type' => 'system', 'label' => "Automatic continue for $name after a temporary model error"]
+                    "$name stopped again after $max automatic continues" . ($summary !== '' ? " ($summary)" : '') . '.',
+                    'Open the workspace, check the model provider, and continue by hand.'
                 );
             } elseif ($event === 'reset') {
-                if (ActivityService::get($opId) !== null) ActivityService::finish($opId, 'Not needed: the workspace moved on');
+                if (ActivityService::get($opId) !== null) {
+                    ActivityService::register($opId, 'system', 'Automatic continue not needed', ['meta' => ['workspaceId' => $sid, 'agentId' => $agentId]]);
+                    ActivityService::finish($opId, "$name moved on by itself");
+                }
             }
         } catch (\Throwable $e) {
             // Advisory only.

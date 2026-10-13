@@ -18,6 +18,33 @@ class VersionCheckService {
     const TOTAL_TIMEOUT = 120; // seconds total for all agents
     const MAX_DROPDOWN_ENTRIES = 20;
 
+    /** Activity tray op id of a running check (Forgejo #447). */
+    public const TRAY_OP_ID = 'version_check';
+
+    /**
+     * One summary of the cache for the Store status line (Forgejo #447):
+     * the newest checked_at over $agentIds, how many of them carry a check_error,
+     * and the first such error. Pure: no I/O.
+     * @param array<string,array> $cache
+     * @param string[] $agentIds
+     * @return array{checked_at:int,errors:int,first_error:?string}
+     */
+    public static function summariseCache(array $cache, array $agentIds): array {
+        $checkedAt = 0; $errors = 0; $first = null;
+        foreach ($agentIds as $id) {
+            $e = $cache[$id] ?? null;
+            if (!is_array($e)) continue;
+            $ts = (int)($e['checked_at'] ?? 0);
+            if ($ts > $checkedAt) $checkedAt = $ts;
+            $err = $e['check_error'] ?? null;
+            if (is_string($err) && $err !== '') {
+                $errors++;
+                if ($first === null) $first = $err;
+            }
+        }
+        return ['checked_at' => $checkedAt, 'errors' => $errors, 'first_error' => $first];
+    }
+
     /**
      * Check all installed agents for available versions.
      * Returns cached results if lock is held by another process.
@@ -52,6 +79,20 @@ class VersionCheckService {
         fflush($fp);
 
         $startTime = time();
+        // Forgejo #447: the check is visible while it runs (Activity tray entry
+        // `version_check`), and its end reaches every open Store page on the event
+        // stream, so the cards refresh the moment the figures are real. Best effort.
+        $trayOpen = false;
+        try {
+            if (class_exists('\\AICliAgents\\Services\\ActivityService')) {
+                ActivityService::register(self::TRAY_OP_ID, 'system', self::TRAY_TITLE_RUNNING, [
+                    'step' => 'Asking the package registries for the newest versions',
+                    // ACTIVITY_TRAY_PLAIN_NOTICES.md R9: Cancel would only flip the row.
+                    'meta' => ['cancel' => 'none'],
+                ]);
+                $trayOpen = true;
+            }
+        } catch (\Throwable $e) { /* the tray is a courtesy */ }
         LogService::log("Starting version check for all agents...", LogService::LOG_INFO, "VersionCheck");
 
         try {
@@ -60,15 +101,29 @@ class VersionCheckService {
             $cache = self::getCachedResults();
             $updated = false;
 
+            $agentNo = 0; $agentTotal = count($registry);
+            // Agents the check was meant to ask, and how many of them the total
+            // timeout left unasked. They decide the end row (trayOutcome()).
+            $checkable = 0; $checkIds = []; $skipped = 0; $timedOut = false;
             foreach ($registry as $id => $agent) {
-                // Total timeout guard
-                if ((time() - $startTime) > self::TOTAL_TIMEOUT) {
-                    LogService::log("Version check total timeout reached ({self::TOTAL_TIMEOUT}s). Remaining agents skipped.", LogService::LOG_WARN, "VersionCheck");
-                    break;
+                $agentNo++;
+                if ($trayOpen) {
+                    // #447: a heartbeat per agent, so a slow registry never reads as "stalled".
+                    try { ActivityService::update(self::TRAY_OP_ID, ['step' => self::trayAgentStep($agent, (string)$id, $agentNo, $agentTotal), 'progress' => (int)floor(100 * ($agentNo - 1) / max(1, $agentTotal))]); } catch (\Throwable $e) {}
                 }
-
                 $pkg = $agent['npm_package'] ?? '';
                 if (empty($pkg) || $id === 'terminal') continue;
+                $checkable++; $checkIds[] = (string)$id;
+
+                // Total timeout guard: an agent left unasked is counted, not forgotten.
+                if ($timedOut || (time() - $startTime) > self::TOTAL_TIMEOUT) {
+                    if (!$timedOut) {
+                        $timedOut = true;
+                        LogService::log("Version check total timeout reached (" . self::TOTAL_TIMEOUT . "s). Remaining agents skipped.", LogService::LOG_WARN, "VersionCheck");
+                    }
+                    $skipped++;
+                    continue;
+                }
 
                 LogService::log("Checking versions for $id ($pkg)...", LogService::LOG_DEBUG, "VersionCheck");
 
@@ -138,10 +193,15 @@ class VersionCheckService {
             foreach ($registry as $id => $agent) {
                 if ($id === 'terminal') continue;
                 if (!empty($agent['npm_package'])) continue;  // npm already handled above
-                if ((time() - $startTime) > self::TOTAL_TIMEOUT) break;
 
                 $source = \AICliAgents\Services\Sources\SourceResolver::resolve($agent);
                 if ($source === null || !method_exists($source, 'populateCache')) continue;
+                $checkable++; $checkIds[] = (string)$id;
+                if ($timedOut || (time() - $startTime) > self::TOTAL_TIMEOUT) {
+                    $timedOut = true;
+                    $skipped++;
+                    continue;
+                }
 
                 LogService::log("Populating cache for $id (non-npm source)...", LogService::LOG_DEBUG, "VersionCheck");
                 try {
@@ -166,9 +226,26 @@ class VersionCheckService {
             }
 
             LogService::log("Version check complete. " . count($cache) . " agents processed in " . (time() - $startTime) . "s.", LogService::LOG_INFO, "VersionCheck");
+            if ($trayOpen) {
+                $trayOpen = false;
+                try {
+                    $sum = self::summariseCache($cache, $checkIds);
+                    if ($skipped > 0) {
+                        LogService::log("Version check: $skipped of $checkable agents were skipped because the total timeout ran out.", LogService::LOG_WARN, "VersionCheck");
+                    }
+                    if ($sum['errors'] > 0) {
+                        // The first raw error stays in the log (one warning per agent above).
+                        LogService::log("Version check: {$sum['errors']} of " . count($cache) . " agents could not be checked. First error: " . $sum['first_error'], LogService::LOG_WARN, "VersionCheck");
+                    }
+                    self::closeTray((int)$sum['errors'], $checkable, time() - $startTime, $skipped);
+                } catch (\Throwable $e) { /* best effort */ }
+            }
             return $cache;
 
         } finally {
+            if ($trayOpen) {
+                try { self::closeTrayStoppedEarly(); } catch (\Throwable $e) {}
+            }
             flock($fp, LOCK_UN);
             fclose($fp);
             @unlink(self::LOCK_FILE);
@@ -339,6 +416,97 @@ class VersionCheckService {
         $resolved = self::resolveChannelTarget($channel, $pinned, $tags);
         $resolved['explicit'] = false;
         return $resolved;
+    }
+
+    /** ACTIVITY_TRAY_PLAIN_NOTICES.md rows 14-17: the titles of the one `version_check` tray row. */
+    public const TRAY_TITLE_RUNNING = 'Checking for agent updates';
+    public const TRAY_TITLE_DONE    = 'Agent updates checked';
+    public const TRAY_TITLE_FAILED  = 'Some agents could not be checked';
+
+    /** The grey line while the check runs: "Claude Code (3 of 14)". Pure. */
+    public static function trayAgentStep($agent, string $id, int $no, int $total): string
+    {
+        $name = is_array($agent) ? trim((string)($agent['name'] ?? '')) : '';
+        return ($name !== '' ? $name : $id) . " ($no of $total)";
+    }
+
+    /** The grey line of a finished check: "14 agents in 6 s". Pure. */
+    public static function trayDoneStep(int $agents, int $seconds): string
+    {
+        return $agents . ' agent' . ($agents === 1 ? '' : 's') . ' in ' . max(0, $seconds) . ' s';
+    }
+
+    /** The red line of a check where some agents did not answer: "3 of 14 agents did not answer". Pure. */
+    public static function trayFailedLine(int $errors, int $total): string
+    {
+        return $errors . ' of ' . $total . ' agent' . ($total === 1 ? '' : 's') . ' did not answer';
+    }
+
+    /**
+     * The red line of a check that left agents unasked: "8 of 14 agents checked; 6 skipped — run it
+     * again". When some agents also gave no answer, that count joins the line. Pure.
+     */
+    public static function traySkippedLine(int $errors, int $skipped, int $total): string
+    {
+        $checked = max(0, $total - $skipped - $errors);
+        $line = $checked . ' of ' . $total . ' agent' . ($total === 1 ? '' : 's') . ' checked; ' . $skipped . ' skipped';
+        if ($errors > 0) $line .= ', ' . $errors . ' did not answer';
+        return $line . ' — run it again';
+    }
+
+    /**
+     * Decide the end row of a check. Pure, so a test needs no npm call.
+     * A check that left agents unasked (the total timeout ran out), or that had no
+     * agent to ask, is never a plain success: the person would trust old figures.
+     * @return array{status:string,title:string,step:string,error:string,recovery:string}
+     */
+    public static function trayOutcome(int $errors, int $skipped, int $total, int $seconds): array
+    {
+        $again = 'The cards keep the last good figures. Press "Check for Updates" to run it again.';
+        if ($total <= 0) {
+            return ['status' => 'failed', 'title' => self::TRAY_TITLE_FAILED, 'step' => '',
+                'error' => 'No agents were checked — run it again', 'recovery' => $again];
+        }
+        if ($skipped > 0) {
+            return ['status' => 'failed', 'title' => self::TRAY_TITLE_FAILED, 'step' => '',
+                'error' => self::traySkippedLine($errors, $skipped, $total), 'recovery' => $again];
+        }
+        if ($errors > 0) {
+            return ['status' => 'failed', 'title' => self::TRAY_TITLE_FAILED, 'step' => '',
+                'error' => self::trayFailedLine($errors, $total),
+                'recovery' => 'The cards keep the last good figures. Try again when the network is back.'];
+        }
+        return ['status' => 'done', 'title' => self::TRAY_TITLE_DONE,
+            'step' => self::trayDoneStep($total, $seconds), 'error' => '', 'recovery' => ''];
+    }
+
+    /**
+     * Close the `version_check` tray row with the outcome (rows 15 and 16). The
+     * label is a creation-only default of ActivityService::update(), so the row is
+     * registered again under its end-state title. Cancel stays off (R9).
+     */
+    public static function closeTray(int $errors, int $total, int $seconds, int $skipped = 0): void
+    {
+        $o = self::trayOutcome($errors, $skipped, $total, $seconds);
+        $opts = ['status' => $o['status'], 'progress' => 100, 'step' => $o['step'], 'meta' => ['cancel' => 'none']];
+        if ($o['status'] === 'failed') {
+            $opts['error']    = $o['error'];
+            $opts['recovery'] = $o['recovery'];
+        }
+        ActivityService::register(self::TRAY_OP_ID, 'system', $o['title'], $opts);
+    }
+
+    /** The check code stopped early (the finally block): row 17. */
+    public static function closeTrayStoppedEarly(): void
+    {
+        ActivityService::register(self::TRAY_OP_ID, 'system', self::TRAY_TITLE_FAILED, [
+            'status'   => 'failed',
+            'progress' => 100,
+            'step'     => '',
+            'error'    => 'The check stopped before it finished.',
+            'recovery' => 'Press "Check for Updates" to run it again.',
+            'meta'     => ['cancel' => 'none'],
+        ]);
     }
 
     /**

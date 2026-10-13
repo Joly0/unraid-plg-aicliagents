@@ -82,7 +82,7 @@ class StorageReclaimNoticeService
             return [
                 'phase' => 'tidying',
                 'label' => 'Tidying up storage',
-                'step'  => 'All workspaces are closed. The tidy-up is starting and can take a few minutes.',
+                'step'  => 'All workspaces are closed; this can take a few minutes',
                 'meta'  => ['chip' => 'in progress', 'user' => $user, 'phase' => 'tidying'],
             ];
         }
@@ -96,7 +96,7 @@ class StorageReclaimNoticeService
         $why = (($maintenance['reason'] ?? '') === 'space_pressure') ? 'Disk space is low.' : 'Workspace memory is nearly full.';
         return [
             'phase' => 'ask',
-            'label' => 'Storage tidy-up needs your workspaces closed',
+            'label' => 'Close workspaces for a storage tidy-up',
             'step'  => "$why $n workspace" . ($n === 1 ? ' is' : 's are') . " open: $list. They are closed, saved and started again by themselves.",
             'meta'  => [
                 'chip' => 'needs you', 'user' => $user, 'phase' => 'ask', 'count' => $n,
@@ -133,18 +133,30 @@ class StorageReclaimNoticeService
             }
             if ($plan === null) {
                 if ($existing !== null && ($existing['status'] ?? '') !== 'done') {
-                    ActivityService::finish($opId, 'Storage tidy-up finished');
+                    // ACTIVITY_TRAY_PLAIN_NOTICES.md R1/R3: the end is a record of a change.
+                    // The title says what happened, so there is no grey line. The title is
+                    // fixed when an entry is made, so the record replaces the entry.
+                    ActivityService::register($opId, 'storage', 'Storage tidy-up finished', [
+                        'step' => '', 'progress' => 100,
+                        'meta' => ['kind' => 'record', 'cancel' => 'none', 'user' => $user],
+                    ]);
+                    ActivityService::finish($opId, '');
                 }
                 return;
-            }
-            if ($existing === null) {
-                ActivityService::register($opId, 'storage', $plan['label'], ['step' => $plan['step'], 'meta' => $plan['meta']]);
-                $existing = ActivityService::get($opId);
             }
             // A 'waiting' entry is exempt from the stall watchdog and stays until finished
             // or dismissed: right for both phases (the tidy-up has no heartbeat to send).
             // Write only when something changed, so repeated syncs do not flood the push channel.
             $progress = $plan['phase'] === 'ask' ? 1 : 50;
+            // The title is fixed when an entry is made, and each phase has its own title
+            // ("Close workspaces…", then "Tidying up storage"), so a new phase makes a new entry.
+            if ($existing === null || ($existing['label'] ?? '') !== $plan['label']) {
+                ActivityService::register($opId, 'storage', $plan['label'], [
+                    'step' => $plan['step'], 'progress' => $progress, 'status' => ActivityService::STATUS_WAITING,
+                    'meta' => $plan['meta'],
+                ]);
+                $existing = ActivityService::get($opId);
+            }
             if ($existing !== null
                 && ($existing['status'] ?? '') === ActivityService::STATUS_WAITING
                 && ($existing['step'] ?? '') === $plan['step']

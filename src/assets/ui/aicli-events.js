@@ -23,6 +23,9 @@
  *   window `aicli-reconcile`     detail {reason}                   stream (re)opened, or reconcile()
  *   window `aicli-event-status`  detail {status}                   connecting|open|broken|unsupported
  *   window.aicliEvents = {status, lastTs, channels, on(channel, fn) -> off, reconcile()}
+ *   window.__aicliEventStats = {reconcile: {<reason>: n}, opens, reopens}   counters only, for the
+ *     Notebook summary line; more than 10 reopens in 60 s sends one WARN via aicli_log_to_server
+ *     (at most once per 10 minutes). Nothing is sent per event.
  *
  * `on()` replays to the new listener the events of that channel buffered in
  * the first BUFFER_MS after this script loaded: the SPA is a deferred module
@@ -47,17 +50,53 @@
         if (typeof c === 'string' && /^[A-Za-z0-9_.\-]+$/.test(c) && channels.indexOf(c) === -1) channels.push(c);
     });
 
+    // Counters for the Notebook hang trace (docs/specs/NOTEBOOK_HANG_OBSERVABILITY.md R10).
+    // Plain numbers only; a consumer reads them and keeps its own last-seen copy.
+    //   reconcile: {<reason>: n}  aicli-reconcile events by reason
+    //   opens: n                  how many times the stream opened (the first open included)
+    //   reopens: n                opens after the first
+    var stats = { reconcile: {}, opens: 0, reopens: 0 };
+    window.__aicliEventStats = stats;
+    var REOPEN_WINDOW_MS = 60000;   // more than REOPEN_LIMIT reopens in this window -> one WARN line
+    var REOPEN_LIMIT = 10;
+    var WARN_EVERY_MS = 600000;     // at most one such WARN per 10 minutes
+    var reopenTimes = [];
+    var lastReopenWarn = null;
+
     var api = {
         status: 'connecting',
         lastTs: 0,
         channels: channels.slice(),
         on: on,
-        reconcile: function () { fire('aicli-reconcile', { reason: 'manual' }); }
+        reconcile: function () { fireReconcile('manual'); }
     };
     window.aicliEvents = api;
 
     function fire(name, detail) {
         try { window.dispatchEvent(new CustomEvent(name, { detail: detail })); } catch (e) { /* very old browser */ }
+    }
+
+    function fireReconcile(reason) {
+        stats.reconcile[reason] = (stats.reconcile[reason] || 0) + 1;
+        fire('aicli-reconcile', { reason: reason });
+    }
+
+    /** One WARN line at once when the stream keeps reopening. Never one line per event. */
+    function noteReopen() {
+        stats.opens += 1;
+        if (stats.opens < 2) return; // the first open is not a reopen
+        stats.reopens += 1;
+        var now = Date.now();
+        reopenTimes.push(now);
+        while (reopenTimes.length && now - reopenTimes[0] > REOPEN_WINDOW_MS) reopenTimes.shift();
+        if (reopenTimes.length <= REOPEN_LIMIT) return;
+        if (lastReopenWarn !== null && now - lastReopenWarn < WARN_EVERY_MS) return;
+        lastReopenWarn = now;
+        try {
+            if (window.AICLI_PERF_TRACE === true && typeof window.aicli_log_to_server === 'function') {
+                window.aicli_log_to_server('event stream reopened ' + reopenTimes.length + ' times in 60 s', 1, 'EventStream');
+            }
+        } catch (e) { /* diagnostics only */ }
     }
 
     function setStatus(status) {
@@ -104,7 +143,7 @@
         var channel = idx >= 0 ? channels[idx] : undefined;
         if (!channel) {
             // Cannot tell whose message this is: every consumer re-reads instead.
-            fire('aicli-reconcile', { reason: 'unparsed-id' });
+            fireReconcile('unparsed-id');
             return;
         }
         var data;
@@ -129,7 +168,8 @@
                 setStatus('open');
                 // One reconcile per (re)connect for EVERY consumer: it closes
                 // the gap a depth-1 buffer cannot replay.
-                fire('aicli-reconcile', { reason: 'open' });
+                noteReopen();
+                fireReconcile('open');
             };
             es.onmessage = deliver;
             // EventSource reconnects by itself and resumes per channel with

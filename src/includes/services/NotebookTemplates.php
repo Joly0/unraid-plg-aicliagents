@@ -208,7 +208,7 @@ class NotebookTemplates {
             'wiki-home' => [
                 'title' => 'Wiki home', 'type' => 'markdown', 'tags' => ['wiki'], 'meta' => ['kind' => 'home'],
                 'description' => 'The front page of the wiki: what this project is, and where to find things.',
-                'body' => "# Wiki home\n\nWhat this project is, in two or three sentences.\n\n## Start here\n- [[Things you should know]] short notes that agents want you to read\n- [[How things work]]\n- [[Who owns what]]\n- [[Runbooks]]\n- [[Decisions log]]\n- [[Known issues]]\n- [[Gotchas]]\n- [[Glossary]]\n\n## Current focus\nWhat the team works on now.\n\n> [!TIP]\n> Give a page a `section` (a field on the page, or a tag such as `section:Runbooks`) and it shows under that heading in the wiki tree.\n",
+                'body' => "# Wiki home\n\nWhat this project is, in two or three sentences.\n\n## Start here\n- [[Things you should know]] short notes that agents want you to read\n- [[How things work]]\n- [[Who owns what]]\n- [[Runbooks]]\n- [[Decisions log]]\n- [[Known issues]]\n- [[Gotchas]]\n- [[Glossary]]\n\n## Current focus\nWhat the team works on now.\n\n> [!TIP]\n> Give a page the tag `wiki` and link it from here or from another wiki page with a double-bracket link to its title, the way this page links [[Runbooks]]. It then shows under that page in the wiki tree.\n",
             ],
             'decisions-log' => [
                 'title' => 'Decisions log', 'type' => 'markdown', 'tags' => ['wiki'], 'meta' => ['section' => 'Decisions log'],

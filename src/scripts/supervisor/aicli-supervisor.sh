@@ -1425,6 +1425,9 @@ _op_bake() {
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         export MKSQUASHFS_ARGS="-comp $compression"
+        # Forgejo #445: the bake tells an automatic trigger from a person's
+        # Persist, so a busy home on a disk upper skips the pointless copy.
+        export AICLI_BAKE_REASON="$reason"
         exec bash "${STORAGE_DIR}/storagectl.sh" bake --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
@@ -1615,8 +1618,11 @@ _op_consolidate() {
     # Automatic policy work is maintenance and must never terminate live sessions.
     if [ "$type" = "home" ] && _consolidate_reason_closes_home "$reason"; then
         log_info "Consolidate close phase: closing sessions for home/$id"
+        [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "closing" 2>/dev/null
         _close_home_for_consolidate "$id"
     fi
+    # Forgejo #454: the child sets its own phases through this job id.
+    export AICLI_JOB_ID="${_CURRENT_JOB_ID:-}"
 
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake. A consolidate can run for many minutes; an
@@ -1665,6 +1671,7 @@ _op_consolidate() {
         # across all the user's agents). Only on success (not exit 2 defer / not
         # failure), keyed by the consolidate id = the user. No-op if no manifest.
         if [ "$type" = "home" ]; then
+            [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "relaunching" 2>/dev/null
             _relaunch_home_sessions "$id" "$_CURRENT_JOB_ID"
         fi
     elif [ "$exit_code" -eq 2 ]; then

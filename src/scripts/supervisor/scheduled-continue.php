@@ -78,8 +78,12 @@ try {
             $next = scr_advance($at, $repeat, $now);
             if ($next === null) ConfigService::clearScheduledContinue($sid);
             else ConfigService::setScheduledContinue($sid, array_merge($entry, ['at' => $next]));
-            @ActivityService::register("sched_cont_stale_$sid", 'system', "Scheduled continue skipped (missed by more than 6 h) for $sid");
-            @ActivityService::finish("sched_cont_stale_$sid", 'Skipped');
+            // ACTIVITY_TRAY_PLAIN_NOTICES.md row 42: the title says what happened, the
+            // grey line names the workspace (by name, never the id when a name exists)
+            // and why. A finished record, not a job.
+            $staleName = trim((string)($byId[$sid]['name'] ?? '')) !== '' ? (string)$byId[$sid]['name'] : $sid;
+            @ActivityService::register("sched_cont_stale_$sid", 'system', 'Scheduled continue skipped', ['meta' => ['kind' => 'record', 'workspaceId' => $sid]]);
+            @ActivityService::finish("sched_cont_stale_$sid", "$staleName · missed by more than 6 hours while the plugin was off");
             continue;
         }
 
@@ -93,7 +97,7 @@ try {
         if ($agentId === '') { ConfigService::clearScheduledContinue($sid); continue; }
 
         $running = ProcessManager::isRunning($sid);
-        $name = (string)($rec['name'] ?? $sid);
+        $name = trim((string)($rec['name'] ?? '')) !== '' ? (string)$rec['name'] : $sid;
 
         // TRANSIENT_ERROR_AUTO_CONTINUE.md (#312): an automatic continue after a
         // temporary model error. It is only for a pane that still shows the SAME
@@ -140,8 +144,8 @@ try {
                 : 'clear';
             if ($decision === 'clear') {
                 ConfigService::clearScheduledContinue($sid);
-                @ActivityService::register("sched_cont_quota_$sid", 'system', "Scheduled continue dropped for $name: the agent resumed by itself");
-                @ActivityService::finish("sched_cont_quota_$sid", 'Dropped');
+                @ActivityService::register("sched_cont_quota_$sid", 'system', 'Scheduled continue dropped', ['meta' => ['kind' => 'record', 'workspaceId' => $sid]]);
+                @ActivityService::finish("sched_cont_quota_$sid", "$name · the agent resumed by itself");
                 continue;
             }
             if ($decision !== 'send') continue;                       // its own retry wait: next tick
@@ -178,8 +182,8 @@ try {
             } else {
                 ConfigService::setScheduledContinue($sid, array_merge($entry, ['at' => $next, 'last_fired_at' => $now]));
             }
-            @ActivityService::register("sched_cont_$sid", 'system', "Scheduled continue sent to " . ($rec['name'] ?? $sid));
-            @ActivityService::finish("sched_cont_$sid", 'Sent');
+            @ActivityService::register("sched_cont_$sid", 'system', 'Scheduled continue sent', ['meta' => ['kind' => 'record', 'workspaceId' => $sid]]);
+            @ActivityService::finish("sched_cont_$sid", $name);
         }
     }
 } catch (\Throwable $e) {

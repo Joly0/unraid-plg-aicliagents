@@ -88,6 +88,8 @@ class HealthService {
             'client_errors'  => function () { return self::collectClientErrors(); },
             'storage_jobs'   => function () { return self::collectStorageJobs(); },
             'push'           => function () { return self::collectPush(); },
+            'pinned_layers'  => function () { return self::collectPinnedLayers(); },
+            'home_upper'     => function () { return self::collectHomeUpper(); },
         ];
         $checks = [];
         foreach ($collectors as $name => $fn) {
@@ -331,6 +333,21 @@ class HealthService {
             $bootFreePct === null ? '?' : sprintf('%.0f%%', $bootFreePct),
             $tmpUsedPct === null ? '?' : sprintf('%.0f%%', $tmpUsedPct)
         ));
+    }
+
+    /**
+     * #455 (docs/specs/STORAGE_PINNED_LAYERS.md): deleted layers whose space is still in use.
+     * Pure. $holders is session id => number of files on an old home mount.
+     */
+    public static function evalPinnedLayers(int $mb, int $loops, array $holders): array {
+        if ($mb < 512) {
+            return self::result(self::STATUS_OK, $loops === 0 ? 'No old layers pin space' : "Old layers pin only $mb MB");
+        }
+        $who = $holders === []
+            ? 'No workspace or mount was found that holds it. The space is expected to free at the next server restart (#455).'
+            : count($holders) . ' workspace' . (count($holders) === 1 ? '' : 's') . ' (' . implode(', ', array_slice(array_keys($holders), 0, 6))
+                . ') still use an old copy of the home. Restart ' . (count($holders) === 1 ? 'it' : 'them') . ' to free the space.';
+        return self::result(self::STATUS_WARN, "Deleted layers still pin $mb MB of the boot drive ($loops loop devices). $who");
     }
 
     /** Boot-integrity cached sweep: any_critical -> fail, any_warning -> warn, none yet -> ok. */
@@ -580,6 +597,44 @@ class HealthService {
             }
         }
         return self::evalDeferMarkers($ages);
+    }
+
+    /**
+     * #435 (docs/specs/STORAGE_PINNED_LAYERS.md addendum): the writable layer of a home that lives on
+     * the boot drive, when that drive is filling. Pure. $uppers is home id => MB on the boot drive.
+     */
+    public static function evalHomeUpper(float $bootUsedPct, array $uppers): array {
+        $mb = (int)array_sum($uppers);
+        if ($bootUsedPct < 70.0 || $mb < 512) {
+            return self::result(self::STATUS_OK, sprintf('Boot drive %.0f%% used; home writable layers on it hold %d MB', $bootUsedPct, $mb));
+        }
+        $names = implode(', ', array_slice(array_keys($uppers), 0, 6));
+        return self::result(self::STATUS_WARN, sprintf(
+            'The boot drive is %.0f%% used and the writable layer of %s holds %d MB on it. Merge the home to free most of it (Storage tab, Consolidate; this closes open workspaces), or move the writable layer to RAM or move homes off the boot drive.',
+            $bootUsedPct, $names, $mb));
+    }
+
+    private static function collectHomeUpper(): array {
+        $free = self::freePct('/boot');
+        $used = $free === null ? 0.0 : 100.0 - $free;
+        $uppers = [];
+        if ($used >= 70.0) {
+            $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
+            foreach (@glob('/tmp/unraid-aicliagents/work/*/home') ?: [] as $home) {
+                $upper = StorageMountService::overlayOptionAt($mounts, $home, 'upperdir');
+                if ($upper === null || strpos($upper, '/boot/') !== 0) continue;
+                $mb = (int)trim((string)@shell_exec('du -sm ' . escapeshellarg($upper) . ' 2>/dev/null | cut -f1'));
+                $uppers[basename(dirname($home))] = $mb;
+            }
+        }
+        return self::evalHomeUpper($used, $uppers);
+    }
+
+    private static function collectPinnedLayers(): array {
+        $p = PinnedLayersService::pinned();
+        // Look for holders only when the pinned size is worth a warning: it scans /proc.
+        $holders = $p['mb'] >= 512 ? PinnedLayersService::staleHomeHolders() : [];
+        return self::evalPinnedLayers($p['mb'], $p['loops'], $holders);
     }
 
     private static function collectDiskSpace(): array {

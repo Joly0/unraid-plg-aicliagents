@@ -830,7 +830,7 @@ class TmuxService {
      */
     public static function notifyRelayActor(string $agentId, string $sessionId, string $topic, string $itemKind = '', string $itemId = ''): array {
         if (!preg_match('/^[a-z][a-z0-9_.-]{1,127}$/',$topic)) return ['status'=>'error','message'=>'Invalid Relay topic.'];
-        return self::submitFixedRelayNotice($agentId, $sessionId, self::relayActorNotice($topic, $itemKind, $itemId));
+        return self::submitFixedRelayNotice($agentId, $sessionId, self::relayActorNotice($topic, $itemKind, $itemId, RelayNoticeWording::resolve($agentId)));
     }
 
     /**
@@ -839,7 +839,7 @@ class TmuxService {
      * waiting" for a direct message. Only validated, plugin-generated ids are
      * interpolated (never sender text). Pure, so the wording is unit-testable.
      */
-    public static function relayActorNotice(string $topic, string $itemKind = '', string $itemId = ''): string {
+    public static function relayActorNotice(string $topic, string $itemKind = '', string $itemId = '', ?array $wording = null): string {
         $kind = in_array($itemKind, ['event','request'], true) ? $itemKind : '';
         // Topic events are 'rel_' ids (AgentRelayService::publish); accepting only
         // msg_/req_ dropped the item id from every event notice (found 2026-09-24).
@@ -847,6 +847,8 @@ class TmuxService {
         $what = $kind !== '' && $id !== ''
             ? "A Relay $kind ($id) is waiting on topic $topic"
             : 'A durable event or request is waiting on topic ' . $topic;
+        // RELAY_NOTICE_WORDING.md: a resolved wording other than Full changes only the words.
+        if ($wording !== null && $wording['style'] !== 'full') return RelayNoticeWording::actor($topic, $what, $wording);
         // Unquoted, and the tool named first — see relayDirectNotice() for why.
         return '[SYSTEM RELAY NOTIFICATION] You are the administrator-assigned actor for Relay topic ' . $topic
             . ". $what. Read it with your Relay inbox tool, or run: \$AICLI_RELAY_COMMAND inbox."
@@ -873,7 +875,7 @@ class TmuxService {
         // and may now be safe to surface. Opportunistic self-heal — every fresh
         // delivery attempt also drains the backlog for this session.
         self::drainPendingRelay($agentId, $sessionId);
-        $notice = self::relayDirectNotice([['id'=>$sender, 'name'=>$senderName]]);
+        $notice = self::relayDirectNotice([['id'=>$sender, 'name'=>$senderName]], RelayNoticeWording::resolve($agentId));
         $res = self::submitFixedRelayNotice($agentId, $sessionId, $notice);
         // Not safe to inject right now (a question/permission/pager is on the pane, or
         // the pane is parked on a dead agent): NEVER press Enter into that — queue the
@@ -911,7 +913,7 @@ class TmuxService {
      * Build the fixed direct-message notice naming one or more validated senders.
      * @param array $entries list of ['id'=>string, 'name'=>string] (name may be '').
      */
-    private static function relayDirectNotice(array $entries): string {
+    private static function relayDirectNotice(array $entries, ?array $wording = null): string {
         $labels = [];
         foreach ($entries as $e) {
             $id = (string)($e['id'] ?? '');
@@ -923,6 +925,7 @@ class TmuxService {
             ? count($labels) . ' direct messages (from ' . implode(', ', $labels) . ') are'
             : 'A direct message from ' . ($labels[0] ?? 'a peer') . ' is';
         // $AICLI_RELAY_COMMAND, not the resolved path: aicli-shell.sh exports it into
+        if ($wording !== null && $wording['style'] !== 'full') return RelayNoticeWording::direct($who, $wording);
         // every agent's shell, so it is the one form that stays correct for every
         // vendor and survives the plugin moving. It is deliberately NOT quoted —
         // prose quotes read as shell syntax to an agent copying the line, and
@@ -945,6 +948,25 @@ class TmuxService {
      * is set aside. Liveness is still proved — see addressablePane().
      */
     private static function submitFixedRelayNotice(string $agentId, string $sessionId, string $notice, bool $force = false): array {
+        // RELAY_TOKEN_SAVINGS.md R10: one notice per unread batch. A notice went out lately
+        // and the inbox was not read since, so type nothing; the item is saved already.
+        if (!$force && !RelayNoticeLedger::shouldSend($sessionId)) {
+            LogService::log("Relay notice for aicli-agent-$agentId-$sessionId skipped: an earlier notice is still unread", LogService::LOG_INFO, 'TmuxService');
+            return ['status'=>'ok', 'confirmed'=>true, 'skipped'=>'notice-unread'];
+        }
+        // R14: Codex and OpenCode queue a message typed while they work. When our notice
+        // already waits in that queue the agent reads it when the step ends: type nothing.
+        if (!$force && in_array($agentId, ['codex-cli', 'opencode', 'kilocode'], true)) {
+            [$qName, $qSock] = self::resolveSession($agentId, $sessionId);
+            if ($qName !== '') {
+                $qCap = self::runTmuxAt($qSock, ['capture-pane', '-p', '-e', '-t', $qName, '-S', '-24']);
+                if (($qCap['rc'] ?? -1) === 0 && self::ownNoticeQueued((string)($qCap['out'] ?? ''), $agentId) !== null) {
+                    LogService::log("A Relay notice is already queued in aicli-agent-$agentId-$sessionId: the agent reads it when its current step ends — no second notice", LogService::LOG_INFO, 'TmuxService');
+                    RelayNoticeLedger::recordSent($sessionId);
+                    return ['status'=>'ok', 'confirmed'=>true, 'queued'=>true];
+                }
+            }
+        }
         // #148 readiness gate: the OLD path pasted then pressed Enter unconditionally,
         // so a notice arriving while the agent showed a question/permission/pager would
         // have its trailing Enter CONFIRM whatever was highlighted — auto-answering a
@@ -970,7 +992,8 @@ class TmuxService {
             if (!$force && ($gate['reason'] ?? '') === 'own-notice-queued') {
                 self::clearUnsentState($agentId, $sessionId);
                 LogService::log("A Relay notice is already queued in aicli-agent-$agentId-$sessionId: the agent is busy, and Claude Code sends the notice when its current step ends — no second notice", LogService::LOG_INFO, 'TmuxService');
-                return ['status'=>'ok', 'confirmed'=>true, 'queued'=>true];
+                RelayNoticeLedger::recordSent($sessionId);
+                    return ['status'=>'ok', 'confirmed'=>true, 'queued'=>true];
             }
             if ($gate['ready'] !== true && !$ownUnsent) {
                 LogService::log("Deferred Relay notice for aicli-agent-$agentId-$sessionId (pane: {$gate['reason']})", LogService::LOG_INFO, 'TmuxService');
@@ -1000,7 +1023,10 @@ class TmuxService {
             elseif (($enter['held'] ?? '') !== 'foreign-text') self::noteUnsentTryFailed($agentId, $sessionId);
             // An earlier Relay notice says the same thing ("read your inbox"), so once it
             // is sent this delivery is done. Its confirmed flag tells the caller to retry.
-            if ($unsent['kind'] === 'relay') return ['status'=>'ok', 'confirmed'=>$enter['confirmed'], 'resubmitted'=>true];
+            if ($unsent['kind'] === 'relay') {
+                if ($enter['confirmed'] === true) RelayNoticeLedger::recordSent($sessionId);   // R9
+                return ['status'=>'ok', 'confirmed'=>$enter['confirmed'], 'resubmitted'=>true];
+            }
             if ($enter['confirmed'] !== true) return ['status'=>'deferred', 'reason'=>'own-notice-unsent'];
         }
         if ($force) {
@@ -1011,7 +1037,8 @@ class TmuxService {
             $cap = self::runTmuxAt($sock, ['capture-pane', '-p', '-e', '-t', $name, '-S', '-24']);
             if (($cap['rc'] ?? -1) === 0 && self::ownNoticeQueued((string)($cap['out'] ?? ''), $agentId) !== null) {
                 LogService::log("A Relay notice is already queued in aicli-agent-$agentId-$sessionId — the forced delivery typed nothing; Claude Code sends the queued notice when its current step ends", LogService::LOG_INFO, 'TmuxService');
-                return ['status'=>'ok', 'confirmed'=>true, 'queued'=>true];
+                RelayNoticeLedger::recordSent($sessionId);
+                    return ['status'=>'ok', 'confirmed'=>true, 'queued'=>true];
             }
             LogService::log("Operator forced a Relay notice into aicli-agent-$agentId-$sessionId (readiness classifier bypassed)", LogService::LOG_INFO, 'TmuxService');
         }
@@ -1022,6 +1049,7 @@ class TmuxService {
         $enter = self::pressEnterAndConfirm($name, $sock, self::noticeMarker($notice));
         if (!$enter['sent']) return ['status'=>'error','message'=>'Could not submit Relay notice'];
         self::logSubmitOutcome('fixed Relay notice', $name, $enter);
+        if ($enter['confirmed'] === true) RelayNoticeLedger::recordSent($sessionId);   // R9: an unconfirmed Enter may be retried
         return ['status'=>'ok', 'confirmed'=>$enter['confirmed']];
     }
 
@@ -1563,6 +1591,9 @@ class TmuxService {
      * @return array{kind:string,marker:string}|null
      */
     public static function ownNoticeQueued(string $capture, ?string $agentId = null): ?array {
+        // RELAY_TOKEN_SAVINGS.md R14: Codex and OpenCode show a queued message in their own shapes.
+        if ($agentId === 'codex-cli') return self::codexQueuedNotice($capture);
+        if ($agentId === 'opencode' || $agentId === 'kilocode') return self::opencodeQueuedNotice($capture);
         if (!self::inputNeedsRuledBox($agentId)) return null;
         $lines = preg_split('/\R/', self::plainPaneText($capture)) ?: [];
         $ruled = self::ruledInputBox($lines);
@@ -1591,6 +1622,57 @@ class TmuxService {
             }
             if (!preg_match('/^[ \t\x{00A0}]{2,}\S/u', $l)) break;
             array_unshift($cont, $l);
+        }
+        return null;
+    }
+
+    /**
+     * PURE (R14) — Codex. After its last "Messages to be submitted after next tool call"
+     * line, each row that starts with "↳" is a queued message; indented rows after it are
+     * the wrapped rest of that message. Returns the notice match of the first queued
+     * message that is one of the plugin's own notices.
+     */
+    private static function codexQueuedNotice(string $capture): ?array {
+        $lines = preg_split('/\R/', self::plainPaneText($capture)) ?: [];
+        $head = -1;
+        foreach ($lines as $i => $l) {
+            if (preg_match('/^\s*(?:[•·*-]\s*)?Messages to be submitted after next tool call/iu', (string)$l)) $head = $i;
+        }
+        if ($head < 0) return null;
+        $rows = [];
+        for ($i = $head + 1, $c = count($lines); $i < $c; $i++) {
+            $l = (string)$lines[$i];
+            if (preg_match('/^\s*\x{21B3}[ \t\x{00A0}]*(.*)$/u', $l, $m)) { $rows[] = $m[1]; continue; }
+            if ($rows !== [] && preg_match('/^[ \t\x{00A0}]{2,}\S/u', $l)) { $rows[count($rows) - 1] .= ' ' . trim($l); continue; }
+            if (trim($l, " \t\u{00A0}") === '') { if ($rows !== []) break; continue; }
+            if ($rows === []) continue;
+            break;
+        }
+        foreach ($rows as $row) {
+            $own = self::matchOwnNotice($row);
+            if ($own !== null) return $own;
+        }
+        return null;
+    }
+
+    /**
+     * PURE (R14) — OpenCode and Kilo. A queued message is drawn as its text with a line
+     * "QUEUED" right under it (wrapped text rows come first). Returns the notice match when
+     * the text above a QUEUED badge is one of the plugin's own notices.
+     */
+    private static function opencodeQueuedNotice(string $capture): ?array {
+        $lines = preg_split('/\R/', self::plainPaneText($capture)) ?: [];
+        foreach ($lines as $i => $l) {
+            if (trim((string)$l, " \t\u{00A0}") !== 'QUEUED') continue;
+            // The message is the run of non-blank lines directly above the badge.
+            $parts = [];
+            for ($j = $i - 1; $j >= 0 && count($parts) < 8; $j--) {
+                $t = trim((string)$lines[$j], " \t\u{00A0}");
+                if ($t === '') break;
+                array_unshift($parts, $t);
+            }
+            $own = self::matchOwnNotice(implode(' ', $parts));
+            if ($own !== null) return $own;
         }
         return null;
     }
@@ -1632,11 +1714,17 @@ class TmuxService {
         return self::matchOwnNotice($text) !== null ? 'own' : 'foreign';
     }
 
+    /** The fixed rows plus the rows of every Relay notice style (RELAY_NOTICE_WORDING.md R4). */
+    private static function ownNoticeRows(): array {
+        return array_merge(self::OWN_NOTICE_OPENINGS, RelayNoticeWording::ownRows());
+    }
+
     /** Is $marker the marker of one of the plugin's own notices (OWN_NOTICE_OPENINGS)? */
     private static function isOwnNoticeMarker(string $marker): bool {
         if ($marker === '') return false;
-        foreach (self::OWN_NOTICE_OPENINGS as [, $opening]) {
-            if (self::noticeMarker($opening) === $marker) return true;
+        foreach (self::ownNoticeRows() as [, $opening]) {
+            $m = self::noticeMarker($opening);
+            if ($m === $marker || ($m !== '' && strpos($marker, $m) === 0)) return true;   // a short opening is a prefix of the 24-character marker
         }
         return false;
     }
@@ -1674,7 +1762,7 @@ class TmuxService {
     private static function matchOwnNotice(string $text): ?array {
         $flat = self::squashSpace($text);
         if ($flat === '') return null;
-        foreach (self::OWN_NOTICE_OPENINGS as [$kind, $opening, $ending]) {
+        foreach (self::ownNoticeRows() as [$kind, $opening, $ending]) {
             $o = self::squashSpace($opening); $e = self::squashSpace($ending);
             if (strpos($flat, $o) === 0 && substr($flat, -strlen($e)) === $e) {
                 return ['kind' => $kind, 'marker' => self::noticeMarker($opening)];
@@ -1694,7 +1782,7 @@ class TmuxService {
     private static function ownNoticeWithText(string $text): ?array {
         $flat = self::squashSpace($text);
         if ($flat === '') return null;
-        foreach (self::OWN_NOTICE_OPENINGS as [$kind, $opening, $ending]) {
+        foreach (self::ownNoticeRows() as [$kind, $opening, $ending]) {
             $o = self::squashSpace($opening); $e = self::squashSpace($ending);
             if ($o === '' || $e === '' || strpos($flat, $o) !== 0) continue;
             $p = strpos($flat, $e, strlen($o));
@@ -1839,6 +1927,43 @@ class TmuxService {
         [, , $why] = self::addressablePane($agentId, $sessionId);
         return $why === '' ? ['ready'=>true, 'reason'=>'addressable']
                            : ['ready'=>false, 'reason'=>$why];
+    }
+
+    /** Seconds of terminal output or input that make a session count as busy (#463). */
+    const BUSY_ACTIVITY_WINDOW_SECS = 60;
+
+    /**
+     * #463: is this session busy? A restart of a busy session loses work, so every
+     * doubt counts as busy. A session is busy when ANY of these is true:
+     *  - paneAcceptsInput() is not ready. This is the same rule that holds a Relay
+     *    notice ("the agent is busy"): a working indicator, a question, a menu,
+     *    text typed on the input line, a pane that cannot be read, or no live agent.
+     *  - tmux shows output (window_activity) or client input (session_activity)
+     *    in the last BUSY_ACTIVITY_WINDOW_SECS seconds.
+     *  - the activity time cannot be read.
+     * Spec: docs/specs/AGENT_SECRETS_SAVE_RELOAD_GUARD.md (R3).
+     *
+     * @param int|null $now test seam: the current Unix time.
+     * @return array{busy:bool,reason:string}
+     */
+    public static function sessionBusy(string $agentId, string $sessionId, ?int $now = null): array {
+        $gate = self::paneAcceptsInput($agentId, $sessionId);
+        if ($gate['ready'] !== true) {
+            return ['busy' => true, 'reason' => (string)($gate['reason'] ?? 'not-ready')];
+        }
+        [$name, $sock] = self::resolveSession($agentId, $sessionId);
+        if ($name === '') return ['busy' => true, 'reason' => 'no-session'];
+        $r = self::runTmuxAt($sock, ['display-message', '-p', '-t', $name, '#{window_activity} #{session_activity}']);
+        if (($r['rc'] ?? -1) !== 0) return ['busy' => true, 'reason' => 'activity-unreadable'];
+        $times = preg_split('/\s+/', trim((string)($r['out'] ?? ''))) ?: [];
+        $last = 0;
+        foreach ($times as $t) {
+            if (ctype_digit($t)) $last = max($last, (int)$t);
+        }
+        if ($last <= 0) return ['busy' => true, 'reason' => 'activity-unreadable'];
+        $age = ($now ?? time()) - $last;
+        if ($age < self::BUSY_ACTIVITY_WINDOW_SECS) return ['busy' => true, 'reason' => 'recent-activity'];
+        return ['busy' => false, 'reason' => 'idle'];
     }
 
     /**
@@ -2724,7 +2849,8 @@ class TmuxService {
             'opId'        => "relay_waiting__{$agentId}__{$sessionId}",
             'type'        => 'relay_waiting',
             'label'       => self::relayWaitingLabel($senders, $workspace),
-            'step'        => '',
+            // Row 60: the grey line carries the sender and the reason in one line.
+            'step'        => self::relayWaitingDetail($senders, self::relayHeldReasonLabel($lastReason)),
             'progress'    => 0,
             'status'      => 'relay_waiting',
             // Sort order only — no watchdog ever evaluates this entry.
@@ -2792,7 +2918,7 @@ class TmuxService {
             return ['status'=>'deferred', 'reason'=>$gate['reason'], 'senders'=>count($entries)];
         }
 
-        $res = self::submitFixedRelayNotice($agentId, $sessionId, self::relayDirectNotice($entries), $force);
+        $res = self::submitFixedRelayNotice($agentId, $sessionId, self::relayDirectNotice($entries, RelayNoticeWording::resolve($agentId)), $force);
         if (($res['status'] ?? '') === 'ok' && ($res['confirmed'] ?? null) === false) {
             // #320: typed, but no Enter took. Keep the queue so the next drain presses
             // Enter on it again (Enter only), and say why on the pill.
@@ -3031,36 +3157,40 @@ class TmuxService {
     }
 
     /**
-     * Display label for one session's pill: names the RECIPIENT workspace first,
-     * then the sender(s) and the count (spec R1/Design "The pill"), matching how
-     * drainPendingRelay() already coalesces several senders into one notice.
-     *
-     * The recipient leads because the tray is server-wide — it is mounted on the
-     * AICliAgents tab AND on Settings, and shows work for every workspace, not the
-     * one you happen to be looking at. A pill that named only the sender read as
-     * "a message is waiting for you, here" to an operator sitting in the SENDER's
-     * own workspace, which is the one workspace it was certainly not waiting for.
+     * Title for one session's pill (ACTIVITY_TRAY_PLAIN_NOTICES.md row 60):
+     * "Message waiting for home-homelab" or "3 messages waiting for home-homelab".
+     * The recipient workspace is in the title because the tray is server-wide: a
+     * pill that named only the sender read as "a message is waiting for you, here"
+     * to a person sitting in the SENDER's own workspace. The senders and the
+     * reason go to the grey line (relayWaitingDetail()).
      *
      * @param list<array{id:string,name:string,count:int}> $senders
-     * @param string $workspace Recipient workspace name; '' falls back to the
-     *        sender-only wording (an unnamed workspace must not print an empty prefix).
+     * @param string $workspace Recipient workspace name; '' prints no "for" part.
      */
     public static function relayWaitingLabel(array $senders, string $workspace = ''): string {
         $total = 0;
+        foreach ($senders as $s) $total += max(1, (int)($s['count'] ?? 1));
+        $body = $total > 1 ? "$total messages waiting" : 'Message waiting';
+        $workspace = trim($workspace);
+        return $workspace !== '' ? "$body for $workspace" : $body;
+    }
+
+    /**
+     * Grey line for the pill: "from saas-businessos · held because the agent
+     * looked busy". Several senders are joined with a comma.
+     *
+     * @param list<array{id:string,name:string,count:int}> $senders
+     */
+    public static function relayWaitingDetail(array $senders, string $reasonLabel): string {
         $names = [];
         foreach ($senders as $s) {
-            $total += max(1, (int)($s['count'] ?? 1));
             $name = (string)($s['name'] ?? '');
             $names[] = $name !== '' ? $name : (string)($s['id'] ?? 'a peer');
         }
-        $who = implode(', ', $names);
-        $body = $who === ''
-            ? 'a message is waiting'
-            : ($total > 1 ? "$total messages waiting (from $who)" : "a message from $who is waiting");
-        // Sentence case only when nothing precedes it — "home-homelab — a message…"
-        // reads as one sentence, "A message…" on its own must still start a sentence.
-        $workspace = trim($workspace);
-        return $workspace !== '' ? "$workspace — $body" : ucfirst($body);
+        $parts = [];
+        if ($names !== []) $parts[] = 'from ' . implode(', ', $names);
+        if ($reasonLabel !== '') $parts[] = 'held because ' . $reasonLabel;
+        return implode(' · ', $parts);
     }
 
     /**

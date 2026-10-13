@@ -29,6 +29,7 @@ require_once __DIR__ . '/services/LogService.php';
 require_once __DIR__ . '/services/AtomicWriteService.php';
 require_once __DIR__ . '/services/StorageBackendPolicyService.php';
 require_once __DIR__ . '/services/StorageBackendMigrationService.php';
+require_once __DIR__ . '/services/UpperPlacementService.php';
 require_once __DIR__ . '/services/ConfigService.php';
 require_once __DIR__ . '/services/InitService.php';
 require_once __DIR__ . '/services/PermissionService.php';
@@ -100,6 +101,7 @@ require_once __DIR__ . '/services/HealthService.php';
 // Feature #1382 — programmatic state-invariant auditor (live-box twin of the
 // tests/lib/state-ledger.sh harness ledger). Depends on HealthService above.
 require_once __DIR__ . '/services/StorageStateAuditService.php';
+require_once __DIR__ . '/services/PinnedLayersService.php';  // #455 — flash space pinned by old home layers
 // T-11 (Feature #1360) — workspace export/import bundles
 require_once __DIR__ . '/services/WorkspaceBundleService.php';
 require_once __DIR__ . '/services/AgentRelayService.php';
@@ -130,6 +132,8 @@ require_once __DIR__ . '/services/VoiceService.php';
 require_once __DIR__ . '/services/VoiceEngineSetupService.php';
 require_once __DIR__ . '/services/AdminService.php';
 require_once __DIR__ . '/services/QuotaDetectionService.php'; // #281 — all-running-session quota polling
+require_once __DIR__ . '/services/RelayNoticeWording.php'; // #461 — Relay notice wording styles
+require_once __DIR__ . '/services/RelayNoticeLedger.php'; // RELAY_TOKEN_SAVINGS.md R9 — one notice per unread batch
 require_once __DIR__ . '/services/TransientErrorService.php'; // #312 — auto-continue after a temporary model error
 require_once __DIR__ . '/services/AutoContinueRules.php'; // AUTO_CONTINUE_PATTERNS.md — the operator's own auto-continue patterns
 require_once __DIR__ . '/services/WorkspaceScreenService.php'; // AUTO_CONTINUE_PATTERNS.md — masked, logged screen read

@@ -34,6 +34,15 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">One setting applies to every installed agent and home. Changing it migrates all existing storage. Plain directories write directly to the selected path; removable/USB targets require an acknowledgement and SquashFS + zram is recommended to reduce wear.</div>
                         </dd>
 
+                        <dt>Writable layer for homes</dt>
+                        <dd>
+                            <select name="storage_upper_mode" aria-label="Writable layer for homes" data-testid="storage-upper-mode" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'zram', _('RAM (zram): fast, no disk wear, lost on a crash until saved'))?>
+                                <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'disk', _('Disk: survives a crash or power cut, uses space on the persistence drive'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Where each home keeps what you change between saves. Changing it moves the data: open workspaces are closed, the changes are saved into a verified layer, and the home is mounted again on the new placement. You are shown what will happen before anything moves.</div>
+                        </dd>
+
                         <dt>Logging Level</dt>
                         <dd>
                             <select name="log_level" aria-label="Logging Level" style="width: 100%;" <?=$autoSave?>>
@@ -328,6 +337,58 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         </dd>
                     </dl>
 
+                    <!-- RELAY_NOTICE_WORDING.md (#461): the wording of the notices the plugin types into an agent. -->
+                    <dl style="margin-top:14px;">
+                        <dt>Wording of Relay notices typed into agents</dt>
+                        <dd>
+                            <select name="relay_notice_style" id="aicli-relay-notice-style" aria-label="Wording of Relay notices" data-testid="relay-notice-style" style="width: 100%;" onchange="aicliRelayNoticeChanged()">
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'short', _('Short (default): about 20 words'))?>
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'minimal', _('Minimal: about 10 words'))?>
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'full', _('Full: the long original text'))?>
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'custom', _('Custom: my own words'))?>
+                            </select>
+                            <textarea name="relay_notice_custom" id="aicli-relay-notice-custom" aria-label="Custom Relay notice text" data-testid="relay-notice-custom" rows="2" maxlength="300" style="width:100%; margin-top:6px; display:none;" onchange="aicliRelayNoticeChanged()"><?=htmlspecialchars((string)($config['relay_notice_custom'] ?? ''), ENT_QUOTES)?></textarea>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Agents that get the Relay skill already know the rules, so a shorter notice saves tokens on every message. An agent without the skill always gets the Full text. Custom text: one line, up to 300 characters, must contain <code>{what}</code> (the plugin's own phrase, for example "request req_1 is waiting on topic T") and <code>{command}</code> (how to read it), and must end with at least 8 plain characters after the last one. The plugin adds <code>[Relay]</code> in front. Sender text is never inserted.</div>
+                            <div id="aicli-relay-notice-preview" data-testid="relay-notice-preview" style="font-family:monospace; font-size:11px; margin-top:6px; white-space:pre-wrap; word-break:break-word;"></div>
+                        </dd>
+                    </dl>
+                    <!-- RELAY_TOKEN_SAVINGS.md R15: how long an unread notice blocks a second one. -->
+                    <dl style="margin-top:14px;">
+                        <dt>Resend a Relay notice after (minutes)</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="relay_notice_resend_minutes" id="aicli-relay-notice-resend" aria-label="Resend a Relay notice after (minutes)" data-testid="relay-notice-resend" value="<?=htmlspecialchars((string)($config['relay_notice_resend_minutes'] ?? '10'), ENT_QUOTES, 'UTF-8')?>" min="1" max="240" style="width: 70px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">minutes</span>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">After one notice, the plugin types no new notice into a workspace until it reads its inbox; if it has not read it by this time, the plugin types a fresh notice. Allowed range: 1 to 240.</div>
+                        </dd>
+                    </dl>
+                    <script>
+                    function aicliRelayNoticeChanged() {
+                        var st = document.getElementById('aicli-relay-notice-style');
+                        var tx = document.getElementById('aicli-relay-notice-custom');
+                        var pv = document.getElementById('aicli-relay-notice-preview');
+                        if (!st || !tx || !pv) return;
+                        tx.style.display = st.value === 'custom' ? 'block' : 'none';
+                        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx.value) + '&csrf_token=' + csrf, function (r) {
+                            if (r.status !== 'ok') { pv.style.color = '#d03b3b'; pv.textContent = r.message || 'This text cannot be used.'; return; }
+                            pv.style.color = '';
+                            pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
+                            autoSaveConfig();
+                        }).fail(function () { pv.textContent = 'Could not check the text. Nothing was saved.'; });
+                    }
+                    (function () { if (window.jQuery) jQuery(function () { if (document.getElementById('aicli-relay-notice-style')) aicliRelayNoticeChanged_init(); }); })();
+                    function aicliRelayNoticeChanged_init() {
+                        var st = document.getElementById('aicli-relay-notice-style');
+                        var tx = document.getElementById('aicli-relay-notice-custom');
+                        if (tx) tx.style.display = st.value === 'custom' ? 'block' : 'none';
+                        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx ? tx.value : '') + '&csrf_token=' + csrf, function (r) {
+                            var pv = document.getElementById('aicli-relay-notice-preview');
+                            if (pv && r.status === 'ok') pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
+                        });
+                    }
+                    </script>
+
                     <!-- Moved to the bottom of the card (operator request 2026-09-13) so the settings rows stay together. -->
                     <!-- PANE_INPUT_HYBRID_ALLOWLIST.md (2026-09-09): moved here from the Agent
                          Relay tab and renamed from "Relay delivery rules". These rules decide
@@ -449,7 +510,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>API key</dt>
                         <dd>
                             <div class="input-row">
-                                <input type="password" id="aicli-voice-tts-key" aria-label="Text-to-speech API key" onchange="aicliVoiceSaveField('tts_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
+                                <input type="password" data-aicli-eye id="aicli-voice-tts-key" aria-label="Text-to-speech API key" onchange="aicliVoiceSaveField('tts_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
                                 <button type="button" id="aicli-voice-key-clear" class="aicli-btn-slim" onclick="aicliVoiceClearKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
                             </div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Key status: <strong id="aicli-voice-key-status">unknown</strong>. Only needed when the endpoint requires one; the stored key is never shown here.</div>
@@ -524,7 +585,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>API key</dt>
                         <dd>
                             <div class="input-row">
-                                <input type="password" id="aicli-voice-stt-key" aria-label="Transcription API key" onchange="aicliVoiceSaveField('stt_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
+                                <input type="password" data-aicli-eye id="aicli-voice-stt-key" aria-label="Transcription API key" onchange="aicliVoiceSaveField('stt_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
                                 <button type="button" id="aicli-voice-stt-key-clear" class="aicli-btn-slim" onclick="aicliVoiceClearSttKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
                             </div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Key status: <strong id="aicli-voice-stt-key-status">unknown</strong>. Only needed when the endpoint requires one; the stored key is never shown here.</div>
@@ -910,6 +971,14 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </select>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The Notebook drawer beside the terminal, and the tools that let an agent put pages in it. Off hides the drawer and refuses the tools. Nothing is deleted.</div>
                         </dd>
+                        <dt>Show the Wiki as its own page</dt>
+                        <dd>
+                            <select name="wiki_page_enabled" aria-label="Show the Wiki as its own page" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['wiki_page_enabled'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['wiki_page_enabled'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Adds a Wiki item to the Tasks menu. You read and edit the Notebook of a project there, without a terminal. The menu item shows after you reload the page.</div>
+                        </dd>
                         <dt>Open the Notebook when an agent asks</dt>
                         <dd>
                             <select name="notebook_auto_open" aria-label="Open the Notebook when an agent asks" style="width: 100%;" <?=$autoSave?>>
@@ -930,6 +999,14 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['notebook_allow_prod_secrets'] ?? '0', "0", _('Refuse (default)'))?>
                             </select>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">A secret on a connection card goes to the encrypted vault, never to the file. With Refuse, a value that looks like a live production key is turned away.</div>
+                        </dd>
+                        <dt>Tell the agent when I answer</dt>
+                        <dd>
+                            <select name="notebook_notify_agent" aria-label="Tell the agent when I answer in the Notebook" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['notebook_notify_agent'] ?? '1', "1", _('Yes (default)'))?>
+                                <?=mk_option($config['notebook_notify_agent'] ?? '1', "0", _('No'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">When you finish a question card or a checklist, mark an item as failed, add a comment, or save a login, type one short line into the workspace so the agent reads it. The line never holds your answer. A busy agent is not interrupted.</div>
                         </dd>
                         <dt>Speak a notice when something needs you</dt>
                         <dd>

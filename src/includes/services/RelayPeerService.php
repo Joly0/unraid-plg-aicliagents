@@ -1094,8 +1094,9 @@ class RelayPeerService {
             $n = count($files); $box = RelayPeerStore::displayName($row);
             $out[] = [
                 'opId' => 'relay_peer_queue__' . $row['id'], 'type' => 'relay_peer_queue',
-                'label' => "$n message" . ($n > 1 ? 's' : '') . " waiting for $box (not reachable)",
-                'step' => '', 'progress' => 0, 'status' => 'waiting',
+                // Row 61: the box is the subject; the count goes to the grey line.
+                'label' => "$box is not reachable",
+                'step' => $n > 1 ? "$n messages are waiting for it" : '1 message is waiting for it', 'progress' => 0, 'status' => 'waiting',
                 'startedAt' => self::now() - $age, 'heartbeatAt' => self::now(),
                 'error' => null, 'recovery' => null, 'count' => $n,
                 'meta' => ['peer' => $row['id'], 'box' => $box, 'count' => $n],

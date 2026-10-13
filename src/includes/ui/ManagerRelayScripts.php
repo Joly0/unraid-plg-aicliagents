@@ -42,7 +42,7 @@ function relayFlatSessions(affected) {
   return out;
 }
 function relayReloadSession(sessionId) {
-  return $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=agent_signal_reload&id='+encodeURIComponent(sessionId)+'&csrf_token='+encodeURIComponent(csrf));
+  return $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=agent_signal_reload&force=1&id='+encodeURIComponent(sessionId)+'&csrf_token='+encodeURIComponent(csrf));
 }
 function relayRenderRestartNotice(sessions) {
   var box = $('#relay-restart-notice');

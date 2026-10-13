@@ -63,17 +63,16 @@ $description = $argv[3] ?? '';
 switch ($action) {
     case 'topics':        $result = ['status'=>'ok', 'topics'=>AgentRelayService::agentTopics($session)]; break;
     case 'subscriptions': $result = ['status'=>'ok', 'relay'=>AgentRelayService::subscriptions($session)]; break;
-    // inbox [--limit N] [--before ID|TIME] [--after ID|TIME] [--message-id ID]
-    // No option: the old newest-20 view. Same rules as the relay_get_inbox tool.
+    // inbox [--all] [--limit N] [--before ID|TIME] [--after ID|TIME] [--message-id ID]
+    // No option: only UNREAD items. Any option (or --all): the old newest-20 view. Same rules as relay_get_inbox.
     case 'inbox':
         $inboxArgs = [];
         for ($i = 2; $i < count($argv); $i += 2) {
+            if ((string)$argv[$i] === '--all') { $inboxArgs['all'] = true; $i--; continue; }
             $key = ltrim((string)$argv[$i], '-'); $key = $key === 'message-id' ? 'message_id' : $key;
             if (in_array($key, ['limit','before','after','message_id'], true) && isset($argv[$i + 1])) $inboxArgs[$key] = (string)$argv[$i + 1];
         }
-        $result = $inboxArgs === []
-            ? ['status'=>'ok', 'inbox'=>AgentRelayService::agentInbox($session)]
-            : \AICliAgents\Services\RelayMcpTools::call('relay_get_inbox', $inboxArgs, $session);
+        $result = \AICliAgents\Services\RelayMcpTools::call('relay_get_inbox', $inboxArgs, $session);
         break;
     case 'contacts':      $result = ['status'=>'ok', 'contacts'=>AgentRelayService::agentContacts($session)]; break;
     case 'direct':        $result = AgentRelayService::directMessage($session, $topic, $description); break;

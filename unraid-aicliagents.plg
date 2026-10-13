@@ -1,8 +1,61 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.06.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.13.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.10.13.01
+
+&gt; **Known issue: a page can hang while the Notebook is on.** A few Unraid pages have frozen on one server while the Notebook was turned on. We have not found the cause yet. This release makes the Notebook ask the server for much less (see below) and adds a way to record what happens, but we cannot promise it is fixed.
+&gt;
+&gt; **If an Unraid page hangs or freezes with the Notebook on:** open **Settings, AI CLI Agents, Configuration**, find the **Notebook** card and set **Notebook** to Off. The page frees up at once, and nothing is deleted. Then please open an issue on GitHub (the **Support** menu on the Debug Console tab has a **Create GitHub issue** button) or write on the forum support thread. Tell us what hung (every Unraid page or only the plugin pages), how long it lasted, and what your server was doing. If you can, tick **Performance trace** on the **Debug Console** tab before it happens again, and attach a support bundle.
+
+**Notebook hang watch**
+
+- **Improve: the Notebook asks the server for much less.** The plugin remembers which workspace a note belongs to for 20 seconds, so each check no longer re-tests the home storage mount. A burst of reconnects now causes one refresh, not one refresh for each reconnect. A menu layer that cannot find its anchor stops trying after 120 tries.
+- **Feat: a "Performance trace" tick box on the Debug Console tab.** It is off by default, and the plugin writes nothing extra while it is off. When you tick it, the plugin writes one timing line for each step that is slow (a slow request, a slow check of the home mount, a slow Notebook scan, a slow save to the boot drive) and a short WARN line in the Debug log. Untick it when you have finished.
+- **Fix: the Activity tray no longer leaves a check running after you leave the page.**
+
+**User guide and the Notebook wiki**
+
+- **Feat: a user guide for the whole plugin, on GitHub.** There is one page for each feature and a reference that lists every setting on every tab. Open the `docs/user-guide` folder of the repository, or follow the link at the top of the README.
+- **Feat: the Wiki view builds its contents from the links between pages.** Pages that nothing links to show under "Not linked yet". A note page has a compact header with a Properties panel, the Wiki has a "Recent" popover, and a note can open in its own browser tab.
+- **Feat: an optional Wiki page in the Tasks menu.** Turn on "Show the Wiki as its own page" on the Configuration tab to read and edit the wiki without opening a workspace.
+- **Feat: a note is limited to 1 MB**, and a masked value in a note has an eye icon to show it.
+
+**Storage you can see and control**
+
+- **Feat: choose where each home keeps what you change between saves:** in RAM (fast, no disk wear, lost on a crash until saved) or on disk (survives a crash or power cut). The new "Writable layer for homes" setting on the Configuration tab shows a clear warning first, then closes your open workspaces, saves each home into a verified layer, mounts it again and checks the result. If a home cannot move, the setting is put back and nothing is deleted. Disk is refused on USB flash.
+- **Fix: merging a home's saved layers now frees the space it should.** Before, one small file written during a merge made it keep the whole writable layer, so gigabytes stayed on the flash. Automatic saves of a home in use no longer copy an on-disk writable layer every 30 minutes. Uninstalling an agent now removes every version of it from storage.
+- **Improve: Consolidate on a home card now also saves your unsaved changes,** so it works with one layer too. The Repair button shows only when a home is not mounted. A home merge shows named steps and progress, and a storage job that is put off shows as waiting, with the reason.
+- **Feat: the Consolidate dialog has a box to skip the automatic Continue.** Untick it and the closed workspaces reopen without a message, so they use no tokens until you tell them to go on.
+- **Improve: the storage warning says in plain words what is wrong** and that it comes from AI CLI Agents. It names the home or agent. A leftover entry for a test folder that no longer exists is removed at start-up and no longer raises a warning.
+- **Feat: the Health tab warns when deleted layers still pin space on the boot drive** and names the workspaces to restart, and when a writable layer on a filling boot drive is large.
+- **Fix: closing a storage warning in any way puts the setting back,** a click outside the warning no longer closes it, and Cancel on the persistence engine dialog no longer risks starting a move.
+
+**Notebook, voice mail and the Activity tray**
+
+- **Feat: voice mail messages are also kept as notes.** With Voice and the Notebook on, each message becomes a note. Deleting it from voice mail leaves the note. You archive and delete it like any note.
+- **Feat: the agent is told when you answer in the Notebook:** a question card answered, a checklist finished or failed, a comment, or a login saved. The message names the note and never repeats your answer. A switch in Settings &gt; Notebook turns it off.
+- **Feat: delete a note at once.** A bin icon and a Delete item remove a note with an Undo pill for 8 seconds. A note goes to the Archive; a note already in the Archive is removed for good.
+- **Feat: a Refresh button on a note asks the open workspace to update it,** and the Notebook line in the Activity tray names the workspace and has an Open note button.
+- **Feat: voice mail messages delete at once with an Undo pill.** The Voice section of a workspace menu is always collapsed when the menu opens.
+- **Improve: Activity tray notices read in plain words.** The title says what happened, the line under it says who did it or what comes next, a finished record shows its age instead of a Done badge, a failure shows one sentence and the way out, and Cancel appears only where it can stop something.
+- **Fix: the spoken voice falls back to English** when the voice you chose is missing.
+
+**Agent Store and the folder picker**
+
+- **Fix: saving an agent's secrets no longer restarts every workspace.** A notice says how many running workspaces still use the old values and offers "Restart them now". Busy workspaces are never restarted by it. The Agent Store also says when versions were last fetched and shows when a check is running or failed.
+- **Feat: the folder picker has a breadcrumb, collapsible favourites, a sort choice and a filter.** The current folder in the breadcrumb is easier to read.
+- **Improve: the two second rows of a wide Notebook drawer line up,** and the note-list toggle sits level with the tabs.
+
+**Agents that work together and on their own**
+
+- **Improve: Relay costs agents fewer tokens.** An agent's inbox shows only what is new (`inbox --all` shows older messages), and the plugin types one notice for a batch of unread messages, not one per message. This also works on Codex and OpenCode queues. The wait before a new notice is a setting (default 10 minutes). The notice typed into an agent is shorter by default, with presets or your own wording in settings.
+- **Fix: auto-continue reads a Codex retry date such as "try again at Oct 14th, 2026 9:49 PM"** and no longer assumes five hours. A usage limit that has lifted, or work that has resumed, clears the old schedule on Codex workspaces.
+- **Fix: Codex workspaces resume after a close.** The plugin could save a command flag as the conversation id; ids now come from the agent's own session files.
+- **Fix: closing a workspace no longer stops a system service an agent started.**
+- **Improve: long workspace names scroll once when you hover the row.**
+
 ## 2026.10.06.02
 
 **The Notebook (new)**
@@ -518,51 +571,51 @@
 
 
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/cleanup.sh</URL>
 <SHA256>5381dc9bc96ac63a1880b45f2eed84a9977b5fc67d104f5ffa5088c71f45475c</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/migrate-from-geminicli.sh</URL>
 <SHA256>2b9bedd8ec730e00f0dadd62b2c87c11a0792505f83742f857c22bc87b0dc24b</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/runtime.sh</URL>
 <SHA256>659ba6d77a91c98c08e24f0b4bdd7fad65da0ec19b3c57c71d6c802c02f5f231</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/ui-assets.sh</URL>
 <SHA256>61ae68743a6da42aa8c33996b932e0ec8fc5fc8033fcd11ec420579c2e8a2474</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-storage-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-storage-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/storage.sh</URL>
 <SHA256>2a6881ef5d717523f4d5c64baf1c031c1e543a621b89c2b40b18ead7a07d0a96</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
-<SHA256>535da441f62bcea24dedfded5b56ade779b311941db98618eb8819e8d9866941</SHA256>
+<SHA256>f75ae0470ff32ea0bc8da7ebf66f93307d626d22511274e3457c36b394420b78</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>
 <SHA256>80eb4eadb27f0538b4c477873555a20904fc23958c48a956c1f7d0ff0eeabaac</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/stop-plugin.sh</URL>
 <SHA256>452edca40141b70def7d685271368d49254cdbcd20fd926bcb723a6676c3bc0c</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.10.06.02.page">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.10.13.01.page">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/ArrayStopWarning.page</URL>
 <SHA256>55b193a4def06bbffd681c88fa2d681b55b9cda4d64d391c6c440faea6974f35</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-src-2026.10.06.02.tar.gz">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-src-2026.10.13.01.tar.gz">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src.tar.gz</URL>
-<SHA256>278d1d182100a0eabf110041e331143eaab2851d6b1f2593ab6b2e4ec3c1e221</SHA256>
+<SHA256>e6553b187ea2b9105ddce3527f45fa5dbc53accb2d4da650311bd4402b5c9aad</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/install-engine.sh</URL>
-<SHA256>f5659600d564310b354db0edc8af063d0f2657eb2d5629f32ef7dfa73004cb4a</SHA256>
+<SHA256>42416945fcf82960b3c8d0c46a034679506324141a4d48a9dc252dfc5b6025da</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.10.06.02.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.10.13.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/uninstaller/uninstall-engine.sh</URL>
 <SHA256>2e8f8648b202538754db48820a087e038c1770bca8483e4ff9257a302df497d4</SHA256>
 </FILE>
@@ -573,7 +626,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.10.06.02"
+export VERSION="2026.10.13.01"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -613,12 +666,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.10.06.02" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.10.13.01" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.10.06.02" | sort -V | tail -1)
-        if [ "$_newest" = "2026.10.06.02" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.10.13.01" | sort -V | tail -1)
+        if [ "$_newest" = "2026.10.13.01" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.10.06.02)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.10.13.01)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done
@@ -652,12 +705,12 @@ export -f log_status log_step log_ok log_warn log_fail log_progress get_ts
 # exists — on EVERY invocation, including a CA "Check for Updates" upgrade and a
 # reinstall — and no checksum is declared, so a FIXED cache name would serve the
 # first-ever installed payload forever. Every cached file therefore carries the
-# plugin version in its name (aicli-src-2026.10.06.02.tar.gz, aicli-engine-2026.10.06.02.sh,
+# plugin version in its name (aicli-src-2026.10.13.01.tar.gz, aicli-engine-2026.10.13.01.sh,
 # …): a new version is a new name that has never existed on flash, so it MUST be
 # fetched; the same version (reboot, reinstall) is a hit and stays network-free.
 # The version suffix is stripped here so every path the engine uses is unchanged.
 LOCAL_CACHE="/boot/config/plugins/unraid-aicliagents"
-CACHE_VERSION="2026.10.06.02"
+CACHE_VERSION="2026.10.13.01"
 for f in "$LOCAL_CACHE"/aicli-*-"$CACHE_VERSION".sh "$LOCAL_CACHE"/aicli-*-"$CACHE_VERSION".page "$LOCAL_CACHE"/aicli-src-"$CACHE_VERSION".tar.gz; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"

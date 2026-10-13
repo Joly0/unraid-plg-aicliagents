@@ -15,6 +15,8 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/PerfTrace.php';
+
 class StorageMountService {
     // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): AGENT_MNT_BASE used to
     // duplicate AgentRegistry::AGENT_BASE's literal value under a different name.
@@ -494,6 +496,18 @@ class StorageMountService {
     // L5 (WP#1333): optional by-ref $exit (see ensureAgentMounted) surfaces the
     // op_mount exit code so ensureReady can report the 'deferred' state.
     public static function ensureHomeMounted($user, int &$exit = 0) {
+        // NOTEBOOK_HANG_OBSERVABILITY R6: time every exit; path = fast|lock|mount.
+        $t0 = PerfTrace::start();
+        $path = 'fast';
+        try {
+            return self::ensureHomeMountedTraced($user, $exit, $path);
+        } finally {
+            PerfTrace::point('storage.ensure_ready', $t0, 200, "user=$user path=$path");
+        }
+    }
+
+    /** The body of ensureHomeMounted. Sets $path to the route taken (fast, lock or mount). */
+    private static function ensureHomeMountedTraced($user, int &$exit, string &$path) {
         $exit = 1;
         if (self::isMigrationInProgress()) return false;
 
@@ -529,6 +543,7 @@ class StorageMountService {
         // Losers block until the winner finishes, then re-check before mounting.
         $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
         $lockFile = "/tmp/unraid-aicliagents/home_mount_{$safeUser}.lock";
+        $path = 'lock';
         $lock = @fopen($lockFile, 'c');
         if ($lock !== false) {
             // Bounded wait: a wedged winner must NOT block this PHP-FPM worker
@@ -544,6 +559,7 @@ class StorageMountService {
             while (!flock($lock, LOCK_EX | LOCK_NB)) {
                 if (microtime(true) >= $lockDeadline) {
                     LogService::log("Home mount lock wait timed out for $safeUser after 10s — proceeding (winner may be wedged); op_mount lock still serializes.", LogService::LOG_WARN, "StorageMountService");
+                    PerfTrace::record('storage.mount_lock_timeout', 10000, "user=$safeUser");
                     break;
                 }
                 usleep(100000); // 100ms
@@ -563,6 +579,7 @@ class StorageMountService {
             if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
             return false;
         }
+        $path = 'mount';
 
         // WP #1309: the second copy-up-poison site (a PHP `umount -l` of a
         // phantom home mount, immediately followed by an op_mount rebind) is
@@ -694,7 +711,7 @@ class StorageMountService {
         //    decided by bash entity_upper_mode (FileStorage::upperModeForPath).
         if ($policyMode !== 'zram' && $policyMode !== 'disk') {
             require_once __DIR__ . '/FileStorage.php';
-            $policyMode = FileStorage::upperModeForPath($persistPath);
+            $policyMode = FileStorage::upperModeForPath($persistPath, 'home');
         }
         $otherMode = ($policyMode === 'zram') ? 'disk' : 'zram';
         $policyUpper = self::homeUpperForMode($safeUser, $persistPath, $policyMode, $zramBase);

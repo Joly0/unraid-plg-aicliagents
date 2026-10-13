@@ -26,12 +26,26 @@ class ConfigService {
             'theme' => 'dark',
             'font_size' => '14',
             'debug_logging' => '0',
+            // Issue #471: the Logging Level select showed its first choice (Errors Only) when no level was stored,
+            // and the next save then stored 0. LogService already uses 2 (Normal, Info) when nothing is stored.
+            'log_level' => '2',
             'home_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
             'agent_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
             // One global storage engine for all agents and homes.  SquashFS +
             // zram is the safe default on the boot device and removable media;
             // changing this setting runs an explicit all-entity migration.
             'storage_backend_mode' => 'layering',
+            // #456: where a home's writable layer lives under the layering engine:
+            // 'zram' (RAM, lost on a crash until saved) or 'disk' (durable, uses
+            // space on the persistence drive). Changing it runs UpperPlacementService.
+            'storage_upper_mode' => 'zram',
+            // #461 (RELAY_NOTICE_WORDING.md): the wording of the notices the plugin types into an
+            // agent for the Relay: full | short | minimal | custom. The custom text is validated
+            // by RelayNoticeWording::validateCustom (an invalid one falls back to short).
+            'relay_notice_style' => 'short',
+            // RELAY_TOKEN_SAVINGS.md R15: minutes before a second notice may be typed when the inbox is still unread (1..240).
+            'relay_notice_resend_minutes' => '10',
+            'relay_notice_custom' => '',
             // #153: the former sync_interval_hours/mins keys were removed — no
             // scheduler ever read them. The automatic-save cadence is
             // bake_schedule_minutes (below), which the Configuration tab now exposes.
@@ -88,6 +102,9 @@ class ConfigService {
             // pressure, 1 kept generation) + structured format (text | jsonl).
             'debug_log_max_bytes'               => '5242880',
             'debug_log_format'                  => 'text',
+            // NOTEBOOK_HANG_OBSERVABILITY.md R12: timing traces (perf.log and the "slow:" lines in
+            // debug.log) are OFF unless this is '1'. Switch: Debug Console tab, "Performance trace".
+            'perf_trace'                        => '0',
             // T-12 (FIRST_RUN_WIZARD.md): empty = wizard not yet completed.
             // Set to 'yes' by the React wizard via the `save` action on completion.
             // No UI toggle — the wizard is deliberately one-shot.
@@ -106,6 +123,8 @@ class ConfigService {
             // notebook_folder is the folder name in each project root
             // (^[A-Za-z0-9._-]{1,40}$, no leading dot, never 'assets').
             'notebook_enabled'                     => '1',
+            // NOTEBOOK_WIKI_PAGE.md R1: show the Wiki as its own Unraid page (Tasks menu). Off by default.
+            'wiki_page_enabled'                    => '0',
             'notebook_auto_open'                   => '0',
             'notebook_folder'                      => 'notebook',
             'notebook_allow_prod_secrets'          => '0',
@@ -113,6 +132,8 @@ class ConfigService {
             // ARTEFACTS_CONTRACT.md section 10: the agent journal (1 = on) and the quiet
             // hours for spoken notices ("HH:MM-HH:MM", may wrap midnight, empty = none).
             'notebook_journal'                     => '0',
+            // NOTEBOOK_ANSWER_NOTIFY.md: tell the agent when a person answers in the Notebook (1 = on).
+            'notebook_notify_agent'                => '1',
             'notebook_quiet_hours'                 => '',
             // CONTINUE_ON_RESTART.md (2026-09-09): moved here from the Relay's
             // settings.json — this governs whether a WORKSPACE resumes its own
@@ -313,6 +334,24 @@ class ConfigService {
             $newConfig['storage_backend_mode'] = StorageBackendPolicyService::normalizeMode(
                 $newConfig['storage_backend_mode']
             );
+        }
+
+        if (isset($newConfig['storage_upper_mode'])) {
+            $newConfig['storage_upper_mode'] = ((string)$newConfig['storage_upper_mode'] === 'disk') ? 'disk' : 'zram';
+        }
+
+        if (isset($newConfig['relay_notice_style'])) {
+            $st = (string)$newConfig['relay_notice_style'];
+            $newConfig['relay_notice_style'] = in_array($st, \AICliAgents\Services\RelayNoticeWording::STYLES, true) ? $st : 'short';
+        }
+        if (isset($newConfig['relay_notice_resend_minutes'])) {
+            $newConfig['relay_notice_resend_minutes'] = (string)max(1, min(240, (int)$newConfig['relay_notice_resend_minutes']));
+        }
+        if (isset($newConfig['relay_notice_custom'])) {
+            $newConfig['relay_notice_custom'] = trim((string)preg_replace('/[\r\n]+/', ' ', (string)$newConfig['relay_notice_custom']));
+            if (strlen($newConfig['relay_notice_custom']) > \AICliAgents\Services\RelayNoticeWording::CUSTOM_MAX) {
+                $newConfig['relay_notice_custom'] = substr($newConfig['relay_notice_custom'], 0, \AICliAgents\Services\RelayNoticeWording::CUSTOM_MAX);
+            }
         }
 
         $config = self::getConfig();
@@ -550,6 +589,7 @@ class ConfigService {
      * D-333: Forces mount of home storage to ensure data is written to ZRAM/SquashFS stack.
      */
     public static function getUserStatePath() {
+        self::refuseLiveStateInTests();
         $config = self::getConfig();
         $user = $config['user'] ?? 'root';
         if (empty($user)) $user = 'root';
@@ -572,6 +612,27 @@ class ConfigService {
         self::ensureStateDirOwnedBy($statePath, $user);
 
         return $statePath;
+    }
+
+    /**
+     * Pure decision: is this process a test run that has NOT loaded tests/bootstrap.php?
+     * A PHPUnit TestCase class in memory means test code is running; the bootstrap defines
+     * AICLI_TEST_TMP and points every path at a sandbox. Without it, a test (or a stand-in
+     * runner) writes fixtures into the operator's LIVE state. On 2026-10-12 such a runner put
+     * three fake workspaces, fake resume tokens and an empty auto-launch list into the real
+     * store on .4 (Forgejo #473). Refusing here is cheap and exact.
+     */
+    public static function shouldRefuseLiveState(bool $phpunitLoaded, bool $sandboxDefined): bool
+    {
+        return $phpunitLoaded && !$sandboxDefined;
+    }
+
+    /** Throw when test code runs against live state (see shouldRefuseLiveState). */
+    public static function refuseLiveStateInTests(): void
+    {
+        if (self::shouldRefuseLiveState(class_exists('PHPUnit\\Framework\\TestCase', false), defined('AICLI_TEST_TMP'))) {
+            throw new \RuntimeException('Refusing to use the live plugin state from test code: load tests/bootstrap.php (run the suite with ../ci/run unit), never a stand-in runner on the host.');
+        }
     }
 
     /**

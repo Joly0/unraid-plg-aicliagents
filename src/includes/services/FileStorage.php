@@ -295,20 +295,23 @@ final class FileStorage
      * Any failure gives 'zram' (the wear-safe answer, the same bias as bash).
      * AICLI_DETECT_BACKEND_SH: test-only script-path override.
      */
-    public static function upperModeForPath(string $persistPath): string
+    public static function upperModeForPath(string $persistPath, string $type = ''): string
     {
         static $memo = [];
-        if (array_key_exists($persistPath, $memo)) {
-            return $memo[$persistPath];
+        $memoKey = $persistPath . "\0" . $type;
+        if (array_key_exists($memoKey, $memo)) {
+            return $memo[$memoKey];
         }
         $script = getenv('AICLI_DETECT_BACKEND_SH') ?: dirname(self::STORAGECTL) . '/detect_backend.sh';
         $mode = 'zram';
         if ($persistPath !== '' && is_file($script)) {
             // nosemgrep: php.lang.security.exec-use.exec-use
-            $out = trim((string) @shell_exec('bash ' . escapeshellarg($script) . ' --upper-mode ' . escapeshellarg($persistPath) . ' 2>/dev/null'));
+            // #456: the type ('home') lets the person's storage_upper_mode apply to homes only.
+            $typeArg = preg_match('/^(home|agent)$/', $type) === 1 ? ' ' . $type : '';
+            $out = trim((string) @shell_exec('bash ' . escapeshellarg($script) . ' --upper-mode ' . escapeshellarg($persistPath) . $typeArg . ' 2>/dev/null'));
             if ($out === 'zram' || $out === 'disk') { $mode = $out; }
         }
-        return $memo[$persistPath] = $mode;
+        return $memo[$memoKey] = $mode;
     }
 
     /**

@@ -151,7 +151,7 @@ log_ok "Home backup schedule synced from config."
 # Verify UI entry points (D-186: Ensure entry points exist for emhttp)
 cd "$EMHTTP_DEST"
 MISSING_ENTRY=0
-for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php AICliMenuIcon.page AICliOpenFile.page ArrayStopWarning.page; do
+for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php AICliMenuIcon.page AICliNote.page AICliOpenFile.page AICliWiki.page ArrayStopWarning.page; do
     if [ ! -f "$f" ]; then
         cp -f "src/$f" "$f"
         MISSING_ENTRY=$((MISSING_ENTRY + 1))

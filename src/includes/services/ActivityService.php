@@ -7,7 +7,7 @@
  *     evaluation. Every state change is also published on the Nchan channel
  *     `aicli_activity` so the activity tray updates in real time. T-08/T-09/T-10 —
  *     see docs/specs/ACTIVITY_TRAY.md.</description>
- *     <dependencies>AtomicWriteService, NchanService</dependencies>
+ *     <dependencies>AtomicWriteService, NchanService, LogService</dependencies>
  *     <constraints>Static methods only. Never throws — activity tracking must not break
  *     the operation it observes. Watchdog runs lazily inside list()/get() evaluation
  *     (the polling AJAX path is the republish point — the bash supervisor cannot call
@@ -112,8 +112,77 @@ class ActivityService {
             'error'       => null,
             'recovery'    => null,
         ], $extra);
+        if (isset($entry['meta']) && is_array($entry['meta'])) {
+            $entry['meta'] = self::cleanMeta($entry['meta']);
+        }
         self::save($entry);
         return $entry;
+    }
+
+    /**
+     * Tray fields in `meta` (docs/specs/ACTIVITY_TRAY_PLAIN_NOTICES.md):
+     *   kind      'job' (default) | 'record' | 'notice' - a finished record of a change
+     *             shows its age in place of the pill; a notice needs the person.
+     *   by        ['agentName' => ..., 'workspaceName' => ...] - who made the change.
+     *   statement the full sentence of a proposal (the title is a short question).
+     *   cancel    'none' - Cancel only flips the row, so the tray draws no button.
+     * A bad value is dropped (kind falls back to 'job'); every other meta key passes through.
+     *
+     * @param array<string,mixed> $meta
+     * @return array<string,mixed>
+     */
+    private static function cleanMeta(array $meta): array {
+        if (array_key_exists('kind', $meta)) {
+            $k = is_string($meta['kind']) ? $meta['kind'] : '';
+            $meta['kind'] = in_array($k, ['job', 'record', 'notice'], true) ? $k : 'job';
+        }
+        if (array_key_exists('by', $meta)) {
+            $by = [];
+            if (is_array($meta['by'])) {
+                foreach (['agentName', 'workspaceName'] as $f) {
+                    if (isset($meta['by'][$f]) && is_scalar($meta['by'][$f]) && trim((string)$meta['by'][$f]) !== '') {
+                        $by[$f] = trim((string)$meta['by'][$f]);
+                    }
+                }
+            }
+            if ($by === []) unset($meta['by']); else $meta['by'] = $by;
+        }
+        if (array_key_exists('statement', $meta)) {
+            if (is_scalar($meta['statement']) && trim((string)$meta['statement']) !== '') {
+                $meta['statement'] = trim((string)$meta['statement']);
+            } else {
+                unset($meta['statement']);
+            }
+        }
+        if (array_key_exists('cancel', $meta)) {
+            if ($meta['cancel'] === 'none') $meta['cancel'] = 'none'; else unset($meta['cancel']);
+        }
+        return $meta;
+    }
+
+    /**
+     * A raw step name in words, for a person (docs/specs/ACTIVITY_TRAY_PLAIN_NOTICES.md R8).
+     * Mirrors STEP_LABELS in src/assets/ui/activity-tray.js. Done words give ''.
+     */
+    public static function stepInWords(string $step): string {
+        $step = trim($step);
+        if ($step === '') return '';
+        $map = [
+            'queued'               => 'Queued',
+            'running'              => 'Running',
+            'preparing'            => 'Preparing environment',
+            'mounting_agent'       => 'Mounting agent storage',
+            'mounting_home'        => 'Mounting home storage',
+            'mounting_home_queued' => 'Mounting home storage (queued)',
+            'launching_ttyd'       => 'Starting terminal server',
+            'starting_agent'       => 'Launching agent',
+            'retrying'             => 'Retrying',
+        ];
+        $key = strtolower($step);
+        if (in_array($key, ['done', 'completed'], true)) return '';
+        if (isset($map[$key])) return $map[$key];
+        if (preg_match('/^[a-z0-9]+(_[a-z0-9]+)+$/', $step)) return ucfirst(str_replace('_', ' ', $step));
+        return $step;
     }
 
     /**
@@ -139,6 +208,12 @@ class ActivityService {
         if (($cur === 'stalled' || $cur === self::STATUS_WAITING) && !isset($fields['status'])) {
             $fields['status'] = 'running';
         }
+        // meta merges key by key, so an update that sets one tray field (kind, by,
+        // statement, cancel) does not drop the keys the entry already holds.
+        if (isset($fields['meta']) && is_array($fields['meta'])) {
+            $old = (isset($entry['meta']) && is_array($entry['meta'])) ? $entry['meta'] : [];
+            $fields['meta'] = self::cleanMeta(array_merge($old, $fields['meta']));
+        }
         $entry = array_merge($entry, $fields);
         $entry['heartbeatAt'] = time();
         self::save($entry);
@@ -160,8 +235,12 @@ class ActivityService {
         self::save($entry, false);
     }
 
-    /** Terminal success: status done, progress 100. */
-    public static function finish(string $opId, string $step = 'Done'): ?array {
+    /**
+     * Terminal success: status done, progress 100. The step stays empty unless the
+     * caller has a result that carries information ("Checked 14 agents in 6 s"):
+     * the DONE pill already says it is done, and a leftover step would be stale.
+     */
+    public static function finish(string $opId, string $step = ''): ?array {
         return self::update($opId, ['status' => 'done', 'progress' => 100, 'step' => $step, 'error' => null]);
     }
 
@@ -197,15 +276,20 @@ class ActivityService {
      *
      * @param array<string,mixed> $params  What approve() will execute, verbatim.
      * @param array{workspaceId?:string,agentId?:string,name?:string} $caller
+     * @param array{label?:string} $tray  A short question for the row title, for example
+     *        'Delete workspace "home-homelab"?'. When it is set, $description (the full
+     *        statement of what approval does) moves to meta.statement and the tray draws it
+     *        under the title; without it the title is $description, as before.
      */
-    public static function propose(string $opId, string $tool, string $description, array $params, array $caller = []): ?array {
+    public static function propose(string $opId, string $tool, string $description, array $params, array $caller = [], array $tray = []): ?array {
         $opId = self::safeOpId($opId);
         if ($opId === null) return null;
         $now = time();
+        $question = trim((string)($tray['label'] ?? ''));
         $entry = [
             'opId'        => $opId,
             'type'        => 'proposal',
-            'label'       => $description,
+            'label'       => $question !== '' ? $question : $description,
             'step'        => 'Waiting for approval',
             'progress'    => 0,
             'status'      => self::STATUS_PENDING_APPROVAL,
@@ -222,6 +306,7 @@ class ActivityService {
                 'agentId'     => (string)($caller['agentId'] ?? ''),
             ],
         ];
+        if ($question !== '') $entry['meta']['statement'] = $description;
         self::save($entry);
         return $entry;
     }
@@ -241,9 +326,46 @@ class ActivityService {
     public static function approve(string $opId): ?array {
         $opId = self::safeOpId($opId);
         if ($opId === null) return null;
-        $entry = self::read($opId);
-        if ($entry === null || ($entry['status'] ?? '') !== self::STATUS_PENDING_APPROVAL) return null;
-        return self::update($opId, ['status' => 'approved', 'step' => 'Approved — executing']);
+        // Forgejo test-coverage review G1: the check and the write are ONE step under a
+        // lock, so a double click (or two tabs) hands the entry to exactly one caller.
+        return self::transitionIf(
+            $opId,
+            [self::STATUS_PENDING_APPROVAL],
+            ['status' => 'approved', 'step' => 'Approved — running']
+        );
+    }
+
+    /**
+     * Compare-and-set: change an entry only while its status is one of $fromStatuses, and
+     * hand back the changed entry. The read, the check and the write happen under one
+     * non-blocking flock (polled with a deadline, never a blocking flock), so two callers
+     * that race for one entry cannot both win. Returns null when there is no such entry, its
+     * status is not in $fromStatuses, or the lock could not be taken in time (the caller then
+     * treats it as "someone else is acting on it").
+     *
+     * @param list<string>        $fromStatuses
+     * @param array<string,mixed> $fields        merged with update() semantics
+     */
+    public static function transitionIf(string $opId, array $fromStatuses, array $fields): ?array {
+        $opId = self::safeOpId($opId);
+        if ($opId === null) return null;
+        $dir = self::dir();
+        if (!is_dir($dir)) @mkdir($dir, 0755, true);
+        $lock = @fopen($dir . '/transition.lock', 'c');
+        if ($lock === false) return null;
+        try {
+            $deadline = microtime(true) + 5.0;
+            while (!@flock($lock, LOCK_EX | LOCK_NB)) {
+                if (microtime(true) >= $deadline) return null;
+                usleep(10000);
+            }
+            $entry = self::read($opId);
+            if ($entry === null || !in_array((string)($entry['status'] ?? ''), $fromStatuses, true)) return null;
+            return self::update($opId, $fields);
+        } finally {
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+        }
     }
 
     /**
@@ -257,10 +379,8 @@ class ActivityService {
     public static function reject(string $opId, string $reason = 'rejected by user'): bool {
         $opId = self::safeOpId($opId);
         if ($opId === null) return false;
-        $entry = self::read($opId);
-        if ($entry === null || ($entry['status'] ?? '') !== self::STATUS_PENDING_APPROVAL) return false;
-        self::update($opId, ['status' => 'failed', 'error' => $reason]);
-        return true;
+        // Same lock as approve(): Approve and Reject together can never both succeed.
+        return self::transitionIf($opId, [self::STATUS_PENDING_APPROVAL], ['status' => 'failed', 'error' => $reason]) !== null;
     }
 
     /**
@@ -369,6 +489,9 @@ class ActivityService {
         // the whole point of a pending item is that discarding it is a decision,
         // not housekeeping.
         if (($entry['status'] ?? '') === self::STATUS_PENDING_APPROVAL) return false;
+        // An approved proposal is being carried out: dismissing it mid-run would lose the
+        // outcome (the executor's finish/fail would recreate a bare row). Wait for the end.
+        if (($entry['status'] ?? '') === 'approved') return false;
         @unlink(self::pathFor($opId));
         self::publish(['opId' => $opId, 'dismissed' => true]);
         return true;
@@ -377,7 +500,8 @@ class ActivityService {
     /**
      * Cancel a running/stalled op: kill the recorded process group (when one was
      * registered — only background workers like install-bg.php record a pgid) and
-     * mark the entry failed with error 'cancelled'.
+     * mark the entry failed. The tray shows the grey line "Cancelled" and no red
+     * error line: the person asked for this, nothing went wrong.
      */
     public static function cancel(string $opId): array {
         $opId = self::safeOpId($opId);
@@ -409,7 +533,8 @@ class ActivityService {
 
         $entry = self::update($opId, [
             'status'   => 'failed',
-            'error'    => 'cancelled',
+            'error'    => null,
+            'step'     => 'Cancelled',
             'recovery' => $entry['recovery'] ?? null,
         ]);
         return ['status' => 'ok', 'killed' => $killed, 'entry' => $entry];
@@ -453,7 +578,12 @@ class ActivityService {
         $cap = self::HARD_CAPS[$entry['type'] ?? ''] ?? 0;
         if ($cap > 0 && ($now - (int)($entry['startedAt'] ?? $now)) > $cap) {
             $entry['status'] = 'failed';
-            $entry['error']  = 'timeout: exceeded ' . $cap . 's hard cap';
+            // Forgejo #451: say it in plain words and keep the job's own last step,
+            // so a merge that was waiting for room does not end as a bare "3600s hard cap".
+            // The step is shown in words, never as a raw code (ACTIVITY_TRAY_PLAIN_NOTICES.md).
+            $last = self::stepInWords((string)($entry['step'] ?? ''));
+            $entry['error']  = 'Gave up after ' . (int)round($cap / 60) . ' minutes'
+                . ($last !== '' ? '. Last step: ' . $last : '.');
             self::save($entry);
             return $entry;
         }
@@ -467,12 +597,45 @@ class ActivityService {
         return $entry;
     }
 
-    /** Persist atomically; publish the new state on aicli_activity unless suppressed. */
-    private static function save(array $entry, bool $publish = true): void {
+    /**
+     * Persist atomically; publish the new state on aicli_activity unless suppressed.
+     * An invalid UTF-8 byte in any text (a byte-cut name, a log tail) is replaced by
+     * U+FFFD instead of making json_encode fail and the whole entry vanish. A write that
+     * still fails is logged as a warning, never ignored.
+     */
+    private static function save(array &$entry, bool $publish = true): void {
         $dir = self::dir();
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        AtomicWriteService::writeJson(self::pathFor((string)$entry['opId']), $entry, JSON_UNESCAPED_SLASHES);
+        $entry = self::scrubUtf8($entry);
+        $ok = AtomicWriteService::writeJson(
+            self::pathFor((string)$entry['opId']), $entry, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE
+        );
+        if (!$ok) {
+            try {
+                LogService::log(
+                    'Could not write the activity record for ' . (string)$entry['opId'] . '; the tray may not show it.',
+                    LogService::LOG_WARN,
+                    'ActivityService'
+                );
+            } catch (\Throwable $e) {
+                // Logging must never break the operation this class observes.
+            }
+        }
         if ($publish) self::publish($entry);
+    }
+
+    /** Replace every invalid UTF-8 sequence in a string value (at any depth) with U+FFFD. */
+    private static function scrubUtf8($v) {
+        if (is_array($v)) {
+            foreach ($v as $k => $item) $v[$k] = self::scrubUtf8($item);
+            return $v;
+        }
+        if (is_string($v) && !preg_match('//u', $v)) {
+            $j = json_encode($v, JSON_INVALID_UTF8_SUBSTITUTE);
+            $d = $j === false ? null : json_decode($j);
+            return is_string($d) ? $d : '';
+        }
+        return $v;
     }
 
     private static function publish(array $data): void {

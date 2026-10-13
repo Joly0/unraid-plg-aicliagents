@@ -674,6 +674,14 @@ class SupervisorService {
     public static function activeJobFor(string $entity, ?array $jobs = null): ?array {
         foreach ($jobs ?? self::listJobs(true) as $j) {
             if ((string)($j['entity'] ?? '') !== $entity) continue;
+            // Forgejo #454: a deferred job is "waiting" only while the supervisor holds a retry
+            // for it. A deferral that parks no retry (no_space: nothing is queued, the person
+            // must press the button again) is a finished attempt, not a wait. Showing it as
+            // "Merging layers - waiting" kept the card locked for the 24 h the ledger keeps it.
+            if ((string)($j['state'] ?? '') === 'deferred'
+                && !is_file(dirname(self::jobsDir()) . '/jobs-retry/' . (string)$j['job_id'] . '.retry')) {
+                continue;
+            }
             return [
                 'jobId'        => (string)$j['job_id'],
                 'op'           => (string)($j['op'] ?? ''),
@@ -737,7 +745,7 @@ class SupervisorService {
             'verifying'   => 'Verifying the copy',
             'relaunching' => 'Resuming sessions',
         ];
-        return $labels[$phase] ?? 'running';
+        return $labels[$phase] ?? 'Running';
     }
 
     /** Rough tray progress for a backup step label (see backupPhaseStep). */
@@ -751,6 +759,57 @@ class SupervisorService {
             'Resuming sessions'     => 90,
         ];
         return $progress[$step] ?? 50;
+    }
+
+    /**
+     * Forgejo #454: the tray step label for a merge (consolidate) job's ledger
+     * "phase". In the write phase the label also shows the percentage when it
+     * is known. An unknown phase gives the generic "running" label.
+     */
+    public static function consolidatePhaseStep(string $phase, ?int $pct = null): string {
+        $labels = [
+            'closing'     => 'Closing sessions',
+            'pre-flight'  => 'Checking the home',
+            'backing-up'  => 'Backing up databases',
+            'writing'     => 'Writing the new layer (can take several minutes)',
+            'finalizing'  => 'Checking the new layer',
+            'cleaning'    => 'Removing old layers',
+            'relaunching' => 'Resuming sessions',
+        ];
+        $label = $labels[$phase] ?? 'Running';
+        if ($phase === 'writing' && $pct !== null) {
+            $label = 'Writing the new layer, ' . max(0, min(100, $pct)) . ' % (can take several minutes)';
+        }
+        return $label;
+    }
+
+    /** Tray progress for a merge phase. The write phase covers 40 to 78 and follows the percentage. */
+    public static function consolidatePhaseProgress(string $phase, ?int $pct = null): int {
+        if ($phase === 'writing' && $pct !== null) {
+            return 40 + (int)floor(max(0, min(100, $pct)) * 38 / 100);
+        }
+        $progress = [
+            'closing' => 10, 'pre-flight' => 15, 'backing-up' => 35, 'writing' => 40,
+            'finalizing' => 80, 'cleaning' => 90, 'relaunching' => 95,
+        ];
+        return $progress[$phase] ?? 50;
+    }
+
+    /**
+     * Forgejo #454: the write percentage that the merge script keeps in the
+     * task status file of the home. Null when the file is missing, stale
+     * (older than 10 minutes) or not in the write step.
+     */
+    private static function consolidateWritePercent(string $entity): ?int {
+        if (strpos($entity, 'home/') !== 0) return null;
+        $id = substr($entity, 5);
+        if ($id === '' || preg_match('/^[A-Za-z0-9._-]+$/', $id) !== 1) return null;
+        $raw = @file_get_contents("/tmp/unraid-aicliagents/task-status-$id");
+        $d = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($d) || strpos((string)($d['step'] ?? ''), 'Writing the new layer') !== 0) return null;
+        if (time() - (int)($d['timestamp'] ?? 0) > 600) return null;
+        $p = (int)($d['progress'] ?? 0);
+        return max(0, min(100, (int)round(($p - 40) * 100 / 38)));
     }
 
     /**
@@ -768,7 +827,7 @@ class SupervisorService {
             'baking'          => 'Baking the home layer',
             'relaunching'     => 'Resuming sessions',
         ];
-        return $labels[$phase] ?? 'running';
+        return $labels[$phase] ?? 'Running';
     }
 
     /** Rough tray progress for a restore step label (see restorePhaseStep). */
@@ -849,6 +908,26 @@ class SupervisorService {
         return substr((string)preg_replace('/[\x00-\x1f]+/', ' ', $reason), 0, 200);
     }
 
+    /**
+     * ACTIVITY_TRAY_PLAIN_NOTICES.md R5: the technical detail of a failed storage
+     * job (exit code, op, entity, reason) goes to the Debug Console log, not the tray.
+     */
+    private static function logJobFailure(string $opId, array $job, string $sentence): void {
+        try {
+            require_once __DIR__ . '/LogService.php';
+            LogService::log(
+                "Storage job failed: $sentence op=" . (string)($job['op'] ?? '?')
+                . ' entity=' . (string)($job['entity'] ?? '?')
+                . ' exit=' . (string)($job['exit'] ?? '?')
+                . ' defer_reason=' . (string)($job['defer_reason'] ?? '')
+                . " tray=$opId",
+                LogService::LOG_ERROR, 'SupervisorService'
+            );
+        } catch (\Throwable $e) {
+            // best effort
+        }
+    }
+
     public static function syncJobActivities(): void {
         require_once __DIR__ . '/ActivityService.php';
         foreach (self::listJobs(false) as $job) {
@@ -872,7 +951,10 @@ class SupervisorService {
                         // explanatory message instead of a bare "Done".
                         $op     = (string)($job['op'] ?? '');
                         $entity = (string)($job['entity'] ?? '');
-                        $step   = 'Done';
+                        // ACTIVITY_TRAY_PLAIN_NOTICES.md R2/R8: the DONE pill already says
+                        // "done", so a plain finish has no grey line. Only a sentence that
+                        // carries information is written.
+                        $step   = '';
                         if ($op === 'bake' && ($defer === 'busy_cooldown' || $defer === 'mount_busy')) {
                             // Forgejo #248: the supervisor ends a user Persist that kept
                             // deferring for these reasons as DONE, because the data was
@@ -907,13 +989,14 @@ class SupervisorService {
                         } elseif ($backupReason !== '') {
                             // HOME_BACKUP.md 2026-09-29: name the cause in plain
                             // words; the Debug Console log lists the files.
-                            $err = 'The backup stopped: ' . $backupReason
-                                 . '. Check the Debug Console log. (code ' . (string)($job['exit'] ?? '?') . ')';
+                            $err = 'The backup stopped: ' . $backupReason . '.';
                         } else {
-                            $err = 'The storage job stopped with an error. Check the Debug Console log. (code '
-                                 . (string)($job['exit'] ?? '?') . ')';
+                            $err = 'The storage job stopped with an error.';
                         }
-                        ActivityService::fail($opId, $err);
+                        // ACTIVITY_TRAY_PLAIN_NOTICES.md R5: one sentence in the red line;
+                        // the exit code goes to the log; the grey line points at the log.
+                        self::logJobFailure($opId, $job, $err);
+                        ActivityService::fail($opId, $err, $defer !== '' ? null : 'Details are in the Debug Console.');
                     }
                     break;
                 case 'running':
@@ -929,11 +1012,21 @@ class SupervisorService {
                     } elseif ($jobOp === 'restore') {
                         $step = self::restorePhaseStep((string)($job['phase'] ?? ''));
                         $progress = self::restorePhaseProgress($step);
+                    } elseif ($jobOp === 'consolidate' && (string)($job['phase'] ?? '') !== '') {
+                        // Forgejo #454: a home merge names its phase and moves its bar.
+                        $pct = self::consolidateWritePercent((string)($job['entity'] ?? ''));
+                        $phase = (string)$job['phase'];
+                        $step = self::consolidatePhaseStep($phase, $pct);
+                        $progress = self::consolidatePhaseProgress($phase, $pct);
                     } else {
-                        $step = 'running';
+                        $step = 'Running';
                         $progress = 50;
                     }
-                    if (($entry['step'] ?? '') !== $step) {
+                    if (($entry['status'] ?? '') === ActivityService::STATUS_WAITING) {
+                        // Forgejo #451: the wait does not count against the hard cap of
+                        // the run that starts now.
+                        ActivityService::update($opId, ['step' => $step, 'progress' => $progress, 'startedAt' => time()]);
+                    } elseif (($entry['step'] ?? '') !== $step) {
                         ActivityService::update($opId, ['step' => $step, 'progress' => $progress]);
                     } else {
                         ActivityService::heartbeat($opId);
@@ -943,16 +1036,27 @@ class SupervisorService {
                     // #1381 UX: render the human "why" verbatim in the tray
                     // (single source: TaskService::deferReasonHuman) instead of
                     // leaking the jargon token "deferred (mount_busy)".
+                    require_once __DIR__ . '/TaskService.php';
                     $op   = isset($job['op']) ? (string)$job['op'] : '';
                     $step = TaskService::deferReasonHuman($defer, $op);
-                    if (($entry['step'] ?? '') !== $step) {
-                        ActivityService::update($opId, ['step' => $step, 'progress' => 25]);
+                    // Forgejo #451: a deferred job is not at work. It waits for room or
+                    // for a session to close. Park the tray entry as `waiting`, so the
+                    // one-hour cap does not turn it into a false timeout. The next
+                    // progress update (job running again) moves it back to `running`.
+                    if (($entry['status'] ?? '') !== ActivityService::STATUS_WAITING
+                        || ($entry['step'] ?? '') !== $step) {
+                        ActivityService::wait($opId, $step, 25);
                     } else {
                         ActivityService::heartbeat($opId);
                     }
                     break;
                 default: // queued
-                    ActivityService::heartbeat($opId);
+                    if (($entry['step'] ?? '') === 'queued') {
+                        // An entry written before the plain wording: show the word, not the code.
+                        ActivityService::update($opId, ['step' => 'Queued']);
+                    } else {
+                        ActivityService::heartbeat($opId);
+                    }
                     break;
             }
         }
@@ -976,7 +1080,7 @@ class SupervisorService {
             if (isset($liveOpIds[$opId])) continue;
             $st = (string)($a['status'] ?? '');
             if ($st === 'running' || $st === 'stalled') {
-                ActivityService::finish($opId, 'done');
+                ActivityService::finish($opId, '');
             }
         }
     }
@@ -992,9 +1096,9 @@ class SupervisorService {
     public static function homeDoneStep(array $sessions, int $dirtyMb): string
     {
         if (!empty($sessions) && $dirtyMb > 8) {
-            return "Saved to flash — ~{$dirtyMb} MB stays in RAM until this home's open sessions close.";
+            return "Saved — about {$dirtyMb} MB stays in RAM until the open sessions close.";
         }
-        return 'Done';
+        return '';
     }
 
     /**

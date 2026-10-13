@@ -405,6 +405,34 @@ class BootIntegrityService {
      *
      * @return array<int, array{entity: string, state: string, evidence: array<string, mixed>}>
      */
+    /** Folder for throwaway test data. An entry that lives only here is never real user data. */
+    public const TEMP_ROOT = '/mnt/cache/appdata/_tmp/';
+
+    /**
+     * BOOT_INTEGRITY_STALE_TEMP_ENTITY.md (#462): true when a manifest entry records only paths under
+     * TEMP_ROOT and none of those folders exists any more. Pure: `$dirExists` is the test seam.
+     *
+     * @param array<string,mixed>|null $manifestEntry
+     */
+    public static function isStaleTemporaryEntity(?array $manifestEntry, ?callable $dirExists = null): bool
+    {
+        if (!is_array($manifestEntry)) return false;
+        $dirExists = $dirExists ?? 'is_dir';
+        $paths = [];
+        $cur = (string)($manifestEntry['current_persistence_path'] ?? '');
+        if ($cur !== '') $paths[] = $cur;
+        foreach (($manifestEntry['expected_layers'] ?? []) as $l) {
+            $pp = is_array($l) ? (string)($l['persist_path'] ?? '') : '';
+            if ($pp !== '') $paths[] = $pp;
+        }
+        if ($paths === []) return false;
+        foreach ($paths as $p) {
+            if (strpos($p, self::TEMP_ROOT) !== 0 || strpos($p, '..') !== false) return false;
+            if ($dirExists($p)) return false;
+        }
+        return true;
+    }
+
     public static function runBootSweep(): array {
         $entities = self::collectEntities();
 
@@ -419,6 +447,19 @@ class BootIntegrityService {
             [$entityType, $entityId] = self::parseEntity($entity) + [null, null];
             $entityType = $entityType ?? 'unknown';
             $entityId   = $entityId   ?? 'unknown';
+
+            // #462: a leftover entry of a deleted throwaway home is removed, not halted.
+            if ($entityType !== 'unknown' && self::isStaleTemporaryEntity(LayerManifestService::getEntity($entity))) {
+                LayerManifestService::removeEntity($entity);
+                @HaltService::clearHalt($entityType, $entityId, 'stale_temporary_entity');
+                LifecycleLogService::log(
+                    LifecycleLogService::LEVEL_INFO,
+                    self::COMPONENT,
+                    'boot_integrity_stale_temp_entity_pruned',
+                    ['entity' => $entity]
+                );
+                continue;
+            }
 
             $classification = self::classifyEntity($entity);
             $state          = $classification['state'];

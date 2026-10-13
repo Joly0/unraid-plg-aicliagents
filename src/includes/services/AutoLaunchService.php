@@ -315,11 +315,15 @@ class AutoLaunchService
                 if (!ProcessManager::isRunning($sid)) {
                     $failed++;
                     self::log("Auto-launch failed for $sid ($agentId): session did not start (trigger=$reason)", AICLI_LOG_WARN);
-                    ActivityService::fail("start_$sid", "Auto-launch failed: session did not start", 'retry', [
-                        'type'  => 'start',
-                        'label' => "Auto-launch $agentId",
-                        'meta'  => ['sessionId' => $sid, 'agentId' => $agentId, 'path' => $path, 'chatId' => $chatId],
-                    ]);
+                    // ACTIVITY_TRAY_PLAIN_NOTICES.md rows 4-5: title "<Agent name> did not start",
+                    // one red sentence, the way out as the grey line, and the Retry button.
+                    TerminalService::recordStartFailure(
+                        "start_$sid", UtilityService::trayAgentName((string)$agentId),
+                        'The agent did not come up after the workspace started.',
+                        'retry',
+                        ['sessionId' => $sid, 'agentId' => $agentId, 'path' => $path, 'chatId' => $chatId],
+                        TerminalService::START_RETRY_HINT
+                    );
                     continue;
                 }
 
@@ -329,11 +333,14 @@ class AutoLaunchService
                 $failed++;
                 self::log("Auto-launch failed for $sid ($agentId): " . $e->getMessage(), AICLI_LOG_WARN);
                 // T-10: same recoverable activity for the exception path.
-                ActivityService::fail("start_$sid", "Auto-launch failed: " . $e->getMessage(), 'retry', [
-                    'type'  => 'start',
-                    'label' => "Auto-launch $agentId",
-                    'meta'  => ['sessionId' => $sid, 'agentId' => $agentId, 'path' => $path, 'chatId' => (isset($resumeId) && $resumeId !== null) ? 'auto' : ''],
-                ]);
+                // The exception message is in the log line above; the tray gets one sentence.
+                TerminalService::recordStartFailure(
+                    "start_$sid", UtilityService::trayAgentName((string)$agentId),
+                    'The start stopped with an error; details are in the Debug Console.',
+                    'retry',
+                    ['sessionId' => $sid, 'agentId' => $agentId, 'path' => $path, 'chatId' => (isset($resumeId) && $resumeId !== null) ? 'auto' : ''],
+                    TerminalService::START_RETRY_HINT
+                );
             }
         }
 

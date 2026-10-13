@@ -2,7 +2,7 @@
 /**
  * <module_context>
  *     <name>EnvHandler</name>
- *     <description>AJAX handler for env vars + secrets — agent-tier + workspace-tier × general + secret classes. Hot-apply on save is the UI's responsibility (it calls agent_signal_reload after a successful save); this handler just persists.</description>
+ *     <description>AJAX handler for env vars + secrets — agent-tier + workspace-tier × general + secret classes. A save never restarts a session (#463): this handler just persists and says whether anything changed; the page offers a restart.</description>
  *     <dependencies>EnvService, SecretService, ValidationService</dependencies>
  *     <constraints>Static methods only. All inputs validated. Secret values NEVER round-trip back through GET responses — only has_value flags.</constraints>
  * </module_context>
@@ -64,9 +64,10 @@ class EnvHandler {
             return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
         }
 
+        $before = EnvService::getAgentEnvs($agentId);
         $ok = EnvService::saveAgentEnvs($agentId, $clean);
         return $ok
-            ? ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected]
+            ? ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected, 'changed' => !self::sameMap($before, $clean)]
             : ['status' => 'error', 'message' => 'Write failed'];
     }
 
@@ -179,7 +180,7 @@ class EnvHandler {
         }
         SecretService::setFreeformKeys($newFreeform);
 
-        return ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected];
+        return ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected, 'changed' => !self::sameMap($current, $next)];
     }
 
     // ---------- Secret — workspace ----------
@@ -229,8 +230,10 @@ class EnvHandler {
         }
 
         $ok = SecretService::saveWorkspaceSecrets($path, $agentId, $clean);
+        // #463: `changed` lets the page skip the "restart to use the new values" notice
+        // when the save left every value as it was.
         return $ok
-            ? ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected]
+            ? ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected, 'changed' => !self::sameMap($current, $clean)]
             : ['status' => 'error', 'message' => 'Write failed'];
     }
 
@@ -269,6 +272,15 @@ class EnvHandler {
             if (is_array($decoded)) return $decoded;
         }
         return [];
+    }
+
+    /** True when two name => value maps hold the same pairs, whatever their order. */
+    private static function sameMap(array $a, array $b): bool {
+        $a = array_map('strval', $a);
+        $b = array_map('strval', $b);
+        ksort($a);
+        ksort($b);
+        return $a === $b;
     }
 
     private static function rejectionMsg(array $rejected): string {

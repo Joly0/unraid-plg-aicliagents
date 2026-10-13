@@ -11,6 +11,39 @@
 namespace AICliAgents\Handlers;
 
 class StorageHandler {
+    /** Tray title of the running storage migration ("Moving storage to <path>"). */
+    private static string $migrateLabel = 'Moving storage';
+    /** Progress of the last migration step. */
+    private static int $migrateLastProgress = 0;
+    /** True from the moment the migration wrote the new paths to the settings file. */
+    private static bool $migrateSettingsSaved = false;
+
+    /**
+     * The tray row of a failed storage move: one plain error sentence, a recovery text that
+     * says what is true now, and no stale step. Pure, so a test needs no migration.
+     *
+     * What was done decides the text (ACTIVITY_TRAY_PLAIN_NOTICES.md R5):
+     *  - settings saved:   the setting already points to the new place;
+     *  - progress 5 up:    workspaces were closed, and saves or merges may be queued at the old place;
+     *  - before that:      nothing was changed.
+     * @return array{error:string,recovery:string,step:string}
+     */
+    public static function migrationFailureRow(string $message, int $lastProgress, bool $settingsSaved): array {
+        $error = trim((string)strtok($message, "\n"));
+        if ($error === '') $error = 'The storage move did not finish.';
+        if ($settingsSaved) {
+            $recovery = 'The files were copied and the setting already points to the new place. Check the Storage settings, then open your workspaces again.';
+        } elseif ($lastProgress >= 15) {
+            $recovery = 'Your open workspaces were closed, and a save and a merge of layers were started at the old place. The setting still points to the old place. Open your workspaces again.';
+        } elseif ($lastProgress >= 10) {
+            $recovery = 'Your open workspaces were closed, and a save of their changes was started at the old place. The setting still points to the old place. Open your workspaces again.';
+        } elseif ($lastProgress >= 5) {
+            $recovery = 'Your open workspaces were closed. The setting still points to the old place. Open your workspaces again.';
+        } else {
+            $recovery = 'Nothing was changed at the old location.';
+        }
+        return ['error' => $error, 'recovery' => $recovery, 'step' => ''];
+    }
 
     public static function handle($action, $id) {
         $result = null;
@@ -23,6 +56,7 @@ class StorageHandler {
             case 'storage_jobs_active':         return self::storageJobsActive();   // S-08: read-only, no Nchan publish
             case 'enumerate_storage_targets':   return self::enumerateStorageTargets(); // S-11: read-only, no Nchan publish
             case 'preflight_storage_backend':   return self::preflightStorageBackend(); // global engine policy, read-only
+            case 'preflight_upper_mode':        return self::preflightUpperMode();      // #456: writable-layer placement, read-only
             case 'restore_from_sibling':        return self::restoreFromSibling(); // mutating, but no Nchan — integrity-only
             case 'list_halts':                  return self::listHalts();           // read-only, no Nchan publish
             case 'clear_halt':                  return self::clearHalt();           // mutating, invalidates boot cache
@@ -54,6 +88,7 @@ class StorageHandler {
             case 'preflight_migrate':           return self::preflightMigrate();
             case 'execute_migrate':             $result = self::executeMigrate(); break;
             case 'execute_storage_backend':     $result = self::executeStorageBackend(); break;
+            case 'execute_upper_mode':          $result = self::executeUpperMode(); break;
             default:                            return null;
         }
         // D-402: After any mutating storage action, publish updated stats via Nchan
@@ -66,7 +101,7 @@ class StorageHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_force_reclaim_state', 'get_task_status',
-                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'preflight_storage_backend',
+                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'preflight_storage_backend', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
@@ -74,7 +109,7 @@ class StorageHandler {
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
                 'get_home_backup_settings', 'set_home_backup_setting',
-                'list_backups', 'restore_home', 'restore_status', 'delete_backup_snapshot', 'execute_storage_backend'];
+                'list_backups', 'restore_home', 'restore_status', 'delete_backup_snapshot', 'execute_storage_backend', 'execute_upper_mode'];
     }
 
     private static function getStatus() {
@@ -557,9 +592,26 @@ class StorageHandler {
      */
     private static function trackJobActivity(?string $jobId, string $label): void {
         if ($jobId === null || $jobId === '') return;
+        // ACTIVITY_TRAY_PLAIN_NOTICES.md R8/R9: the first step reads "Queued"; Cancel
+        // would only flip the row (the supervisor keeps the job), so the row has none.
         \AICliAgents\Services\ActivityService::register("storage_job_$jobId", 'storage', $label, [
-            'step' => 'queued', 'progress' => 5, 'meta' => ['jobId' => $jobId],
+            'step' => 'Queued', 'progress' => 5, 'meta' => ['jobId' => $jobId, 'cancel' => 'none'],
         ]);
+    }
+
+    /**
+     * ACTIVITY_TRAY_PLAIN_NOTICES.md R4: the name a person sees for an agent
+     * ("Claude Code"), never the registry id. Falls back to the id.
+     */
+    public static function trayAgentName(string $agentId): string {
+        try {
+            require_once __DIR__ . '/../services/AgentRegistry.php';
+            $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
+            $name = is_array($registry[$agentId] ?? null) ? trim((string)($registry[$agentId]['name'] ?? '')) : '';
+            return $name !== '' ? $name : $agentId;
+        } catch (\Throwable $e) {
+            return $agentId;
+        }
     }
 
     private static function persistAgent($id) {
@@ -572,7 +624,7 @@ class StorageHandler {
             // Ledger unavailable — preserve the legacy untracked enqueue.
             \AICliAgents\Services\SupervisorService::enqueue('agent', $id, 'bake', 'user_persist', 5);
         }
-        self::trackJobActivity($jobId, "Persist agent $id");
+        self::trackJobActivity($jobId, "Saving agent files: " . self::trayAgentName((string)$id));
         return ['status' => 'ok', 'message' => 'Persistence queued. The supervisor will bake the agent layer shortly.', 'baking' => true, 'job_id' => $jobId];
     }
 
@@ -605,7 +657,7 @@ class StorageHandler {
             // Ledger unavailable — preserve the legacy untracked enqueue.
             \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'user_persist', 5);
         }
-        self::trackJobActivity($jobId, "Persist home $user");
+        self::trackJobActivity($jobId, "Saving home: $user");
         return ['status' => 'ok', 'message' => 'Persistence queued. The supervisor will bake the home layer shortly.', 'baking' => true, 'job_id' => $jobId];
     }
 
@@ -751,8 +803,8 @@ class StorageHandler {
         }
 
         $opId = "user_backup_home_{$user}_{$jobId}";
-        \AICliAgents\Services\ActivityService::register($opId, 'storage', "Back up home $user", [
-            'step' => 'queued', 'progress' => 5, 'meta' => ['jobId' => $jobId],
+        \AICliAgents\Services\ActivityService::register($opId, 'storage', "Backing up home $user", [
+            'step' => 'Queued', 'progress' => 5, 'meta' => ['jobId' => $jobId, 'cancel' => 'none'],
         ]);
         \AICliAgents\Services\SupervisorService::wake();
         \AICliAgents\Services\LifecycleLogService::log(
@@ -1279,8 +1331,8 @@ class StorageHandler {
         }
 
         $opId = "user_restore_home_{$user}_{$jobId}";
-        \AICliAgents\Services\ActivityService::register($opId, 'storage', "Restore home $user", [
-            'step' => 'queued', 'progress' => 5, 'meta' => ['jobId' => $jobId],
+        \AICliAgents\Services\ActivityService::register($opId, 'storage', "Restoring home $user", [
+            'step' => 'Queued', 'progress' => 5, 'meta' => ['jobId' => $jobId, 'cancel' => 'none'],
         ]);
         \AICliAgents\Services\SupervisorService::wake();
         \AICliAgents\Services\LifecycleLogService::log(
@@ -1364,7 +1416,10 @@ class StorageHandler {
      * a consolidate, so approval never re-implements the
      * writeHomeManifest → markHomeConsolidating → enqueue → wake order below.
      */
-    public static function consolidate(string $type = '', string $id = '', array $relaunchSet = []): array {
+    public static function consolidate(string $type = '', string $id = '', array $relaunchSet = [], ?bool $continueAfter = null): array {
+        // CONSOLIDATE_CONTINUE_OPTION.md: the Storage tab sends continue_after=0 when the person
+        // unticks "Send Continue ...". A caller that passes nothing keeps today's behaviour (Continue).
+        if ($continueAfter === null) $continueAfter = (string)($_GET['continue_after'] ?? '1') !== '0';
         if ($type === '') $type = (string)($_GET['type'] ?? 'agent');
         if ($id === '')   $id   = (string)($_GET['id']   ?? 'default');
         if ($type === 'home' && ($id === '0')) {
@@ -1411,7 +1466,7 @@ class StorageHandler {
                     'workspacePath' => $wp,
                     'agentId'       => $agentId,
                     'hadResume'     => $wp !== '' && $agentId !== '',
-                    'working'       => true,
+                    'working'       => $continueAfter,
                 ];
             }
             foreach ($relaunchSet as $s) {
@@ -1426,7 +1481,7 @@ class StorageHandler {
                     'workspacePath' => $wp,
                     'agentId'       => $agentId,
                     'hadResume'     => $wp !== '' && $agentId !== '',
-                    'working'       => true,
+                    'working'       => $continueAfter,
                 ];
             }
             if (!empty($manifest)) {
@@ -1454,7 +1509,9 @@ class StorageHandler {
         if ($jobId === null) {
             \AICliAgents\Services\SupervisorService::enqueue($type, $id, 'consolidate', 'user_consolidate', 5, null, false, $epoch);
         }
-        self::trackJobActivity($jobId, "Consolidate $type/$id");
+        self::trackJobActivity($jobId, $type === 'agent'
+            ? "Merging layers of agent " . self::trayAgentName((string)$id)
+            : "Merging layers of home $id");
 
         // R2.1: wake the supervisor so the job starts immediately.
         \AICliAgents\Services\SupervisorService::wake();
@@ -1643,10 +1700,11 @@ class StorageHandler {
         $result = \AICliAgents\Services\FileStorage::deleteHomeEntity($id);
 
         if ($result['ok']) {
-            \AICliAgents\Services\ActivityService::register("storage_delete_home_$id", 'storage', "Deleted home storage: $id", [
-                'step' => 'completed', 'progress' => 100,
+            \AICliAgents\Services\ActivityService::register("storage_delete_home_$id", 'storage', "Home storage deleted: $id", [
+                'step' => '', 'progress' => 100,
+                'meta' => ['kind' => 'record', 'cancel' => 'none'],
             ]);
-            \AICliAgents\Services\ActivityService::finish("storage_delete_home_$id", "Home storage deleted: $id");
+            \AICliAgents\Services\ActivityService::finish("storage_delete_home_$id", '');
         }
 
         return [
@@ -1763,6 +1821,19 @@ class StorageHandler {
         return \AICliAgents\Services\StorageBackendMigrationService::preflight($mode, getAICliConfig());
     }
 
+    /** #456: read-only — what moving the homes' writable layer to ?mode= would do, and whether it is allowed. */
+    private static function preflightUpperMode(): array {
+        require_once __DIR__ . '/../services/UpperPlacementService.php';
+        return \AICliAgents\Services\UpperPlacementService::preflight((string)($_GET['mode'] ?? ''), getAICliConfig());
+    }
+
+    /** #456: change the placement and move the data (closes workspaces; saves, remounts, verifies). */
+    private static function executeUpperMode(): array {
+        set_time_limit(1800);
+        require_once __DIR__ . '/../services/UpperPlacementService.php';
+        return \AICliAgents\Services\UpperPlacementService::migrate((string)($_GET['mode'] ?? ''), getAICliConfig());
+    }
+
     private static function executeStorageBackend(): array {
         set_time_limit(900);
         require_once __DIR__ . '/../services/StorageBackendMigrationService.php';
@@ -1867,7 +1938,15 @@ class StorageHandler {
             }
         }
         // 1. Evict all sessions
-        self::migrateProgress('Stopping active sessions...', 5);
+        $__target = (string)($newHomePath ?: $newAgentPath);
+        self::$migrateLabel = $__target !== '' ? "Moving storage to $__target" : 'Moving storage';
+        self::$migrateLastProgress = 0;
+        self::$migrateSettingsSaved = false;
+        // Register afresh: the title carries the target path, and an old finished row must not keep its title.
+        \AICliAgents\Services\ActivityService::register('storage_migrate', 'migrate', self::$migrateLabel, [
+            'step' => 'Closing sessions', 'progress' => 5, 'meta' => ['cancel' => 'none'],
+        ]);
+        self::migrateProgress('Stopping active sessions...', 5, [], 'Closing sessions');
         // R3 (CAPTURE_RESUME_ALL_CLOSE_PATHS): a storage-path migration is an
         // orderly, user-initiated action — time is available, so run the FULL
         // clean capture (quiesce + scrape, authoritative resume id) for every
@@ -1883,7 +1962,7 @@ class StorageHandler {
         $user = $config['user'] ?? 'root';
         if (empty($user)) $user = 'root';
 
-        self::migrateProgress('Flushing dirty ZRAM layers before migration...', 10);
+        self::migrateProgress('Flushing dirty ZRAM layers before migration...', 10, [], 'Saving unsaved changes');
         aicli_log("Storage Migration: Enqueuing pre-migration bakes via supervisor...", AICLI_LOG_INFO);
         \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_migrate', 5);
 
@@ -1897,7 +1976,7 @@ class StorageHandler {
                     if (isset($seenAgents[$aid])) continue;
                     $seenAgents[$aid] = true;
                     if (count(glob("$oldAgentPath/agent_{$aid}_*.sqsh")) > 1) {
-                        self::migrateProgress("Queuing consolidation for agent: $aid...", 15);
+                        self::migrateProgress("Queuing consolidation for agent: $aid...", 15, [], 'Merging agent layers first');
                         \AICliAgents\Services\SupervisorService::enqueue('agent', $aid, 'consolidate', 'pre_migrate', 5);
                     }
                 }
@@ -1907,7 +1986,7 @@ class StorageHandler {
         $oldHomeOnFlash = (strpos($oldHomePath, '/boot/') === 0 || strpos($oldHomePath, '/boot') === 0);
         if ($newHomePath && $newHomePath !== $oldHomePath && !$oldHomeOnFlash) {
             if (count(glob("$oldHomePath/home_{$user}_*.sqsh")) > 1) {
-                self::migrateProgress('Queuing home layer consolidation...', 20);
+                self::migrateProgress('Queuing home layer consolidation...', 20, [], 'Merging home layers first');
                 \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'consolidate', 'pre_migrate', 5);
             }
         }
@@ -1931,7 +2010,7 @@ class StorageHandler {
                 $name = basename($f);
                 $sizeMB = round(filesize($f) / 1048576, 2);
                 $pct = intval(10 + (($done / $total) * 70));
-                self::migrateProgress("Copying $name ({$sizeMB}MB)...", $pct, ['file' => $name]);
+                self::migrateProgress("Copying $name ({$sizeMB}MB)...", $pct, ['file' => $name], 'Copying layer ' . ($done + 1) . " of $total ({$sizeMB} MB)");
                 aicli_log("Storage Migration: Copying $name ({$sizeMB}MB) from $oldAgentPath to $newAgentPath", AICLI_LOG_INFO);
 
                 $src = $f;
@@ -1954,7 +2033,7 @@ class StorageHandler {
                 $name = basename($f);
                 $sizeMB = round(filesize($f) / 1048576, 2);
                 $pct = intval(10 + (($done / $total) * 70));
-                self::migrateProgress("Copying $name ({$sizeMB}MB)...", $pct, ['file' => $name]);
+                self::migrateProgress("Copying $name ({$sizeMB}MB)...", $pct, ['file' => $name], 'Copying layer ' . ($done + 1) . " of $total ({$sizeMB} MB)");
                 aicli_log("Storage Migration: Copying $name ({$sizeMB}MB) from $oldHomePath to $newHomePath", AICLI_LOG_INFO);
 
                 $src = $f;
@@ -1972,7 +2051,7 @@ class StorageHandler {
 
         // 4. Save new config — read FRESH config (may have been modified by concurrent requests)
         //    and only update the two path keys. This avoids overwriting other config changes.
-        self::migrateProgress('Updating configuration...', 90);
+        self::migrateProgress('Updating configuration...', 90, [], 'Updating settings');
         aicli_log("Storage Migration: Updating configuration with new paths...", AICLI_LOG_INFO);
 
         $freshConfig = getAICliConfig();
@@ -1985,6 +2064,7 @@ class StorageHandler {
             $content .= "$key=\"" . addslashes($value) . "\"" . PHP_EOL;
         }
         \AICliAgents\Services\AtomicWriteService::write(\AICliAgents\Services\ConfigService::CONFIG_PATH, $content);
+        self::$migrateSettingsSaved = true; // from here a failure leaves the setting on the NEW place
 
         // Final consolidation at the new location (skip if target is Flash — avoid unnecessary USB writes)
         $newAgentOnFlash = !empty($newAgentPath) && (strpos($newAgentPath, '/boot/') === 0 || strpos($newAgentPath, '/boot') === 0);
@@ -2008,7 +2088,7 @@ class StorageHandler {
         if ($needsConsolidation) {
             // Enqueue post-migration consolidations via supervisor (Phase 3.3).
             // The handler returns immediately; supervisor consolidates in the background.
-            self::migrateProgress('Queuing final consolidation at new location...', 95);
+            self::migrateProgress('Queuing final consolidation at new location...', 95, [], 'Merging layers at the new location');
             if ($newAgentPath && $newAgentPath !== $oldAgentPath && !$newAgentOnFlash) {
                 $seenAgents = [];
                 foreach (glob("$newAgentPath/agent_*.sqsh") as $sqsh) {
@@ -2090,7 +2170,7 @@ class StorageHandler {
             aicli_log("Storage Migration: re-pointed $n agent manifest entr(ies) to $newAgentPath", AICLI_LOG_INFO);
         }
 
-        self::migrateProgress('Migration complete!', 100);
+        self::migrateProgress('Migration complete!', 100, [], 'Moved');
         aicli_log("Storage Migration: Complete. Agent path: $newAgentPath, Home path: $newHomePath", AICLI_LOG_INFO);
 
             $__migResult = ['status' => 'ok', 'message' => "Migration complete.\n\n" . $summary];
@@ -2105,8 +2185,13 @@ class StorageHandler {
         // T-08: single failure hook for every copy-flow error path — the activity
         // tray shows the migration as failed instead of frozen at the last step.
         if ($__ret['status'] !== 'ok') {
-            \AICliAgents\Services\ActivityService::fail('storage_migrate', (string)$__ret['message'], null, [
-                'type' => 'migrate', 'label' => 'Storage migration',
+            // ACTIVITY_TRAY_PLAIN_NOTICES.md R5: one plain sentence in the row. The full
+            // text goes to the log. The recovery text says what was done: workspaces closed,
+            // saves queued, or the setting already on the new place (migrationFailureRow()).
+            aicli_log("Storage Migration: failed: " . (string)$__ret['message'], AICLI_LOG_ERROR);
+            $__row = self::migrationFailureRow((string)$__ret['message'], self::$migrateLastProgress, self::$migrateSettingsSaved);
+            \AICliAgents\Services\ActivityService::fail('storage_migrate', $__row['error'], $__row['recovery'], [
+                'type' => 'migrate', 'label' => self::$migrateLabel, 'step' => $__row['step'], 'meta' => ['cancel' => 'none'],
             ]);
         }
         return $__ret;
@@ -2120,16 +2205,21 @@ class StorageHandler {
      * AND mirrors the step into the activity registry as the singleton
      * `storage_migrate` op (type `migrate`). progress>=100 finishes the activity.
      */
-    private static function migrateProgress(string $step, int $progress, array $extra = []): void {
+    private static function migrateProgress(string $step, int $progress, array $extra = [], ?string $trayStep = null): void {
         \AICliAgents\Services\EventBus::publish('storage.migrate', [], array_merge(
             ['step' => $step, 'progress' => $progress], $extra
         ));
+        self::$migrateLastProgress = $progress;
+        // The Manager channel keeps the technical step text. The tray gets the plain
+        // words of ACTIVITY_TRAY_PLAIN_NOTICES.md (R1/R8); Cancel would stop nothing (R9).
+        $trayStep = $trayStep ?? $step;
         if ($progress >= 100) {
-            \AICliAgents\Services\ActivityService::finish('storage_migrate', $step);
+            \AICliAgents\Services\ActivityService::finish('storage_migrate', $trayStep);
         } else {
             \AICliAgents\Services\ActivityService::update('storage_migrate', [
-                'type' => 'migrate', 'label' => 'Storage migration',
-                'step' => $step, 'progress' => $progress,
+                'type' => 'migrate', 'label' => self::$migrateLabel,
+                'step' => $trayStep, 'progress' => $progress,
+                'meta' => ['cancel' => 'none'],
             ]);
         }
     }

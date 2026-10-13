@@ -75,6 +75,11 @@
                             <label class="log-menu-check" title="Replace share names, hostname and LAN IPs in the bundle">
                                 <input type="checkbox" id="diag-anon" role="menuitemcheckbox"> Strict anonymize
                             </label>
+                            <!-- NOTEBOOK_HANG_OBSERVABILITY.md R12: timing traces are off unless this is ticked. It lives in
+                                 this menu so the toolbar keeps its one row on a desktop and on a phone. -->
+                            <label class="log-menu-check" for="perf-trace-switch" title="Write a timing line to the performance log and a WARN line to the Debug log for each slow step, such as a slow request, a slow Notebook scan or a slow mount check. Off by default. Tick it while you look for a hang, and untick it afterwards. Open pages pick the change up when they reload.">
+                                <input type="checkbox" id="perf-trace-switch" data-testid="perf-trace-switch" role="menuitemcheckbox" onchange="setPerfTrace(this)" <?= (((string)($config['perf_trace'] ?? '0')) === '1') ? 'checked' : '' ?>> Performance trace
+                            </label>
                         </div>
                     </div>
                 </div>

@@ -161,6 +161,24 @@ $(document).on('click', function(e) {
     if (menu && !menu.hidden && !$(e.target).closest('.log-menu-wrap').length) setLogSupportMenu(false);
 });
 
+// NOTEBOOK_HANG_OBSERVABILITY.md R12: the "Performance trace" switch. It saves one setting (perf_trace)
+// through the normal save action; the box goes back to its old state when the save fails.
+function setPerfTrace(el) {
+    var want = el.checked ? '1' : '0';
+    el.disabled = true;
+    $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=' + csrf, { perf_trace: want, csrf_token: csrf })
+        .done(function(r) {
+            if (r && r.status === 'ok') { window.AICLI_PERF_TRACE = (want === '1'); return; }
+            el.checked = !el.checked;
+            swal("Not saved", (r && r.message) || "The setting was not saved.", "error");
+        })
+        .fail(function() {
+            el.checked = !el.checked;
+            swal("Not saved", "Request error.", "error");
+        })
+        .always(function() { el.disabled = false; });
+}
+
 function diagEsc(s) {
     return $('<div>').text(String(s == null ? '' : s)).html();
 }

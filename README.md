@@ -6,6 +6,9 @@ CLI, NanoCoder, Antigravity CLI, Grok Build, and Kimi Code — directly inside t
 the server itself, in its own workspace, so it keeps working after you close
 the browser tab.
 
+**New to the plugin? Read the [user guide](docs/user-guide/README.md).** It has
+one page for each feature and a reference of every setting on every tab.
+
 ## Features
 
 - **14 agents out of the box.** Install, upgrade, and switch versions from a

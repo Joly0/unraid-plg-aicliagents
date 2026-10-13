@@ -1,0 +1,47 @@
+Menu="AICliHidden"
+Title="Notebook note"
+Tabs="false"
+---
+<?php
+/**
+ * <module_context>
+ * Description: One Notebook note, full size, in its own browser tab (docs/specs/NOTEBOOK_WIDE_LIST_HIDDEN_AND_NEW_TAB.md R5-R8).
+ * Dependencies: AICliAgentsManager.php, the built bundle assets/ui/index.js (NoteTabPage.tsx).
+ * Constraints: No Unraid menu entry. Menu="AICliHidden" names no real parent, so the page is not in any menu
+ *   or tab, but Unraid still serves it at /AICliNote. It has the Unraid login like every page of the plugin:
+ *   the web server refuses a request without the Unraid session, and every Notebook call the page makes goes
+ *   through AICliAjax.php with the CSRF token. The address holds only ?ws=<workspace id or global>&note=<note id>.
+ * </module_context>
+ */
+// Forgejo #367: pin this request to ONE plugin generation (see AICliAjax.php).
+if (!defined('AICLI_GEN_SRC')) {
+    clearstatcache(true, '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+    define('AICLI_GEN_SRC', realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+}
+require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
+aicli_ensure_init(true);
+
+$version = \AICliAgents\Services\ConfigService::getVersion();
+// Cache-bust on the built asset's mtime (see AICliAgents.page).
+$asset_dir = '/usr/local/emhttp/plugins/unraid-aicliagents/assets/ui';
+$css_files = glob("$asset_dir/index*.css") ?: [];
+sort($css_files);
+$asset_ver = (string) max(array_merge(
+    [@filemtime("$asset_dir/index.js") ?: 0],
+    array_map(static fn($f) => @filemtime($f) ?: 0, $css_files)
+));
+if ($asset_ver === '0') { $asset_ver = $version; }
+$var = @parse_ini_file("/var/local/emhttp/var.ini");
+$csrf_token = $var['csrf_token'] ?? '';
+?>
+<div id="aicli-note-root"></div>
+<script>
+window.csrf_token = <?= json_encode($csrf_token) ?> || (typeof csrf_token !== 'undefined' ? csrf_token : '');
+window.aicli_version = <?= json_encode($version) ?>;
+</script>
+<?php foreach ($css_files as $css_file): ?>
+<link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/<?= htmlspecialchars(basename($css_file)) ?>?v=<?= htmlspecialchars($asset_ver) ?>">
+<?php endforeach; ?>
+<?php // Same import map as AICliAgents.page: the lazy renderer chunks import "./index.js" without ?v=, and must get the one module. ?>
+<script type="importmap">{"imports":{"/plugins/unraid-aicliagents/assets/ui/index.js":"/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($asset_ver) ?>"}}</script>
+<script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($asset_ver) ?>"></script>

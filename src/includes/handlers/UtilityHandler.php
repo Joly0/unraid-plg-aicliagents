@@ -167,9 +167,11 @@ class UtilityHandler {
     private static function save() {
         // ARTEFACTS.md: normalise the five Notebook settings (a person's form post).
         // A bad folder name keeps the stored one; the rest of the form still saves.
-        foreach (['notebook_enabled', 'notebook_auto_open', 'notebook_allow_prod_secrets', 'notebook_spoken_notice', 'notebook_journal'] as $nbKey) {
+        foreach (['notebook_enabled', 'wiki_page_enabled', 'notebook_auto_open', 'notebook_allow_prod_secrets', 'notebook_spoken_notice', 'notebook_journal', 'notebook_notify_agent'] as $nbKey) {
             if (array_key_exists($nbKey, $_POST)) $_POST[$nbKey] = ((string)$_POST[$nbKey] === '1') ? '1' : '0';
         }
+        // NOTEBOOK_HANG_OBSERVABILITY.md R12: the Debug Console switch posts only 1 or 0.
+        if (array_key_exists('perf_trace', $_POST)) $_POST['perf_trace'] = ((string)$_POST['perf_trace'] === '1') ? '1' : '0';
         // Quiet hours: HH:MM-HH:MM (may wrap midnight) or empty. A bad value keeps the stored one.
         if (array_key_exists('notebook_quiet_hours', $_POST)) {
             $nbQuiet = trim((string)$_POST['notebook_quiet_hours']);
@@ -217,6 +219,8 @@ class UtilityHandler {
     private static function saveVault() {
         $file = '/boot/config/plugins/unraid-aicliagents/secrets.cfg';
         $existing = file_exists($file) ? (@parse_ini_file($file) ?: []) : [];
+        $before = array_map('strval', $existing);
+        ksort($before);
 
         $touched = 0;
         $resolved = [];
@@ -269,7 +273,11 @@ class UtilityHandler {
             return ['status' => 'error', 'message' => 'Failed to write secrets.cfg'];
         }
         @chmod($file, 0600);
-        return ['status' => 'ok', 'updated' => $touched];
+        // #463: `changed` is false when the save left every stored value as it was
+        // (for example a form whose fields all still show the dots).
+        $after = array_map('strval', $existing);
+        ksort($after);
+        return ['status' => 'ok', 'updated' => $touched, 'changed' => $after !== $before];
     }
 
     private static function getWorkspaces() {
@@ -423,7 +431,7 @@ class UtilityHandler {
      * uses readdir rather than scandir: the picker must never materialise an
      * arbitrarily large directory before returning a bounded page.
      *
-     * @return array{items:array<int,array{name:string,path:string}>,has_more:bool,scan_capped:bool,error:string}
+     * @return array{items:array<int,array{name:string,path:string,mtime:int}>,has_more:bool,scan_capped:bool,error:string}
      */
     private static function readDirectoryPage(string $scanPath, string $logicalPath, int $page, int $limit): array {
         $handle = @opendir($scanPath);
@@ -448,7 +456,10 @@ class UtilityHandler {
                 $hasMore = true;
                 break;
             }
-            $items[] = ['name' => $file, 'path' => rtrim($logicalPath, '/') . '/' . $file];
+            // WORKSPACE_PICKER_LIST_CONTROLS.md R4: the modified time (Unix seconds) lets
+            // the picker sort by newest or oldest. A failed stat gives 0.
+            $mtime = @filemtime($full);
+            $items[] = ['name' => $file, 'path' => rtrim($logicalPath, '/') . '/' . $file, 'mtime' => $mtime === false ? 0 : $mtime];
         }
         closedir($handle);
         return ['items' => $items, 'has_more' => $hasMore, 'scan_capped' => $scanCapped, 'error' => ''];

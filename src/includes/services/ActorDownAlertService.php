@@ -110,7 +110,9 @@ class ActorDownAlertService
                 }
             }
             if ($plan['down']) {
-                $label = $state['name'] . ' is down';
+                // Row 49 (ACTIVITY_TRAY_PLAIN_NOTICES.md): one sentence for the tray; the
+                // recovery sentence is passed to fail() and the tray shows it.
+                $label = $state['name'] . ' keeps stopping';
                 $error = self::lastErrorLine($forensicsPath !== null && $forensicsPath !== '' ? $forensicsPath : self::newestForensics($id));
                 $op = self::opId($id);
                 if ($plan['gaveUp'] && empty($state['gaveUp'])) {
@@ -118,9 +120,15 @@ class ActorDownAlertService
                     ActivityService::dismiss($op); // register again below with the give-up text
                 }
                 if (empty($state['down']) || ActivityService::get($op) === null) {
-                    ActivityService::register($op, 'system', $label, ['step' => $plan['gaveUp'] ? 'The launcher gave up after repeated failed starts.' : 'The agent keeps failing to start.']);
+                    // The title already says "keeps stopping", so a plain stop has no step
+                    // (the tray shows the recovery sentence as the grey line of a failed
+                    // row). Only the launcher's give-up carries news worth a step.
+                    ActivityService::register($op, 'system', $label, ['step' => $plan['gaveUp'] ? 'The launcher gave up after repeated failed starts.' : '']);
                 }
                 ActivityService::fail($op, $error, self::RECOVERY, ['label' => $label]);
+                try {
+                    LogService::log("Relay actor '" . $state['name'] . "' ($id) keeps stopping" . ($plan['gaveUp'] ? ' (launcher gave up)' : '') . ": $error", LogService::LOG_WARN, 'ActorDownAlert');
+                } catch (\Throwable $e) { /* best effort */ }
                 $state['down'] = true;
                 if (empty($state['spoken'])) {
                     $state['spoken'] = $now; // once for each down event, whatever the answer
@@ -170,7 +178,16 @@ class ActorDownAlertService
         return $id !== '' && is_file(self::statePath($id));
     }
 
-    /** First non-empty line that contains "Error" or "failed", trimmed to 200 characters. */
+    /** The longest the crash line may be in the tray and in the notice. */
+    public const ERROR_LINE_MAX = 200;
+
+    /**
+     * First line of the crash file that contains "Error" or "failed", made safe for a
+     * person to read: no stack frame, the redaction service has removed secrets, file
+     * paths are gone, and a long line is cut at a word and ends with a full stop.
+     * The line reaches the tray, the log and an Unraid notification, so a key or a
+     * path must not survive (ACTIVITY_TRAY_PLAIN_NOTICES.md R5).
+     */
     public static function lastErrorLine(?string $forensicsPath): string
     {
         $fallback = 'The agent exited immediately.';
@@ -180,12 +197,50 @@ class ActorDownAlertService
             foreach (preg_split('/\r?\n/', $text) ?: [] as $line) {
                 $line = trim(preg_replace('/\x1b\[[0-9;]*[A-Za-z]/', '', $line) ?? $line);
                 if ($line === '') continue;
+                if (self::isStackFrame($line)) continue;
                 if (stripos($line, 'Error') !== false || stripos($line, 'failed') !== false) {
-                    return mb_substr($line, 0, 200);
+                    $safe = self::plainErrorLine($line);
+                    if ($safe !== '') return $safe;
                 }
             }
         } catch (\Throwable $e) { /* fall through */ }
         return $fallback;
+    }
+
+    /** True for a stack frame: "at fn (file:1:2)", "#3 0x...", "12: 0x...". Pure. */
+    public static function isStackFrame(string $line): bool
+    {
+        return preg_match('/^\s*(?:at\s+\S|#\d+\s|\d+:\s+0x)/', $line) === 1;
+    }
+
+    /**
+     * Make one crash line fit for the tray: redact secrets, drop file paths and their
+     * line numbers, collapse spaces, cut at a word. Fails closed: when the redaction
+     * service throws, nothing of the line is shown. Pure apart from reading the secret
+     * names for the redaction. Returns '' when nothing readable is left.
+     */
+    public static function plainErrorLine(string $line): string
+    {
+        // Bound the work before any regex: a single line can be many kilobytes.
+        $line = mb_substr($line, 0, self::ERROR_LINE_MAX * 4);
+        try {
+            $line = RedactionService::redact($line, RedactionService::loadKnownSecrets());
+        } catch (\Throwable $e) {
+            return '';
+        }
+        // A path (two or more segments), a file:// address, with an optional :line:column.
+        $line = (string)preg_replace('#(?<![\w:/.-])(?:file://)?/(?:[^\s/\'"()<>:,;]+/)*[^\s/\'"()<>:,;]+/?(?::\d+){0,2}#u', 'a file', $line);
+        $line = (string)preg_replace('/\s+/u', ' ', trim($line));
+        $line = (string)preg_replace('/\b(a file)(?:\s+a file\b)+/u', '$1', $line);
+        if ($line === '') return '';
+        $max = self::ERROR_LINE_MAX;
+        if (mb_strlen($line) <= $max) return $line;
+        // Too long: leave room for the full stop, step back to a word end when one is near.
+        $cut = mb_substr($line, 0, $max - 1);
+        $space = mb_strrpos($cut, ' ');
+        if ($space !== false && $space > (int)($max / 2)) $cut = mb_substr($cut, 0, $space);
+        $cut = rtrim($cut, " \t,;:-");
+        return $cut . '.';
     }
 
     private static function newestForensics(string $id): ?string

@@ -544,7 +544,7 @@ _entity_paths() {
         fi
     fi
     if declare -f entity_upper_mode >/dev/null 2>&1; then
-        _ep_mode="$(entity_upper_mode "$_ep_persist")"
+        _ep_mode="$(entity_upper_mode "$_ep_persist" "$_ep_type")"
     else
         local _ep_fst; _ep_fst=$(findmnt --noheadings --output FSTYPE --target "$_ep_persist" 2>/dev/null || echo '')
         { [ "$_ep_fst" = "vfat" ] || [ -z "$_ep_fst" ]; } && _ep_mode="zram" || _ep_mode="disk"
@@ -1207,6 +1207,61 @@ sqlite_stage_fits() {
     STAGE_FREE_MB="${free:-unknown}"
     case "$free" in ''|*[!0-9]*) return 0 ;; esac
     [ "$free" -ge "$STAGE_NEED_MB" ]
+}
+
+# consolidate_stage_fallback_root — the folder (on a pool/array disk) a
+# consolidate may stage its SQLite copies in when the default stage folder has no
+# room (docs/specs/CONSOLIDATE_STAGE_FALLBACK_LOCATION.md). Precedence:
+# AICLI_CONSOLIDATE_STAGE_PATH env (tests) > cfg key consolidate_stage_path.
+# Prints nothing when unset. Self-contained cfg read (common.sh may be sourced
+# without resolve_paths.sh).
+consolidate_stage_fallback_root() {
+    local raw="" cfg="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+    # The env override is a test seam. SET but EMPTY means "no fallback at all",
+    # so a test on a box whose cfg names a folder can still prove the no-fallback
+    # path; UNSET means read the cfg (production).
+    if [ -n "${AICLI_CONSOLIDATE_STAGE_PATH+x}" ]; then
+        raw="$AICLI_CONSOLIDATE_STAGE_PATH"
+    elif [ -f "$cfg" ]; then
+        raw="$(grep -oP '^consolidate_stage_path="?\K[^"]+' "$cfg" 2>/dev/null | head -1)"
+    fi
+    case "$raw" in /*) printf '%s\n' "${raw%/}" ;; esac
+    return 0
+}
+
+# sqlite_stage_fallback_ok <dir> — 0 only for a usable DISK folder: never the RAM
+# root file system (a RAM stage filled /tmp on 2026-09-30, #374), never the flash
+# (/boot is the device that has no room), creatable (0700) and writable.
+sqlite_stage_fallback_ok() {
+    local dir="${1%/}"
+    [ -n "$dir" ] || return 1
+    case "$dir" in /boot|/boot/*) return 1 ;; esac
+    mkdir -p "$dir" 2>/dev/null || return 1
+    chmod 700 "$dir" 2>/dev/null || true
+    [ -d "$dir" ] && [ -w "$dir" ] || return 1
+    _path_on_ram_rootfs "$dir" && return 1
+    return 0
+}
+
+# sqlite_stage_choose_root <db paths...> — consolidate only. Sets the global
+# _SQLITE_STAGE_ROOT (already holding the default root) to the first root with
+# room: the default, else the configured fallback. Returns 1 when none fits; the
+# STAGE_* figures are then the DEFAULT's (the message and the notification show
+# what the default needs). STAGE_FALLBACK_USED=1 when the fallback was chosen.
+sqlite_stage_choose_root() {
+    local default_root="${_SQLITE_STAGE_ROOT:-}" fb
+    STAGE_FALLBACK_USED=0
+    sqlite_stage_fits "$default_root" "$@" && return 0
+    fb="$(consolidate_stage_fallback_root)"
+    if [ -n "$fb" ] && [ "$fb" != "$default_root" ] && sqlite_stage_fallback_ok "$fb"; then
+        if sqlite_stage_fits "$fb" "$@"; then
+            _SQLITE_STAGE_ROOT="$fb"
+            STAGE_FALLBACK_USED=1
+            return 0
+        fi
+    fi
+    sqlite_stage_fits "$default_root" "$@" || true
+    return 1
 }
 
 # ----------------------------------------------------------------------------
@@ -1950,6 +2005,148 @@ restore_swapped_dir() {
     [ -n "$stale" ] || return 0
     rmdir "$dir" 2>/dev/null || rm -rf "$dir" 2>/dev/null
     mv -T "$stale" "$dir" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# docs/specs/CONSOLIDATE_PARTIAL_UPPER_RECLAIM.md (Forgejo #442)
+#
+# A consolidate that saw ANY write to the writable upper while it baked used to
+# keep the WHOLE upper ("Preserving upper to avoid data loss"). One small file,
+# such as the plugin's own Relay peer status, pinned gigabytes, and the next
+# bake re-packed the entire upper as a delta. These helpers keep only what the
+# new base layer cannot have: the entries that changed or appeared after the
+# consolidate marker. Everything older is in the base and is reclaimed.
+# ---------------------------------------------------------------------------
+
+# _upper_rel_is_sqlite_transient <rel> <abs> — 0 for the consolidator's own
+# reconstructable SQLite side-writes: a detected DB's -shm, or its ZERO-byte
+# -wal. The op sets SQLITE_TRANSIENT_SHM_RELS / SQLITE_EMPTY_WAL_RELS (one
+# relative path per line); unset lists mean nothing is transient.
+_upper_rel_is_sqlite_transient() {
+    local rel="${1:-}" abs="${2:-}" line
+    [ -n "$rel" ] || return 1
+    while IFS= read -r line; do
+        [ -n "$line" ] && [ "$line" = "$rel" ] && return 0
+    done <<< "${SQLITE_TRANSIENT_SHM_RELS:-}"
+    if [ ! -s "$abs" ]; then
+        while IFS= read -r line; do
+            [ -n "$line" ] && [ "$line" = "$rel" ] && return 0
+        done <<< "${SQLITE_EMPTY_WAL_RELS:-}"
+    fi
+    return 1
+}
+
+# _upper_changed_entries <old_upper> <marker> — prints, one per line, the
+# upper-relative paths (files, symlinks, whiteout devices, fifos, sockets AND
+# directories) whose mtime is newer than <marker>, minus the SQLite transient
+# side-writes above. A changed SQLite database, -wal, -shm or -journal brings
+# its WHOLE family: the base layer holds the staged copy of the database as it
+# was at the marker, and a database is only consistent together with its
+# sidecars. Sorted, unique.
+_upper_changed_entries() {
+    local old="${1%/}" marker="${2:-}" p rel base sib tmp
+    [ -d "$old" ] && [ -f "$marker" ] || return 1
+    tmp="$(mktemp 2>/dev/null)" || return 1
+    while IFS= read -r -d '' p; do
+        rel="${p#"$old"/}"
+        [ -n "$rel" ] && [ "$rel" != "$p" ] || continue
+        if [ -f "$p" ] && _upper_rel_is_sqlite_transient "$rel" "$p"; then continue; fi
+        printf '%s\n' "$rel"
+        base="$rel"
+        case "$rel" in
+            *-wal) base="${rel%-wal}" ;;
+            *-shm) base="${rel%-shm}" ;;
+            *-journal) base="${rel%-journal}" ;;
+        esac
+        if [ "$base" != "$rel" ] || { [ -f "$p" ] && head -c 16 "$p" 2>/dev/null | grep -qa "SQLite format 3"; }; then
+            for sib in "$base" "$base-wal" "$base-shm" "$base-journal"; do
+                [ -e "$old/$sib" ] && printf '%s\n' "$sib"
+            done
+        fi
+    done < <(find "$old" -mindepth 1 -newer "$marker" -print0 2>/dev/null) > "$tmp"
+    sort -u "$tmp"
+    rm -f "$tmp"
+}
+
+# upper_keep_changed_entries <old_upper> <fresh_upper> <marker>
+#
+# Copies the changed entries of <old_upper> (see _upper_changed_entries) into
+# the fresh, EMPTY, not-yet-mounted <fresh_upper>, with their ancestor
+# directories (mode and owner kept, so a user's home stays the user's).
+# Overlay bookkeeping xattrs (trusted.overlay.*: opaque, redirect, origin) are
+# NOT copied: the new base already holds every directory's content as of the
+# marker, and an opaque mark copied onto a plain parent would hide it. Whiteout
+# devices (a deletion after the marker) ARE copied, so a delete stays deleted.
+#
+# Sets KEEP_COUNT / KEEP_BYTES (regular files kept), RECLAIM_COUNT /
+# RECLAIM_BYTES (regular files of <old_upper> NOT kept, i.e. now served by the
+# base) and KEEP_EXAMPLE (one kept path, for the log).
+# Returns 0 on success; 1 on bad input; 3 when the copy failed (the caller
+# must then undo the swap and keep the whole old upper — never lose data).
+upper_keep_changed_entries() {
+    local old="${1%/}" fresh="${2%/}" marker="${3:-}"
+    KEEP_COUNT=0; KEEP_BYTES=0; RECLAIM_COUNT=0; RECLAIM_BYTES=0; KEEP_EXAMPLE=""
+    [ -d "$old" ] && [ -d "$fresh" ] && [ -f "$marker" ] || return 1
+    local tmp list rel anc b total_count=0 total_bytes=0
+    tmp="$(mktemp -d 2>/dev/null)" || return 1
+    list="$tmp/keep"
+    _upper_changed_entries "$old" "$marker" > "$tmp/changed" || { rm -rf "$tmp"; return 1; }
+    # Ancestors first, so tar recreates each directory with its own mode/owner.
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        anc="$rel"
+        while [ "${anc%/*}" != "$anc" ]; do
+            anc="${anc%/*}"
+            printf '%s\n' "$anc"
+        done
+        printf '%s\n' "$rel"
+    done < "$tmp/changed" | sort -u > "$list"
+    # Totals of the old upper (regular files only — what a bake can hold).
+    while IFS= read -r b; do
+        case "$b" in ''|*[!0-9]*) continue ;; esac
+        total_count=$((total_count + 1)); total_bytes=$((total_bytes + b))
+    done < <(find "$old" -type f -printf '%s\n' 2>/dev/null)
+    if [ -s "$list" ]; then
+        if ! tar -C "$old" -c --no-recursion --xattrs --xattrs-exclude='trusted.overlay.*' \
+                 --null -T <(tr '\n' '\0' < "$list") 2>"$tmp/tar.err" \
+           | tar -C "$fresh" -x --xattrs --xattrs-exclude='trusted.overlay.*' 2>>"$tmp/tar.err"; then
+            rm -rf "$tmp"
+            return 3
+        fi
+        # Every listed entry must exist in the fresh upper, or the swap is unsafe.
+        while IFS= read -r rel; do
+            [ -n "$rel" ] || continue
+            [ -e "$fresh/$rel" ] || [ -L "$fresh/$rel" ] || { rm -rf "$tmp"; return 3; }
+            if [ -f "$old/$rel" ] && [ ! -L "$old/$rel" ]; then
+                b="$(stat -c '%s' "$old/$rel" 2>/dev/null || echo 0)"
+                case "$b" in ''|*[!0-9]*) b=0 ;; esac
+                KEEP_COUNT=$((KEEP_COUNT + 1)); KEEP_BYTES=$((KEEP_BYTES + b))
+                [ -n "$KEEP_EXAMPLE" ] || KEEP_EXAMPLE="$rel"
+            fi
+        done < "$tmp/changed"
+    fi
+    RECLAIM_COUNT=$((total_count - KEEP_COUNT)); [ "$RECLAIM_COUNT" -ge 0 ] || RECLAIM_COUNT=0
+    RECLAIM_BYTES=$((total_bytes - KEEP_BYTES)); [ "$RECLAIM_BYTES" -ge 0 ] || RECLAIM_BYTES=0
+    rm -rf "$tmp"
+    return 0
+}
+
+# _busy_bake_pointless_on_disk <upper_mode> <bake_reason> — 0 when an
+# AUTOMATIC bake of a BUSY home would only copy a writable layer that already
+# lives on durable disk into a layer nobody can mount yet (Forgejo #445).
+# While a session holds the home, the post-bake reclaim defers, so the upper
+# is not emptied; a disk upper is already durable across a reboot (op_mount
+# keeps or adopts an upper that holds data); the rolling busy snapshot was
+# built for a RAM (zram) upper. The layer written in that case costs flash
+# space and wear and gains nothing. A person's Persist, a backup, an install
+# or a shutdown (no reason, or any other reason) is never skipped.
+_busy_bake_pointless_on_disk() {
+    local mode="${1:-}" reason="${2:-}"
+    [ "$mode" = "disk" ] || return 1
+    case "$reason" in
+        schedule|scheduled|dirty_pressure_soft|dirty_pressure_hard|dirty_pressure_critical|space_pressure) return 0 ;;
+    esac
+    return 1
 }
 
 # Test-only DETERMINISTIC SIGKILL hook (Epic #1310 Follow-on 4 L3.5). A no-op in

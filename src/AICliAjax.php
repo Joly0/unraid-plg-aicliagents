@@ -60,9 +60,12 @@ require_once AICLI_GEN_SRC . '/includes/handlers/VoiceHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/FavouritesHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/AutoContinueHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/NotebookHandler.php';
+require_once AICLI_GEN_SRC . '/includes/services/PerfTrace.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
+    // NOTEBOOK_HANG_OBSERVABILITY.md R2: time the whole request.
+    $ajaxT0 = \AICliAgents\Services\PerfTrace::start();
     $action = $_GET['action'];
     // External Relay MCP is bearer-authenticated JSON-RPC, not browser AJAX.
     // It must bypass CSRF only for this one dedicated endpoint.
@@ -139,6 +142,27 @@ if (isset($_GET['action'])) {
     if (!\AICliAgents\Services\TraceContext::setId($rawTrace)) {
         \AICliAgents\Services\TraceContext::setId(\AICliAgents\Services\TraceContext::generate());
     }
+
+    // R2: one end-of-request line, for every request, also one that ends in an exception or in a raw
+    // handler that calls exit. The flag keeps it to one line. A request of 2000 ms or more also writes
+    // the perf stage ajax.slow and a WARN line. Both only while the setting perf_trace is on. A trace never throws.
+    $ajaxDone = false;
+    $ajaxFinish = function () use (&$ajaxDone, &$action, &$id, $ajaxT0): void {
+        if ($ajaxDone) return;
+        $ajaxDone = true;
+        try {
+            $safeName = preg_replace('/[^a-zA-Z0-9_.-]/', '', substr((string)(is_scalar($action) ? $action : ''), 0, 64));
+            // Off by default (NOTEBOOK_HANG_OBSERVABILITY.md R12): no trace line and no AJAX done line
+            // unless the Debug Console switch "Performance trace" is on.
+            if (\AICliAgents\Services\PerfTrace::enabled()) {
+                $ms = \AICliAgents\Services\PerfTrace::point('ajax.slow', $ajaxT0, 2000, "action=$safeName");
+                aicli_log("AJAX done: $safeName ($id) ms=$ms", AICLI_LOG_DEBUG, "AICliAjax");
+            }
+        } catch (\Throwable $e) {
+            // A trace must never break the request it measures.
+        }
+    };
+    register_shutdown_function($ajaxFinish);
 
     try {
         // Log milestone actions at INFO, everything else at DEBUG.
@@ -275,7 +299,9 @@ if (isset($_GET['action'])) {
         }
         ob_end_clean();
         echo json_encode($response);
+        $ajaxFinish();
     }
+    $ajaxFinish();
 
     exit;
 }

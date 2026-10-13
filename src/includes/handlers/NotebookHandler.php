@@ -25,8 +25,10 @@
 namespace AICliAgents\Handlers;
 
 use AICliAgents\Services\NotebookService;
+use AICliAgents\Services\NotebookNotifyService;
 
 require_once __DIR__ . '/../services/NotebookService.php';
+require_once __DIR__ . '/../services/NotebookNotifyService.php';
 
 class NotebookHandler
 {
@@ -40,6 +42,14 @@ class NotebookHandler
         // the setting and hide itself. Every other action refuses with one clear sentence.
         if ($action !== 'notebook_info' && (string)(\AICliAgents\Services\ConfigService::getConfig()['notebook_enabled'] ?? '1') !== '1') {
             return self::error('The Notebook is turned off. A person turns it on in Settings > Notebook.');
+        }
+        // The Wiki page (docs/specs/NOTEBOOK_WIKI_PAGE.md R1): the project list needs no workspace id, and the page
+        // setting must be on. Both checks come before any note data is touched.
+        if ($action === 'notebook_wiki_projects') {
+            if ((string)(\AICliAgents\Services\ConfigService::getConfig()['wiki_page_enabled'] ?? '0') !== '1') {
+                return self::error('The Wiki page is turned off. A person turns it on in Settings > Notebook.');
+            }
+            return ['status' => 'ok', 'projects' => NotebookService::wikiProjects()];
         }
         try {
             $ctx = NotebookService::contextFor(self::str('workspaceId'));
@@ -90,24 +100,35 @@ class NotebookHandler
                 case 'notebook_pin':       return self::reply(NotebookService::pin($ctx, $aid, self::flag('pinned'), $author));
                 case 'notebook_lock':      return self::reply(NotebookService::lock($ctx, $aid, self::flag('locked'), $author));
                 case 'notebook_archive':   return self::reply(NotebookService::archive($ctx, $aid, $author));
+                case 'notebook_remove': {
+                    $ev = self::str('expectedVersion');
+                    return self::reply(NotebookService::remove($ctx, $aid, $ev === '' ? null : $ev, $author));
+                }
+                case 'notebook_request_refresh':
+                    return self::reply(NotebookService::requestRefresh($ctx, $aid, (string)($_REQUEST['note'] ?? '')));
                 case 'notebook_restore': {
                     $area = self::str('area');
                     return self::reply(NotebookService::restore($ctx, $aid, $area === '' ? null : $area, $author));
                 }
                 case 'notebook_item_state': {
                     $note = array_key_exists('note', $_REQUEST) ? (string)$_REQUEST['note'] : null;
-                    return self::reply(NotebookService::itemState($ctx, $aid, self::str('item'), self::str('result'), $note, $author));
+                    $before = NotebookNotifyService::snapshot($ctx, $aid);
+                    $r = NotebookService::itemState($ctx, $aid, self::str('item'), self::str('result'), $note, $author);
+                    return self::reply(NotebookNotifyService::attach($action, $ctx, $aid, $before, $r));
                 }
                 case 'notebook_answer': {
                     $note = array_key_exists('note', $_REQUEST) ? (string)$_REQUEST['note'] : null;
                     $raw = (string)($_REQUEST['value'] ?? '');
                     $val = json_decode($raw, true);
                     if (json_last_error() !== JSON_ERROR_NONE) $val = $raw;
-                    return self::reply(NotebookService::answer($ctx, $aid, self::str('question'), $val, $note, $author));
+                    $before = NotebookNotifyService::snapshot($ctx, $aid);
+                    $r = NotebookService::answer($ctx, $aid, self::str('question'), $val, $note, $author);
+                    return self::reply(NotebookNotifyService::attach($action, $ctx, $aid, $before, $r));
                 }
                 case 'notebook_comment': {
                     $parent = self::str('parent');
-                    return self::reply(NotebookService::addComment($ctx, $aid, self::str('kind'), self::str('ref'), (string)($_REQUEST['text'] ?? ''), $parent === '' ? null : $parent, $author));
+                    $r = NotebookService::addComment($ctx, $aid, self::str('kind'), self::str('ref'), (string)($_REQUEST['text'] ?? ''), $parent === '' ? null : $parent, $author);
+                    return self::reply(NotebookNotifyService::attach($action, $ctx, $aid, [], $r));
                 }
                 case 'notebook_comment_resolve':
                     return self::reply(NotebookService::resolveComment($ctx, $aid, self::str('commentId'), self::flag('resolved'), $author));
@@ -116,7 +137,8 @@ class NotebookHandler
                     return self::reply(NotebookService::markRead($ctx, $all ? null : $aid, $all));
                 }
                 case 'notebook_secret_set':
-                    return self::reply(NotebookService::secretSet($ctx, $aid, self::str('field'), (string)($_REQUEST['value'] ?? ''), $author));
+                    $r = NotebookService::secretSet($ctx, $aid, self::str('field'), (string)($_REQUEST['value'] ?? ''), $author);
+                    return self::reply(NotebookNotifyService::attach($action, $ctx, $aid, [], $r));
                 case 'notebook_secret_reveal': {
                     $r = NotebookService::secretReveal($ctx, $aid, self::str('field'), $author);
                     if (!isset($r['error']) && !headers_sent()) header('Cache-Control: no-store');
@@ -159,12 +181,12 @@ class NotebookHandler
     {
         return [
             'notebook_info', 'notebook_list', 'notebook_get', 'notebook_search', 'notebook_history', 'notebook_comments',
-            'notebook_backlinks', 'notebook_templates', 'notebook_wiki_index', 'notebook_asset', 'notebook_export', 'notebook_lock',
+            'notebook_backlinks', 'notebook_templates', 'notebook_wiki_index', 'notebook_asset', 'notebook_export', 'notebook_lock', 'notebook_remove',
             'notebook_create', 'notebook_save', 'notebook_patch', 'notebook_move', 'notebook_pin', 'notebook_archive',
             'notebook_restore', 'notebook_item_state', 'notebook_answer', 'notebook_comment', 'notebook_comment_resolve',
             'notebook_mark_read', 'notebook_secret_set', 'notebook_secret_reveal', 'notebook_secret_clear',
             'notebook_check_url', 'notebook_asset_upload', 'notebook_import', 'notebook_share', 'notebook_read_aloud',
-            'notebook_read_plan', 'notebook_read_clip',
+            'notebook_read_plan', 'notebook_read_clip', 'notebook_request_refresh', 'notebook_wiki_projects',
         ];
     }
 

@@ -585,6 +585,8 @@ class AdminService {
             'consolidate_layer_threshold_array' => ['group' => 'consolidate', 'description' => 'Layer count that starts an automatic consolidate on array storage.'],
             'consolidate_max_layers'            => ['group' => 'consolidate', 'description' => 'How many saved layers of a home directory can build up before the plugin must merge them into one.'],
 
+            'consolidate_stage_path'            => ['group' => 'consolidate', 'description' => 'A folder on a pool or array disk used to hold temporary database copies during a merge when the USB flash has no room. Never RAM, never the flash.'],
+
             // ---- boot integrity ----
             'boot_integrity_strict' => ['group' => 'boot_integrity', 'description' => 'Blocks boot when a storage integrity check fails, instead of only warning.'],
             'verify_sha256_on_boot' => ['group' => 'boot_integrity', 'description' => 'Checks file hashes on every boot, instead of only file size and time.'],
@@ -594,6 +596,7 @@ class AdminService {
             'lifecycle_log_max_bytes'  => ['group' => 'logging', 'description' => 'Maximum size of the lifecycle log, in bytes, before it rotates.'],
             'debug_log_max_bytes'      => ['group' => 'logging', 'description' => 'Maximum size of the debug log, in bytes, before it rotates.'],
             'debug_log_format'         => ['group' => 'logging', 'description' => 'Debug log format: plain text, or one JSON record per line.'],
+            'perf_trace'               => ['group' => 'logging', 'description' => 'Writes timing lines for slow steps (slow requests, Notebook scans, mount checks) to the performance log and the debug log. Off by default.'],
 
             // ---- agent voice (AGENT_VOICE.md, VOICE_SWITCHES.md) ----
             'voice_enabled' => ['group' => 'voice', 'description' => 'The global voice switch. Off by default. When off, the aicli_speak tool and the speak command both refuse.'],
@@ -612,6 +615,7 @@ class AdminService {
 
             // ---- notebook (ARTEFACTS.md) — a person changes these on Settings, Notebook; an agent cannot ----
             'notebook_enabled'            => ['group' => 'notebook', 'description' => 'The Notebook drawer and the artefact tools. 1 is on (default), 0 is off. Changes only on the Settings page, Notebook — an agent cannot change it.'],
+            'wiki_page_enabled'           => ['group' => 'notebook', 'description' => 'Show the Wiki as its own page in the Unraid Tasks menu. 0 is off (default). Changes only on the Settings page, Notebook — an agent cannot change it.'],
             'notebook_auto_open'          => ['group' => 'notebook', 'description' => 'Open the Notebook drawer by itself when an agent asks (open:true on create). 0 is off (default). Changes only on the Settings page, Notebook.'],
             'notebook_folder'             => ['group' => 'notebook', 'description' => 'The folder name of the notebook inside each project folder (default notebook). Changes only on the Settings page, Notebook.'],
             'notebook_allow_prod_secrets' => ['group' => 'notebook', 'description' => 'Allow a connection card to hold a value that looks like a production key. 0 is off (default). Changes only on the Settings page, Notebook.'],
@@ -1804,7 +1808,7 @@ class AdminService {
                 ['id' => $id, 'agentId' => $favourite['agentId'] ?? ''],
                 "Removed favourite '{$favourite['name']}'"
             );
-            return ['id' => $id, 'removed' => true];
+            return ['id' => $id, 'removed' => true, 'name' => (string)($favourite['name'] ?? '')];
         } catch (\Throwable $e) {
             return self::failure('removeFavourite', $e);
         }
@@ -2046,7 +2050,9 @@ class AdminService {
             try {
                 $safe = RedactionService::redact($text, RedactionService::loadKnownSecrets());
             } catch (\Throwable $e) {
-                // Fall back to the untruncated original — a broken redaction pass must not block the excerpt.
+                // Fail closed: a broken redaction pass must never let the raw text (which may hold a
+                // token) into the ledger. The event keeps its shape with an empty excerpt.
+                return '';
             }
         }
         return function_exists('mb_substr') ? mb_substr($safe, 0, self::SEND_INPUT_EXCERPT_CHARS) : substr($safe, 0, self::SEND_INPUT_EXCERPT_CHARS);
@@ -2657,6 +2663,42 @@ class AdminService {
     }
 
     /**
+     * The short question a person reads as the title of a pending item
+     * (ACTIVITY_TRAY_PLAIN_NOTICES.md R6): `Delete workspace "home-homelab"?`. It names the
+     * object by its display name. The full statement stays in meta.statement.
+     *
+     * @param array<string,mixed> $params
+     */
+    public static function pendingQuestion(string $tool, string $description, array $params): string {
+        $user = trim((string)($params['user'] ?? ''));
+        switch ($tool) {
+            case 'aicli_delete_workspace':
+                $rec = self::findSession((string)($params['id'] ?? ''));
+                $name = $rec !== null ? trim((string)($rec['name'] ?? '')) : '';
+                if ($name === '' && $rec !== null) $name = basename((string)($rec['path'] ?? ''));
+                return $name !== '' ? 'Delete workspace "' . $name . '"?' : 'Delete a workspace?';
+            case 'aicli_upgrade_agent':
+                $agentId = (string)($params['agentId'] ?? '');
+                $agent = $agentId !== '' ? (AgentRegistry::getRegistry()[$agentId]['name'] ?? $agentId) : 'an agent';
+                $version = trim((string)($params['version'] ?? ''));
+                return 'Upgrade ' . $agent . ($version !== '' ? ' to ' . $version : '') . '?';
+            case 'aicli_backup_home':
+                return $user !== '' ? "Back up $user's home?" : 'Back up a home?';
+            case 'aicli_restore_home':
+                $snap = trim((string)($params['snapshot'] ?? ''));
+                return ($user !== '' ? "Restore $user's home" : 'Restore a home') . ($snap !== '' ? " from $snap" : '') . '?';
+            case 'aicli_consolidate_home':
+                return $user !== '' ? "Merge the layers of $user's home?" : 'Merge the layers of a home?';
+            case 'aicli_purge_artefact':
+                $title = trim((string)($params['title'] ?? ''));
+                return $title !== '' ? 'Remove the Notebook file "' . $title . '" for good?' : 'Remove a Notebook file for good?';
+        }
+        // A tool with no question: the first sentence of the statement, never the whole paragraph.
+        $first = (string)preg_split('/(?<=[.?!])\s/', trim($description), 2)[0];
+        return mb_strlen($first) > 80 ? mb_substr($first, 0, 79) . '…' : $first;
+    }
+
+    /**
      * Shared by every proposeX() above: write the pending Activity tray item
      * and return the "waiting for the user" result a Tier 3 tool hands back
      * to its caller. The opId is prefixed 'pending_' (distinct from Tier 2's
@@ -2669,7 +2711,10 @@ class AdminService {
     private static function proposePending(string $tool, string $description, array $params): array {
         $caller = self::callerIdentity();
         $opId = 'pending_' . preg_replace('/[^a-z0-9_]/', '_', $tool) . '_' . bin2hex(random_bytes(4));
-        $entry = ActivityService::propose($opId, $tool, $description, $params, $caller);
+        // ACTIVITY_TRAY_PLAIN_NOTICES.md R6: the title is a short question; the full
+        // statement of what approval does stays in meta.statement for the block below it.
+        $entry = ActivityService::propose($opId, $tool, $description, $params, $caller,
+            ['label' => self::pendingQuestion($tool, $description, $params)]);
         if ($entry === null) {
             return ['error' => 'Could not create the pending approval item.'];
         }
@@ -2702,16 +2747,19 @@ class AdminService {
         $params = is_array($meta['params'] ?? null) ? $meta['params'] : [];
         $method = self::TIER3_EXECUTORS[$tool] ?? null;
         if ($method === null) {
-            ActivityService::fail($opId, "No executor is registered for tool '$tool'.");
+            // The tool name goes to the log; the tray gets one plain sentence (R1, R5).
+            LogService::log("Approval $opId: no executor is registered for tool '$tool'.", LogService::LOG_ERROR, 'AdminService');
+            ActivityService::fail($opId, 'The plugin has no action for this approval. Details are in the Debug Console.', null, ['step' => '']);
             return ['error' => "No executor is registered for tool '$tool'."];
         }
 
         $result = self::{$method}($params);
         if (isset($result['error'])) {
-            ActivityService::fail($opId, (string)$result['error']);
+            // An empty step: the row must not keep the grey "Approved — running" under the red error.
+            ActivityService::fail($opId, (string)$result['error'], null, ['step' => '']);
             return ['error' => (string)$result['error']];
         }
-        ActivityService::finish($opId, 'Approved and applied');
+        ActivityService::finish($opId, 'Approved and done');
         return ['opId' => $opId, 'tool' => $tool, 'result' => $result];
     }
 
@@ -2723,10 +2771,16 @@ class AdminService {
      * @return array<string,mixed>
      */
     public static function rejectPending(string $opId, string $reason = ''): array {
-        $ok = ActivityService::reject($opId, $reason !== '' ? $reason : 'rejected by user');
+        $ok = ActivityService::reject($opId, $reason !== '' ? $reason : 'Rejected');
         if (!$ok) {
             return ['error' => "No pending approval item with id '$opId' was found (it may already have been approved, rejected, or dismissed)."];
         }
+        // ACTIVITY_TRAY_PLAIN_NOTICES.md R6: a rejection is a grey "Rejected" record, not a red failure.
+        // ActivityService::reject() keeps its signature and writes status failed + the reason as the
+        // error, so the row is turned into a finished record here.
+        $fields = ['status' => 'done', 'error' => null, 'step' => 'Rejected', 'meta' => ['kind' => 'record']];
+        if ($reason !== '') $fields['meta']['rejectReason'] = $reason;
+        ActivityService::update($opId, $fields);
         return ['opId' => $opId, 'rejected' => true];
     }
 
@@ -2934,7 +2988,7 @@ class AdminService {
         return ['ok' => true, 'id' => $id, 'field' => $field, 'stored' => true];
     }
 
-    /** The wiki view: home page, section tree, recent changes, unlinked pages, link graph, Things you should know. @return array<string,mixed> */
+    /** The wiki view: home page, link tree, recent changes, unlinked pages, link graph, Things you should know. @return array<string,mixed> */
     public static function wikiIndex(string $scope = 'notebook'): array {
         return self::notebookCall('wikiIndex', $scope, fn($ctx) => NotebookService::wikiIndex($ctx));
     }

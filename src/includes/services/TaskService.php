@@ -101,6 +101,9 @@ class TaskService {
             case 'graduate_precondition':
                 // S-10 (#1354): exit-4 precondition (wrong device/engine, not flash, no layers, or an occupied passthrough dir).
                 return 'Graduation refused: this entity does not meet the migration preconditions (a layered entity on a passthrough-capable device). Nothing was changed.';
+            case 'upper_on_disk':
+                // Forgejo #445: an automatic save of a busy home whose writable layer is on disk writes no layer on purpose.
+                return 'Already safe: this home\'s changes live on the storage device, not in RAM, so nothing was lost and no new layer was written while a session is open. A compact layer is written when every session on this home has closed.';
             case 'mount_busy':
             default:
                 return 'Data persisted to Flash, but ZRAM could not be cleared because a terminal session is still active. Please close all terminal tabs for this user to fully reset RAM usage.';
@@ -137,6 +140,8 @@ class TaskService {
                     return "Your data is already saved to disk. Freeing the RAM used by the previous copy is waiting for every open session on this home to close — it happens automatically the moment they do.";
                 }
                 return "Waiting for this home's open agent session(s) to close — it will $verb automatically the moment you close the session.";
+            case 'upper_on_disk':
+                return "Your data is already on the storage device: this home's writable layer lives on disk, not in RAM. A compact layer is written when every open session on this home has closed.";
             case 'bake_lock_held':
             case 'bake_landed_during_consolidate':
                 return "Waiting for another storage operation on this home to finish — it will $verb automatically on the next cycle.";

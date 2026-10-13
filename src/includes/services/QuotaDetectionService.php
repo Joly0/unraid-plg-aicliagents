@@ -21,7 +21,7 @@ final class QuotaDetectionService
 
     private const CODEX_QUOTA_MESSAGE = '~(?:you(?:\'|’)?ve\s+hit\s+your\s+usage\s+limit|usage\s+limit(?:\s+(?:reached|exceeded)\b|(?=\s*(?:[.!?]|$)))|quota\s+(?:reached|exceeded)\b)~iu';
     private const CODEX_CLOCK_RESET = '~(?:try\s+again|reset|resets)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s+\(([^)]+)\))?~iu';
-    private const CODEX_DATE_RESET = '~(?:try\s+again|reset|resets)\s+(?:at\s+)?([A-Z][a-z]{2})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s+\(([^)]+)\))?~iu';
+    private const CODEX_DATE_RESET = '~(?:try\s+again|reset|resets)\s+(?:at\s+)?([A-Z][a-z]{2})[a-z]{0,6}\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?(?:\s+(20\d{2}))?,?\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s+\(([^)]+)\))?~iu';
     private const CLAUDE_RESET = '~You\'ve\s+hit\s+your\s+weekly\s+limit\s*·\s*resets\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*([ap])m\s+\(([^)]+)\)~iu';
     private const CLAUDE_NATIVE_WAIT = '~Claude\s+Code\s+will\s+continue\s+automatically\s+at\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*([ap])m(?:\s+\(([^)]+)\))?~iu';
     private const CLAUDE_NATIVE_CANCELLED = '~Automatic\s+continue\s+cancelled~iu';
@@ -88,9 +88,12 @@ final class QuotaDetectionService
         if ($agentId === 'claude-code') return self::detectClaude($text, $now);
         if (in_array($agentId, self::OPENCODE_AGENTS, true)) return self::detectOpencode($text, $now);
         if ($agentId !== 'codex-cli' || !preg_match(self::CODEX_QUOTA_MESSAGE, $text)) return null;
+        // The message is only current while it is the newest output. A busy footer, a message
+        // the person sent or an agent line under it means the task resumed (Forgejo #459).
+        if (self::codexResumedAfterLimit($text)) return null;
 
         if (preg_match(self::CODEX_DATE_RESET, $text, $m)) {
-            $at = self::namedDateTime($now, (string)$m[1], (int)$m[2], (int)$m[3], (int)($m[4] ?: 0), (string)$m[5], (string)($m[6] ?? ''));
+            $at = self::namedDateTime($now, (string)$m[1], (int)$m[2], (int)$m[4], (int)($m[5] ?: 0), (string)$m[6], (string)($m[7] ?? ''), (int)($m[3] ?: 0));
             if ($at !== null) {
                 return [
                     'source' => 'quota-detect',
@@ -149,6 +152,7 @@ final class QuotaDetectionService
         $byAgent = [];
         $detectionsByAgent = [];
         $sessionOnly = [];
+        $captured = [];
 
         foreach ($sessions as $session) {
             $sid = trim((string)($session['id'] ?? ''));
@@ -158,6 +162,7 @@ final class QuotaDetectionService
             $byAgent[$agentId][] = $sid;
             $pane = (string)$capture($agentId, $sid);
             if ($pane === '') continue;
+            $captured[$sid] = true;
 
             $detected = self::detect($agentId, $pane, $now);
             if ($detected === null) continue;
@@ -185,6 +190,22 @@ final class QuotaDetectionService
                 continue;
             }
             if (!isset($detectionsByAgent[$agentId])) $detectionsByAgent[$agentId] = $detected;
+        }
+
+        // The quota is usable again when no session of the agent shows the limit message any more:
+        // every pending `quota-detect` schedule of a session we could read is then stale, and a
+        // typed Continue would land in a working agent (Forgejo #459). A session that cannot be
+        // read keeps its schedule, and an operator or transient-error schedule is never touched.
+        foreach ($byAgent as $agentId => $sids) {
+            if (isset($detectionsByAgent[$agentId])) continue;
+            foreach ($sids as $sid) {
+                if (empty($captured[$sid]) || isset($result['detections'][$sid]) || isset($sessionOnly[$sid])) continue;
+                $entry = $existing($sid);
+                if (is_array($entry) && ($entry['source'] ?? '') === 'quota-detect') {
+                    $clear($sid);
+                    $result['cleared']++;
+                }
+            }
         }
 
         foreach ($sessionOnly as $sid => $detected) {
@@ -341,6 +362,13 @@ final class QuotaDetectionService
     public static function sendDecision(string $agentId, string $raw, array $entry, ?int $now = null): string
     {
         if (!self::hasSendDecision($agentId, $entry)) return 'send';
+        if ($agentId === 'codex-cli') {
+            // Like OpenCode: a limit message that is no longer on screen (scrolled off, or an
+            // empty or unreadable pane) means the task is not stopped by the limit any more.
+            // Typing Continue into an idle Codex would start a turn nobody asked for.
+            if (self::codexLastLimitRow(self::codexTail($raw)) < 0) return 'clear';
+            return self::codexResumedAfterLimit($raw) ? 'clear' : 'send';
+        }
         $q = self::opencodeQuota($raw);
         if ($q === null || $q['newer']) return 'clear';
         if ($q['retry'] !== null) return 'wait';
@@ -355,10 +383,48 @@ final class QuotaDetectionService
         return 'send';
     }
 
-    /** True for a detected OpenCode/Kilo quota schedule, which is checked again at send time. */
+    /** True for a detected OpenCode/Kilo/Codex quota schedule, which is checked again at send time. */
     public static function hasSendDecision(string $agentId, array $entry): bool
     {
-        return in_array($agentId, self::OPENCODE_AGENTS, true) && ($entry['source'] ?? '') === 'quota-detect';
+        return (in_array($agentId, self::OPENCODE_AGENTS, true) || $agentId === 'codex-cli') && ($entry['source'] ?? '') === 'quota-detect';
+    }
+
+    /** The bottom rows of a Codex pane, as plain text. */
+    private static function codexTail(string $raw): array
+    {
+        $plain = TmuxService::plainPaneText(rtrim($raw, "\r\n"));
+        return array_slice(preg_split('/\R/u', $plain) ?: [], -TransientErrorService::TAIL_LINES);
+    }
+
+    /** Index of the LAST usage-limit row in the Codex tail, or -1 when the message is not on screen. */
+    private static function codexLastLimitRow(array $lines): int
+    {
+        $hit = -1;
+        foreach ($lines as $i => $line) {
+            if (PaneInputRules::safeMatch(self::CODEX_QUOTA_MESSAGE, (string)$line)) $hit = $i;
+        }
+        return $hit;
+    }
+
+    /**
+     * Codex: true when something newer than the LAST usage-limit message is on screen: the busy
+     * footer ("esc to interrupt"), a row the person sent ("› cont", not the empty-box hint), or an
+     * agent row ("•"/"●"). Wrapped rows of the message itself start with none of these.
+     */
+    private static function codexResumedAfterLimit(string $raw): bool
+    {
+        $lines = self::codexTail($raw);
+        $hit = self::codexLastLimitRow($lines);
+        if ($hit < 0) return false;
+        $busy = TransientErrorService::patterns()['busy']['esc-to-interrupt'];
+        foreach (array_slice($lines, $hit + 1) as $row) {
+            $t = trim((string)$row);
+            if ($t === '') continue;
+            if (PaneInputRules::safeMatch($busy, $t) || preg_match('/^Working\s*\(/u', ltrim($t, " \t•●·"))) return true;
+            if (preg_match('/^[•●]\s*\S/u', $t)) return true;
+            if (preg_match('/^›\s*(?!Ask\s+Codex\b)\S/u', $t)) return true;
+        }
+        return false;
     }
 
     /**
@@ -477,7 +543,7 @@ final class QuotaDetectionService
         }
     }
 
-    private static function namedDateTime(int $now, string $monthName, int $day, int $hour, int $minute, string $meridiem, string $zone): ?int
+    private static function namedDateTime(int $now, string $monthName, int $day, int $hour, int $minute, string $meridiem, string $zone, int $explicitYear = 0): ?int
     {
         $months = ['jan'=>1,'feb'=>2,'mar'=>3,'apr'=>4,'may'=>5,'jun'=>6,'jul'=>7,'aug'=>8,'sep'=>9,'oct'=>10,'nov'=>11,'dec'=>12];
         $month = $months[strtolower($monthName)] ?? 0;
@@ -487,9 +553,9 @@ final class QuotaDetectionService
         if (strtolower($meridiem) === 'a' && $hour === 12) $hour = 0;
         try {
             $tz = $zone !== '' ? new \DateTimeZone($zone) : new \DateTimeZone(date_default_timezone_get());
-            $year = (int)(new \DateTimeImmutable('@' . $now))->setTimezone($tz)->format('Y');
+            $year = $explicitYear > 0 ? $explicitYear : (int)(new \DateTimeImmutable('@' . $now))->setTimezone($tz)->format('Y');
             $candidate = new \DateTimeImmutable(sprintf('%04d-%02d-%02d %02d:%02d:00', $year, $month, $day, $hour, $minute), $tz);
-            if ($candidate->getTimestamp() <= $now) $candidate = $candidate->modify('+1 year');
+            if ($explicitYear === 0 && $candidate->getTimestamp() <= $now) $candidate = $candidate->modify('+1 year');
             return $candidate->getTimestamp();
         } catch (\Throwable $e) {
             return null;

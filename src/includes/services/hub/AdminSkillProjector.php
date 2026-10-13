@@ -729,23 +729,28 @@ work. `notes` is kept reference. `archive` is finished. Move an artefact with
 ## The wiki
 
 The Notebook is also a wiki. Run `aicli_wiki_index` (CLI `wiki`) before you write
-a page. It returns the home page, the sections with their pages, the newest
-changes, the pages that nothing links to (`orphans`), the link graph and the
-notes on "Things you should know". Add to what exists. Do not make a duplicate.
+a page. It returns the home page, the tree of wiki pages (`tree`, built from
+the `[[links]]` in the pages), the wiki pages that are not in the tree
+(`unlinked`), a flat list of the wiki pages (`pages`), the newest changes, the
+link graph and the notes on "Things you should know". Add to what exists. Do not
+make a duplicate.
 
-- **Link pages.** Write `[[Title]]` or `[[a_ID]]` in a Markdown page. A page with
-  no link in or out shows up under "Needs links". Link your new page from a page
-  that already exists.
-- **Put a page in a section.** Give it a `section` field (patch op
-  `{"op":"setField","field":"section","value":"Runbooks"}`) or a tag
-  `section:Runbooks`. A page with no section shows under Other.
-- **Standard sections.** Make one from a template with `aicli_create_artefact`
+- **Make a wiki page.** Give it the tag `wiki`, and link it from its parent page
+  with `[[Parent page title]]` style links in the parent's text. Do not use
+  `section:` tags. The links make the tree: a page shows under the first page
+  that links to it. A wiki page that no wiki page links to, and that links to no
+  wiki page, shows under "Not linked yet".
+- **Link pages.** Write `[[Title]]` or `[[a_ID]]` in a Markdown page. A link to a
+  note that is not a wiki page does not show in the tree. Link your new page from
+  a page that already exists.
+- **Standard pages.** Make one from a template with `aicli_create_artefact`
   and `template`, once, then add pages or entries to it. The keys are
   `wiki-home` (the front page), `decisions-log` (date, decision, reason,
   alternatives considered), `runbook` (steps with a check after each),
   `glossary` (a term and a plain meaning), `known-issues` (a fault, its effect
   and a workaround), `gotchas` (a trap and what to do), `how-it-works` (the parts
-  and how they fit), `who-owns-what` (an area and who to ask). Check
+  and how they fit), `who-owns-what` (an area and who to ask). Give a wiki home
+  page the tag `wiki-home`. Check
   `aicli_wiki_index` first so you do not make a second one.
 - **Things you should know.** Template `things-you-should-know`. It holds short
   notes for the person, one dated line each: append
@@ -785,12 +790,17 @@ lines move to `archive/agent-journal-<yyyy-mm>.md`. Nothing is deleted.
   Replace the whole `content` only with `expectedVersion` set to that value. If
   the call is refused because the file changed, read it again and merge. Never
   overwrite blind: the person may have edited it. Prefer small `ops` patches.
+- **You may get a one-line message in the terminal** when the person answers a
+  question card, finishes a checklist, marks an item as failed, comments on a
+  note or saves a login on a connection card. It names the file. The message
+  never holds the answer: read the file. A busy agent does not get the message,
+  so do not wait for it. Do not poll the file.
 - **Set `needsYou: true`** only when the person must act (answer a form, run a
   test). Clear it by finishing the work, not by hiding it.
 - **Keep it tidy.** Archive your own stale working items when you finish. Do not
   make a new artefact when you can update the old one. Do not archive or move a
   person's own artefacts unless they ask.
-- **Limits:** 256 KB a file, 2,000 artefacts a notebook, 60 changes a minute. A
+- **Limits:** 1 MB a file, 2,000 artefacts a notebook, 60 changes a minute. A
   call over a limit is refused with one sentence. Do not retry in a loop.
 - **Nothing is deleted.** Archive moves a file. Git keeps the history (a "not
   committed" mark shows on changes git has not saved yet). Only a person-approved

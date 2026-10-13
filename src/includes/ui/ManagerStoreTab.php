@@ -76,7 +76,11 @@ function av2_secrets_schema(array $agent): array {
         <div class="aicli-card">
             <div class="aicli-card-header" style="justify-content:space-between;">
                 <span><i class="fa fa-shopping-cart text-orange-500"></i> AI Agent Marketplace</span>
-                <button type="button" class="aicli-btn-slim" onclick="checkUpdates(this)"><i class="fa fa-refresh"></i> Check for Updates</button>
+                <span style="display:flex; align-items:center; gap:10px;">
+                    <!-- Forgejo #447: the state of the online check, always visible: cached + age, checking, just checked, failed. -->
+                    <span id="version-check-status" data-testid="version-check-status" style="font-size:11px; opacity:0.8;" aria-live="polite"></span>
+                    <button type="button" id="version-check-btn" class="aicli-btn-slim" onclick="checkUpdates(this)"><i class="fa fa-refresh"></i> Check for Updates</button>
+                </span>
             </div>
             <div class="aicli-card-body">
                 <div class="agent-filter-bar">
@@ -413,7 +417,7 @@ function av2_secrets_schema(array $agent): array {
                                                 <?php elseif ($type === 'text'): ?>
                                                     <input type="text" name="<?=htmlspecialchars($env, ENT_QUOTES, 'UTF-8')?>" value="<?=htmlspecialchars($current, ENT_QUOTES, 'UTF-8')?>" placeholder="<?=htmlspecialchars($sec['placeholder'] ?? '', ENT_QUOTES, 'UTF-8')?>">
                                                 <?php else: ?>
-                                                    <input type="password" name="<?=htmlspecialchars($env, ENT_QUOTES, 'UTF-8')?>" value="<?=$current !== '' ? '••••••••' : ''?>" data-has-value="<?=$current !== '' ? '1' : '0'?>" placeholder="Enter value">
+                                                    <input type="password" data-aicli-eye name="<?=htmlspecialchars($env, ENT_QUOTES, 'UTF-8')?>" value="<?=$current !== '' ? '••••••••' : ''?>" data-has-value="<?=$current !== '' ? '1' : '0'?>" placeholder="Enter value">
                                                 <?php endif; ?>
                                                 <?php if (!empty($sec['help'])): ?><div class="av2-help" style="margin-top:4px;"><?=htmlspecialchars($sec['help'], ENT_QUOTES, 'UTF-8')?></div><?php endif; ?>
                                             </div>
@@ -461,7 +465,7 @@ function av2_secrets_schema(array $agent): array {
                                             <div class="av2-ff-row">
                                                 <input class="av2-ff-name" type="text" value="<?=htmlspecialchars((string)$k, ENT_QUOTES, 'UTF-8')?>" placeholder="SECRET_NAME">
                                                 <span class="av2-ff-eq">=</span>
-                                                <input class="av2-ff-val" type="password" value="<?=$hasVal ? '••••••••' : ''?>" data-has-value="<?=$hasVal ? '1' : '0'?>" placeholder="value">
+                                                <input class="av2-ff-val" type="password" data-aicli-eye value="<?=$hasVal ? '••••••••' : ''?>" data-has-value="<?=$hasVal ? '1' : '0'?>" placeholder="value">
                                                 <button type="button" class="av2-ff-del" title="Remove" onclick="av2FfRemoveRow(this)"><i class="fa fa-trash-o"></i></button>
                                             </div>
                                             <?php endforeach; ?>

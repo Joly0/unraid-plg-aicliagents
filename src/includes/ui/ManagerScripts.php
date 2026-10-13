@@ -8,6 +8,88 @@
  */
 ?>
 <script>
+// Show-value eye button for every masked input (docs/specs/MASKED_VALUE_SHOW_ICON.md).
+// One helper for all Manager tabs. Put data-aicli-eye on a password input, or call
+// aicliMaskEye(input) for an input that the page builds later.
+// The button only changes the input type. It makes no server call and saves nothing.
+// A value that is only stored on the server shows as dots, and no existing read path
+// returns it, so the button stays hidden until the person types a value.
+(function () {
+    var MASK = '••••••••';
+    var NS = 'http://www.w3.org/2000/svg';
+    // Same two icons as the Notebook connection card (lucide Eye and EyeOff).
+    var PATHS = {
+        show: ['M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0'],
+        hide: ['M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49',
+               'M14.084 14.158a3 3 0 0 1-4.242-4.242',
+               'M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143',
+               'm2 2 20 20']
+    };
+    function icon(kind) {
+        var svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('width', '16'); svg.setAttribute('height', '16');
+        svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '1.75'); svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round'); svg.setAttribute('aria-hidden', 'true');
+        PATHS[kind].forEach(function (d) {
+            var p = document.createElementNS(NS, 'path');
+            p.setAttribute('d', d);
+            svg.appendChild(p);
+        });
+        if (kind === 'show') {
+            var c = document.createElementNS(NS, 'circle');
+            c.setAttribute('cx', '12'); c.setAttribute('cy', '12'); c.setAttribute('r', '3');
+            svg.appendChild(c);
+        }
+        return svg;
+    }
+    window.aicliMaskEye = function (input) {
+        if (!input || !input.parentNode || input.dataset.aicliEyeReady === '1') return;
+        input.dataset.aicliEyeReady = '1';
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'aicli-eye-btn';
+        btn.hidden = true;
+        var shown = false;
+        function paint() {
+            var label = shown ? 'Hide value' : 'Show value';
+            btn.setAttribute('aria-label', label);
+            btn.title = label;
+            btn.setAttribute('aria-pressed', shown ? 'true' : 'false');
+            while (btn.firstChild) btn.removeChild(btn.firstChild);
+            btn.appendChild(icon(shown ? 'hide' : 'show'));
+            input.type = shown ? 'text' : 'password';
+        }
+        // Show the button only when the field holds a value the person typed.
+        function sync() {
+            var v = input.value;
+            var typed = v !== '' && v !== MASK;
+            if (!typed && shown) { shown = false; paint(); }
+            btn.hidden = !typed;
+        }
+        btn.addEventListener('click', function () {
+            shown = !shown;
+            paint();
+            input.focus();
+        });
+        input.addEventListener('input', sync);
+        input.addEventListener('change', sync);
+        input.addEventListener('focus', sync);
+        // A script can set the value with no event; look again when the pointer or focus enters the row.
+        input.parentNode.addEventListener('pointerover', sync);
+        input.parentNode.addEventListener('focusin', sync);
+        input.parentNode.insertBefore(btn, input.nextSibling);
+        paint();
+        sync();
+    };
+    function initAll() {
+        document.querySelectorAll('input[data-aicli-eye]').forEach(window.aicliMaskEye);
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initAll);
+    else initAll();
+})();
+
 function switchMainTab(tab, el) {
     localStorage.setItem('aicli_manager_tab', tab);
     $('.aicli-tab-btn').removeClass('active');
@@ -58,15 +140,27 @@ function saveAICliAgentsManager(form, silent = false) {
     var curHomePath = '<?= addslashes($config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence') ?>';
     var newStorageMode = $(form).find('[name="storage_backend_mode"]').val() || 'layering';
     var curStorageMode = '<?= addslashes($config['storage_backend_mode'] ?? 'layering') ?>';
+    var newUpperMode = $(form).find('[name="storage_upper_mode"]').val() || 'zram';
+    var curUpperMode = '<?= addslashes($config['storage_upper_mode'] ?? 'zram') ?>';
+
+    // #456: the writable-layer placement of homes. A change is a MOVE, never a bare save:
+    // read-only preflight, a warning overlay with the facts, then the move behind a progress overlay.
+    if (newUpperMode !== curUpperMode) {
+        aicliChangeUpperMode(newUpperMode, curUpperMode, form);
+        return;
+    }
 
     // The engine is global.  Probe the actual backing devices before accepting
     // a change, then let the server migrate every entity before saving the mode.
     // A removable/USB result is an explicit warning, not a path-prefix guess.
     if (newStorageMode !== curStorageMode) {
+        if (window._aicliEngineBusy) return;
+        window._aicliEngineBusy = true;
+        var restoreEngine = function () { window._aicliEngineBusy = false; $(form).find('[name="storage_backend_mode"]').val(curStorageMode); };
         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_storage_backend&mode=' + encodeURIComponent(newStorageMode) + '&csrf_token=' + csrf, function(pf) {
-            if (pf.status !== 'ok') { swal("Error", pf.message || "Storage-engine check failed", "error"); return; }
+            if (pf.status !== 'ok') { restoreEngine(); swal("Error", pf.message || "Storage-engine check failed", "error"); return; }
             var msg = pf.message || ('This will migrate all agents and homes to ' + newStorageMode + '.');
-            swal({ title: "Change persistence engine?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: "Migrate all storage", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, function() {
+            aicliGuardedSwal({ title: "Change persistence engine?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: "Migrate all storage", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restoreEngine, function() {
                 showMigrateOverlay();
                 $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=execute_storage_backend&mode=' + encodeURIComponent(newStorageMode) + '&ack_wear=1&csrf_token=' + csrf, function(r) {
                     hideMigrateOverlay();
@@ -80,14 +174,21 @@ function saveAICliAgentsManager(form, silent = false) {
                     swal("Migration Failed", "Server communication error", "error");
                 });
             });
-        });
+        }).fail(function() { restoreEngine(); swal("Error", "Could not check the change. Try again.", "error"); });
         return;
     }
 
     if ((newAgentPath && newAgentPath !== curAgentPath) || (newHomePath && newHomePath !== curHomePath)) {
         // Storage path changed — preflight (fast, no consolidation)
+        if (window._aicliPathBusy) return;
+        window._aicliPathBusy = true;
+        var restorePaths = function () {
+            window._aicliPathBusy = false;
+            $(form).find('[name="agent_storage_path"]').val(curAgentPath);
+            $(form).find('[name="home_storage_path"]').val(curHomePath);
+        };
         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_migrate&agent_storage_path=' + encodeURIComponent(newAgentPath) + '&home_storage_path=' + encodeURIComponent(newHomePath) + '&csrf_token=' + csrf, function(pf) {
-            if (pf.status !== 'ok') { swal("Error", pf.message || "Preflight failed", "error"); return; }
+            if (pf.status !== 'ok') { restorePaths(); swal("Error", pf.message || "Preflight failed", "error"); return; }
             // Bug #297: escapeHtml (ManagerStorageScripts.php, loaded earlier on
             // this page) — the message below is rendered as HTML so the /mnt/user
             // advice box can use <code>/<div> markup, so every path/name value
@@ -117,7 +218,7 @@ function saveAICliAgentsManager(form, silent = false) {
                     + '</div>';
             }
 
-            swal({ title: "Migrate Storage?", text: msg, html: true, type: "warning", showCancelButton: true, confirmButtonText: "Yes, Migrate", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, function() {
+            aicliGuardedSwal({ title: "Migrate Storage?", text: msg, html: true, type: "warning", showCancelButton: true, confirmButtonText: "Yes, Migrate", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restorePaths, function() {
                 // DO NOT save config here — execute_migrate saves it AFTER copying files.
                 // Saving first would update paths before migration, causing persist/consolidate
                 // to target the empty new path instead of the old path with actual data.
@@ -177,6 +278,67 @@ function saveAICliAgentsManager(form, silent = false) {
 
 // Epic #307: the card uses min() widths so it never passes the screen edge on a
 // phone; on a desktop the 400-600 px card is unchanged.
+// A setting change that needs a confirm dialog. Any way of closing the dialog other than
+// "confirm" calls restore(): Cancel, Escape, and a click on the backdrop (which sweetalert
+// reports with no callback). The watcher starts only once the dialog has been SEEN open,
+// so the wait before it appears can never count as a dismissal (#457).
+function aicliGuardedSwal(opts, restore, onConfirm) {
+    var settled = false, seen = false;
+    var watch = setInterval(function () {
+        if (settled) { clearInterval(watch); return; }
+        if ($('.sweet-alert.visible').length) { seen = true; return; }
+        if (seen) { settled = true; clearInterval(watch); restore(); }
+    }, 250);
+    opts.allowOutsideClick = false;
+    opts.allowEscapeKey = true;
+    swal(opts, function (ok) {
+        settled = true; clearInterval(watch);
+        if (!ok) { restore(); return; }
+        onConfirm();
+    });
+}
+
+function aicliChangeUpperMode(target, previous, form) {
+    var esc = window.escapeHtml || function (s) { return String(s == null ? '' : s); };
+    // One check at a time: a second autosave while the first dialog is open must not
+    // open a second dialog over it (the first one would then count as dismissed).
+    if (window._aicliUpperBusy) return;
+    window._aicliUpperBusy = true;
+    var restore = function () { window._aicliUpperBusy = false; $(form).find('[name="storage_upper_mode"]').val(previous); };
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_upper_mode&mode=' + encodeURIComponent(target) + '&csrf_token=' + csrf, function(pf) {
+        if (pf.status !== 'ok') { restore(); swal("Cannot change the writable layer", pf.message || "Check failed", "error"); return; }
+        var rows = '';
+        $.each(pf.homes || [], function(i, h) {
+            rows += '<div style="padding:2px 0;"><b>' + esc(h.id) + '</b>: ' +
+                (h.mounted ? 'now on ' + (h.live === 'zram' ? 'RAM' : 'disk') : 'not mounted') + ', ' +
+                (h.needs_move ? ('will move (' + esc(h.mb) + ' MB)') : 'stays where it is') + '</div>';
+        });
+        var html = '<div style="text-align:left; line-height:1.5;">' + esc(pf.message || '') +
+            (pf.moves > 0 ? '<div style="margin-top:10px; padding:8px 10px; border-radius:4px; background:rgba(234,179,8,0.12); border:1px solid rgba(234,179,8,0.4); font-size:12px;">' +
+                '<i class="fa fa-exclamation-triangle"></i> <b>Your open workspaces will be closed</b> while the data moves. This can take several minutes for a large home. ' +
+                'Do not reload this page or restart the server meanwhile.</div>' : '') +
+            (rows ? '<div style="max-height:160px; overflow:auto; margin-top:10px; font-size:13px;" data-testid="upper-mode-homes">' + rows + '</div>' : '') + '</div>';
+        aicliGuardedSwal({ title: "Move the writable layer to " + (target === 'zram' ? 'RAM' : 'disk') + "?", text: html, html: true, type: "warning",
+               showCancelButton: true, confirmButtonText: pf.moves > 0 ? "Close workspaces and move" : "Save setting", cancelButtonText: "Cancel", closeOnConfirm: false }, restore, function() {
+            swal.close();
+            showMigrateOverlay();
+            updateMigrateOverlay('Moving writable layers to ' + (target === 'zram' ? 'RAM' : 'disk') + '...', 5, 'Workspaces are being closed, then each home is saved and mounted again.');
+            $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=execute_upper_mode&mode=' + encodeURIComponent(target) + '&csrf_token=' + csrf, function(r) {
+                hideMigrateOverlay();
+                if (r.status === 'ok') {
+                    swal({ title: "Writable layer changed", text: r.message || "Done.", type: "success", confirmButtonText: "OK" }, function() { safeReload(); });
+                } else {
+                    restore();
+                    swal("Not moved", r.message || "Check debug.log", "error");
+                }
+            }).fail(function() {
+                hideMigrateOverlay();
+                swal("Move failed", "The server did not answer. Reload the page to see where the data is before you try again.", "error");
+            });
+        });
+    }).fail(function() { restore(); swal("Error", "Could not check the change. Try again.", "error"); });
+}
+
 function showMigrateOverlay() {
     $('#aicli-migrate-overlay').remove();
     $('body').append(

@@ -18,7 +18,9 @@ register_shutdown_function(function() use ($argv) {
         $msg = "FATAL INSTALL ERROR for $agentId: {$error['message']} in {$error['file']} on line {$error['line']}";
         require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php';
         aicli_log($msg, AICLI_LOG_ERROR, "InstallBG");
-        setInstallStatus("Fatal Error: Check logs", 0, $agentId, $msg);
+        // ACTIVITY_TRAY_PLAIN_NOTICES.md R5: the PHP message and path stay in the log
+        // (aicli_log above). The tray gets one sentence.
+        setInstallStatus("Fatal Error: Check logs", 0, $agentId, "The installer stopped with an error. Details are in the Debug Console");
     }
 });
 
@@ -51,12 +53,24 @@ aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmy
 // included). Every setInstallStatus call from here on refreshes heartbeatAt via
 // the UtilityService choke point; the lazy watchdog in ActivityService marks the
 // op stalled at 120s of silence and failed at the 20-min hard cap.
+// ACTIVITY_TRAY_PLAIN_NOTICES.md R1/R4: the title names the agent ("Claude Code") and
+// says "Upgrading ... to <version>" for every upgrade, also when the version comes
+// from the release channel and no version was passed.
+$agentName = \AICliAgents\Services\UtilityService::trayAgentName($agentId);
+$installedBefore = !in_array(\AICliAgents\Services\AgentRegistry::getInstalledVersion($agentId), ['', '0.0.0', 'unknown', 'installed'], true);
+$isUpgrade = $targetVersion !== null || $installedBefore;
+$upgradeTo = $targetVersion;
+if ($isUpgrade && $upgradeTo === null) {
+    try {
+        $upgradeTo = \AICliAgents\Services\VersionCheckService::resolveInstallTarget($agentId, null)['target'] ?? null;
+    } catch (\Throwable $e) { $upgradeTo = null; }
+}
 \AICliAgents\Services\ActivityService::register(
     "install_$agentId",
-    $targetVersion !== null ? 'upgrade' : 'install',
-    ($targetVersion !== null ? "Upgrading $agentId to $targetVersion" : "Installing $agentId"),
+    $isUpgrade ? 'upgrade' : 'install',
+    \AICliAgents\Services\UtilityService::trayInstallTitle($agentName, $isUpgrade, $upgradeTo),
     [
-        'step'     => 'Starting installation job...',
+        'step'     => 'Starting',
         'progress' => 5,
         'pid'      => getmypid(),
         'pgid'     => function_exists('posix_getpgid') ? @posix_getpgid(getmypid()) : null,
@@ -248,6 +262,13 @@ try {
                 $waitStep = "Upgrade installed — waiting for $who to close before activation";
                 setInstallStatus($waitStep, 99, $agentId);
             }
+            // The tray says it in plain words: how many workspaces hold the old version
+            // (ACTIVITY_TRAY_PLAIN_NOTICES.md row 12). The Store card keeps $waitStep.
+            $openWorkspaces = 0;
+            try {
+                $openWorkspaces = count(\AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId));
+            } catch (\Throwable $e) { $openWorkspaces = 0; }
+            $trayWaitStep = \AICliAgents\Services\UtilityService::trayInstalledWaitStep($openWorkspaces);
             // Stamp phase=awaiting_activation: activationBlocked() treats this as
             // the ONE in-flight marker state where the supervisor MUST run the
             // activation (install-bg is done; the barrier now belongs to the
@@ -265,7 +286,7 @@ try {
             }
             \AICliAgents\Services\UpgradeRelaunchService::markActivationPending(
                 $agentId, (string)($newest ?? ''), $hasClosedSet);
-            \AICliAgents\Services\ActivityService::wait("install_$agentId", $waitStep);
+            \AICliAgents\Services\ActivityService::wait("install_$agentId", $trayWaitStep);
             \AICliAgents\Services\UpgradeRelaunchService::schedulePendingActivation($agentId);
             \AICliAgents\Services\LifecycleLogService::log(
                 \AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer',
@@ -275,7 +296,10 @@ try {
     }
 } catch (\Throwable $e) {
     aicli_log("Background Install Job EXCEPTION for $agentId: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine(), AICLI_LOG_ERROR);
-    setInstallStatus("Fatal Error: " . $e->getMessage(), 0, $agentId, $e->getTraceAsString());
+    // ACTIVITY_TRAY_PLAIN_NOTICES.md R5: the stack trace goes to the Debug Console log.
+    // The tray gets one sentence and no trace, no class name and no path.
+    \AICliAgents\Services\LogService::log("Install of $agentId stopped with an exception: " . $e->getTraceAsString(), \AICliAgents\Services\LogService::LOG_ERROR, "InstallBG");
+    setInstallStatus("Fatal Error: " . $e->getMessage(), 0, $agentId, "The installer stopped with an error. Details are in the Debug Console");
 }
 
 // #150: release the global install lock so any queued install can start promptly

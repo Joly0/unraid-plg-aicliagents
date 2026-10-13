@@ -19,6 +19,7 @@
 namespace AICliAgents\Services;
 
 require_once __DIR__ . '/EventLedger.php';
+require_once __DIR__ . '/PerfTrace.php';
 // EventBus.php is required BEFORE the class body below because CHANNELS is
 // declared FROM its constant — a class-constant expression is resolved when
 // this class is compiled, so EventBus must already be declared by then.
@@ -98,12 +99,19 @@ class NchanService {
                 return;
             }
 
+            $t0 = PerfTrace::start();
             $result = (self::$transport !== null)
                 ? (self::$transport)($url, $message)
                 : self::curlTransport($url, $message);
 
             $errno  = (int) ($result['errno'] ?? 0);
             $status = (int) ($result['status'] ?? 0);
+            // NOTEBOOK_HANG_OBSERVABILITY R8: a slow push, or any curl error, leaves a perf line.
+            if ($errno !== 0) {
+                PerfTrace::record('nchan.publish', PerfTrace::elapsedMs($t0), "channel=$channel error");
+            } else {
+                PerfTrace::point('nchan.publish', $t0, 500, "channel=$channel http=$status");
+            }
             if ($errno !== 0) {
                 self::recordFailure($channel, 'curl_errno_' . $errno);
             } elseif ($status < 200 || $status > 299) {

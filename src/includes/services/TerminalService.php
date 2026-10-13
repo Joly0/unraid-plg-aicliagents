@@ -55,6 +55,62 @@ class TerminalService {
     /** TERMINAL_BACKGROUND_WARM.md: the origin of a bridge-only (re)attach. */
     public const ORIGIN_BRIDGE_WARM = 'bridge_warm';
 
+    /** What a person does after any failed start (ACTIVITY_TRAY_PLAIN_NOTICES.md R5). */
+    public const START_RECOVERY = 'Open the workspace and press Restart, or close and reopen it.';
+
+    /** The grey line of a failed start that has a Retry button (auto-launch). */
+    public const START_RETRY_HINT = 'Press Retry, or open the workspace and press Restart.';
+
+    /**
+     * The grey line of a start row: "<workspace name> · <step in words>"
+     * (ACTIVITY_TRAY_PLAIN_NOTICES.md R2). The workspace is the "where"; the
+     * title already holds the "what".
+     */
+    public static function startStepText(string $workspace, string $words): string
+    {
+        $workspace = trim($workspace);
+        return $workspace !== '' ? "$workspace · $words" : $words;
+    }
+
+    /**
+     * Turn the start row into a failed row: title "<Agent name> did not start",
+     * one red sentence, and the recovery sentence as the grey line
+     * (ACTIVITY_TRAY_PLAIN_NOTICES.md R1, R5). ActivityService::update() keeps
+     * the label it was created with, so the failed row is registered again.
+     * $recovery = 'retry' keeps the Retry button; then $step is the grey line.
+     * @param array<string,mixed> $meta
+     */
+    public static function recordStartFailure(string $actId, string $agentName, string $sentence, string $recovery, array $meta, string $step = ''): void
+    {
+        $old = ActivityService::get($actId);
+        ActivityService::register($actId, 'start', "$agentName did not start", [
+            'status'   => 'failed',
+            'step'     => $step,
+            'progress' => (int)($old['progress'] ?? 0),
+            'error'    => $sentence,
+            'recovery' => $recovery,
+            'meta'     => $meta,
+        ]);
+    }
+
+    /**
+     * The red line of a failed start: one plain sentence, no path, no binary
+     * name, no id (ACTIVITY_TRAY_PLAIN_NOTICES.md R5). The detail is in the
+     * Debug Console log lines written next to each call.
+     */
+    public static function startFailureSentence(string $reason, string $agentName): string
+    {
+        switch ($reason) {
+            case 'agent_unknown':       return 'This agent is not installed on this server.';
+            case 'no_terminal_server':  return 'The terminal server program is missing.';
+            case 'agent_storage':       return "The storage for $agentName could not be mounted.";
+            case 'home_storage':        return 'The home storage could not be mounted.';
+            case 'terminal_no_answer':  return 'The terminal server did not answer in 2 seconds.';
+            case 'terminal_no_launch':  return 'The terminal server could not be started.';
+        }
+        return "$agentName did not start.";
+    }
+
     /** startTerminal() body. Call it only while this process holds the workspace's SessionLaunchLock. */
     private static function startTerminalLocked($id, $path, $chatId, $agentId, string $origin) {
         LogService::log("Initiating console session sequence for: $id (Agent: $agentId)...", LogService::LOG_INFO, "TerminalService");
@@ -115,16 +171,22 @@ class TerminalService {
         $reattach = ProcessManager::isRunning((string)$id);
         $wsName = ConfigService::workspaceName((string)$id);
         if ($wsName === '' && !empty($path)) $wsName = basename((string)$path);
-        $startLabel = ($reattach ? 'Reconnecting to ' : 'Starting ') . ($agent['name'] ?? $agentId);
-        if ($wsName !== '') $startLabel = "$wsName — " . lcfirst($startLabel);
+        // ACTIVITY_TRAY_PLAIN_NOTICES.md R1/R2: the title says what happens, with the
+        // agent's display name ("Starting Claude Code"). The workspace goes in the
+        // grey line ("home-homelab · Mounting home storage"), never in the title.
+        $agentName = (string)($agent['name'] ?? $agentId);
+        $startLabel = ($reattach ? 'Reconnecting to ' : 'Starting ') . $agentName;
+        $wsGrey = $wsName !== '' ? $wsName : (string)$id;
+        $startStep = static fn(string $words): string => self::startStepText($wsGrey, $words);
+        $startMeta = ['sessionId' => $id, 'agentId' => $agentId, 'path' => (string)($path ?? ''), 'origin' => $origin, 'reattach' => $reattach];
         ActivityService::register($actId, 'start', $startLabel, [
-            'step' => 'preparing', 'progress' => 5,
-            'meta' => ['sessionId' => $id, 'agentId' => $agentId, 'path' => (string)($path ?? ''), 'origin' => $origin, 'reattach' => $reattach],
+            'step' => $startStep('Preparing environment'), 'progress' => 5,
+            'meta' => $startMeta,
         ]);
 
         if (!$agent) {
             LogService::log("Error: Agent $agentId not found in registry.", LogService::LOG_ERROR, "TerminalService");
-            ActivityService::fail($actId, "Agent $agentId not found in registry.");
+            self::recordStartFailure($actId, $agentName, self::startFailureSentence('agent_unknown', $agentName), self::START_RECOVERY, $startMeta);
             return;
         }
 
@@ -176,7 +238,7 @@ class TerminalService {
 
         if (!file_exists($ttyd)) {
             LogService::log("CRITICAL: ttyd binary not found in PATH or /usr/bin/ttyd!", LogService::LOG_ERROR, "TerminalService");
-            ActivityService::fail($actId, 'ttyd binary not found in PATH or /usr/bin/ttyd');
+            self::recordStartFailure($actId, $agentName, self::startFailureSentence('no_terminal_server', $agentName), self::START_RECOVERY, $startMeta);
             return;
         }
 
@@ -247,18 +309,18 @@ class TerminalService {
         // In emergency mode, agent binary is already in RAM and home is a symlink — skip sqsh mounts.
         $isEmergency = StorageMountService::isEmergencyMode();
         if ($agentId !== 'terminal' && !$isEmergency) {
-            ActivityService::update($actId, ['step' => 'mounting_agent', 'progress' => 20]);
+            ActivityService::update($actId, ['step' => $startStep('Mounting agent storage'), 'progress' => 20]);
             if (!FileStorage::ensureReady("agent/$agentId")->ok) {   // Epic #1310: express intent via the facade
                 LogService::log("FAILED to mount agent storage for $agentId", LogService::LOG_ERROR, "TerminalService");
-                ActivityService::fail($actId, "Failed to mount agent storage for $agentId");
+                self::recordStartFailure($actId, $agentName, self::startFailureSentence('agent_storage', $agentName), self::START_RECOVERY, $startMeta);
                 return;
             }
         }
         if (!$isEmergency) {
-            ActivityService::update($actId, ['step' => 'mounting_home', 'progress' => 45]);
+            ActivityService::update($actId, ['step' => $startStep('Mounting home storage'), 'progress' => 45]);
             if (!FileStorage::ensureReady("home/$username")->ok) {   // Epic #1310: facade intent
                 LogService::log("FAILED to mount home storage for $username", LogService::LOG_ERROR, "TerminalService");
-                ActivityService::fail($actId, "Failed to mount home storage for $username");
+                self::recordStartFailure($actId, $agentName, self::startFailureSentence('home_storage', $agentName), self::START_RECOVERY, $startMeta);
                 return;
             }
 
@@ -409,7 +471,7 @@ class TerminalService {
         $ensureCmd = "runuser -u " . escapeshellarg($username) . " -- env $envStr /bin/bash " .
                      escapeshellarg($shell) . " --ensure-session";
         $ensureLog = "/tmp/unraid-aicliagents/ensure-$id.log";
-        ActivityService::update($actId, ['step' => 'starting_agent', 'progress' => 60]);
+        ActivityService::update($actId, ['step' => $startStep('Launching agent'), 'progress' => 60]);
         $ensureRc = 0;
         if ($origin === self::ORIGIN_BRIDGE_WARM) {
             // TERMINAL_BACKGROUND_WARM.md: a bridge warm-up attaches to a tmux
@@ -436,7 +498,7 @@ class TerminalService {
 
         LogService::log("Executing: $cmd", LogService::LOG_DEBUG, "TerminalService");
 
-        ActivityService::update($actId, ['step' => 'launching_ttyd', 'progress' => 70]);
+        ActivityService::update($actId, ['step' => $startStep('Starting terminal server'), 'progress' => 70]);
         // #337: fully detached — an auto-launch runs from `plugin install`, and
         // ttyd must not keep the installer's output pipe open. `exec` keeps
         // the reported pid equal to ttyd's own.
@@ -459,7 +521,8 @@ class TerminalService {
                     LogService::log("Successfully established terminal socket and launched session for $id.", LogService::LOG_INFO, "TerminalService");
                     // Done from PHP's perspective — the agent itself cold-starts
                     // inside tmux; AICLI_TTYD_READY covers that last leg in the UI.
-                    ActivityService::finish($actId, 'starting_agent');
+                    // R8: a finished start shows no leftover step.
+                    ActivityService::finish($actId, '');
                     if ($origin === self::ORIGIN_BRIDGE_WARM) {
                         // TERMINAL_BACKGROUND_WARM.md: the agent did not start —
                         // only its web bridge is new. Publish the bridge identity
@@ -501,7 +564,7 @@ class TerminalService {
 
             if (!$found) {
                 LogService::log("CRITICAL: Socket $sock not created within 2s. Terminal will fail to connect.", LogService::LOG_ERROR, "TerminalService");
-                ActivityService::fail($actId, 'ttyd socket was not created within 2s');
+                self::recordStartFailure($actId, $agentName, self::startFailureSentence('terminal_no_answer', $agentName), self::START_RECOVERY, $startMeta);
                 if (file_exists($logFile)) {
                     $logTail = shell_exec("tail -n 10 " . escapeshellarg($logFile));
                     LogService::log("ttyd stderr tail: " . $logTail, LogService::LOG_ERROR, "TerminalService");
@@ -509,7 +572,7 @@ class TerminalService {
             }
         } else {
             LogService::log("Failed to launch term process for $id. (No PID returned)", LogService::LOG_ERROR, "TerminalService");
-            ActivityService::fail($actId, 'Failed to launch ttyd (no PID returned)');
+            self::recordStartFailure($actId, $agentName, self::startFailureSentence('terminal_no_launch', $agentName), self::START_RECOVERY, $startMeta);
         }
     }
 

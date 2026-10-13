@@ -173,6 +173,25 @@
         return null;
     }
 
+    // Spoken messages are English. With no language the browser uses its own default voice,
+    // which can be another language (a French voice reading English). The same rule as
+    // ui-build/src/lib/voiceMail.ts: a voice the person chose keeps its own language;
+    // with none, pick an English voice (British first), and name the language.
+    var SPEECH_LANG = 'en-GB';
+    function pickEnglishVoice() {
+        if (!window.speechSynthesis) return null;
+        try {
+            var voices = window.speechSynthesis.getVoices() || [];
+            for (var i = 0; i < voices.length; i++) {
+                if (/^en[-_]gb$/i.test(voices[i].lang || '')) return voices[i];
+            }
+            for (var j = 0; j < voices.length; j++) {
+                if (/^en([-_]|$)/i.test(voices[j].lang || '')) return voices[j];
+            }
+        } catch (e) { /* fall through to no voice */ }
+        return null;
+    }
+
     // ---- what is playing, and stop (docs/specs/VOICE_MAIL.md R15) ---------
     // The drawer shows a voice-wave stop button on the row of the workspace that
     // is speaking. It learns which one from the `aicli-voice-playing` event (and
@@ -243,6 +262,14 @@
             var utt = new SpeechSynthesisUtterance(text);
             var v = pickVoice(item.voice);
             if (v) utt.voice = v;
+            // A message is English. A note read aloud (item.reader) keeps the note's own language.
+            if (!item.reader) {
+                utt.lang = (v && v.lang) || SPEECH_LANG;
+                if (!v) {
+                    var en = pickEnglishVoice();
+                    if (en) { utt.voice = en; utt.lang = en.lang || SPEECH_LANG; }
+                }
+            }
             var ended = false;
             var finish = function (outcome) { if (ended) return; ended = true; done(outcome); };
             currentFinish = finish;

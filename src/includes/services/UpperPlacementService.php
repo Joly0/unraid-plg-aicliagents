@@ -1,0 +1,222 @@
+<?php
+/**
+ * Where a home's writable layer lives (RAM or disk), and the move between the two.
+ *
+ * Spec: docs/specs/HOME_UPPER_PLACEMENT_SETTING.md (Forgejo #456).
+ *
+ * The setting `storage_upper_mode` ('zram' | 'disk') is the policy for a NEW home
+ * mount (bash `entity_upper_mode <path> home`). A home that is already mounted keeps
+ * the layer it has (the live mount wins, #372), so changing the setting alone would
+ * change nothing for a running home. `migrate()` is the part that makes the change
+ * real: it closes the workspaces, saves each home that is on the other layer into a
+ * verified squashfs layer (the bake reclaims the old writable layer and remounts the
+ * home on the policy layer), then VERIFIES the result from the kernel mount table.
+ * When any home did not move, the old policy is put back, so the setting never
+ * claims a placement the data does not have. Nothing is deleted: the old layer holds
+ * only what the verified save already contains.
+ *
+ * Every side effect goes through an optional $seams array so the logic is unit
+ * tested without mounts: mounts, homes, zram_total_mb, free_mb, size_mb, holds_data,
+ * evict, persist, save_config, lock.
+ */
+
+namespace AICliAgents\Services;
+
+final class UpperPlacementService
+{
+    public const MODES = ['zram', 'disk'];
+    public const LOCK_FILE = '/tmp/unraid-aicliagents/.upper_placement.lock';
+    /** A home larger than this share of the zram device is refused as a zram target. */
+    public const ZRAM_MAX_SHARE = 0.8;
+
+    public static function normalize($mode): string
+    {
+        return ((string)$mode === 'disk') ? 'disk' : 'zram';
+    }
+
+    public static function currentMode(?array $config = null): string
+    {
+        $config = $config ?? ConfigService::getConfig();
+        return self::normalize($config['storage_upper_mode'] ?? 'zram');
+    }
+
+    public static function label(string $mode): string
+    {
+        return $mode === 'disk' ? 'the persistence drive (disk)' : 'RAM (zram)';
+    }
+
+    /** 'zram' | 'disk' for the layer a mounted home uses now; null when it is not mounted. */
+    public static function liveMode(string $user, array $seams = []): ?string
+    {
+        $mnt = rtrim(UtilityService::getWorkDir($user) . '/home', '/');
+        $mounts = $seams['mounts'] ?? (is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '');
+        if (is_callable($mounts)) $mounts = $mounts();
+        $upper = StorageMountService::overlayOptionAt((string)$mounts, $mnt, 'upperdir');
+        if ($upper === null) return null;
+        return strpos($upper, StoragePathResolver::ZRAM_BASE . '/') === 0 ? 'zram' : 'disk';
+    }
+
+    /**
+     * One row per home: where its writable layer is, how big, and whether it must move.
+     * @return array<int,array{id:string,mounted:bool,live:?string,mb:int,needs_move:bool}>
+     */
+    public static function homeStates(string $target, array $config, array $seams = []): array
+    {
+        $target = self::normalize($target);
+        $other = $target === 'zram' ? 'disk' : 'zram';
+        $ids = isset($seams['homes'])
+            ? array_values($seams['homes'])
+            : array_values(array_map(static fn(array $e): string => $e['id'],
+                array_filter(StorageBackendMigrationService::entities($config), static fn(array $e): bool => $e['type'] === 'home')));
+        $holds = $seams['holds_data'] ?? static fn(string $dir): bool => StorageMountService::upperHoldsData($dir);
+        $size = $seams['size_mb'] ?? static function (string $dir): int {
+            if (!is_dir($dir)) return 0;
+            return (int)trim((string)@shell_exec('du -sm ' . escapeshellarg($dir) . ' 2>/dev/null | cut -f1'));
+        };
+        $out = [];
+        foreach ($ids as $id) {
+            $persist = (string)($seams['persist_path'] ?? StoragePathResolver::homePersistPath($id));
+            $safe = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $id) ?: 'unknown';
+            $live = self::liveMode($id, $seams);
+            $otherUpper = StorageMountService::homeUpperForMode($safe, $persist, $other);
+            if ($live !== null) {
+                $needs = ($live !== $target);
+                $mb = $needs ? (int)$size(StorageMountService::homeUpperForMode($safe, $persist, $live)) : 0;
+            } else {
+                $needs = (bool)$holds($otherUpper);
+                $mb = $needs ? (int)$size($otherUpper) : 0;
+            }
+            $out[] = ['id' => $id, 'mounted' => $live !== null, 'live' => $live, 'mb' => $mb, 'needs_move' => $needs];
+        }
+        return $out;
+    }
+
+    /** Read-only: what a change to $target would do, and whether it is allowed. */
+    public static function preflight(string $target, ?array $config = null, array $seams = []): array
+    {
+        $config = $config ?? ConfigService::getConfig();
+        if (!in_array($target, self::MODES, true)) {
+            return ['status' => 'error', 'message' => 'Unknown writable-layer placement.'];
+        }
+        $current = self::currentMode($config);
+        if (StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering') !== StorageBackendPolicyService::LAYERING) {
+            return ['status' => 'error', 'message' => 'The writable layer applies to the "SquashFS layers + zram" engine. Plain directories have none.'];
+        }
+        $usb = $seams['usb'] ?? (static function () use ($config): bool {
+            $v = StorageBackendPolicyService::targetVerdicts($config);
+            return !empty($v['home']['is_usb_or_removable']);
+        })();
+        if ($target === 'disk' && $usb) {
+            return ['status' => 'error', 'message' => 'The home storage target is removable or USB flash. A writable layer on it would wear it out, so RAM (zram) stays the only choice here.'];
+        }
+        $homes = self::homeStates($target, $config, $seams);
+        $moves = array_values(array_filter($homes, static fn(array $h): bool => $h['needs_move']));
+        $totalMb = array_sum(array_map(static fn(array $h): int => $h['mb'], $moves));
+
+        if ($moves !== []) {
+            if ($target === 'zram') {
+                $zramMb = (int)($seams['zram_total_mb'] ?? (int)floor((float)@disk_total_space(StoragePathResolver::ZRAM_BASE) / 1048576));
+                if ($zramMb <= 0 || $totalMb > (int)floor($zramMb * self::ZRAM_MAX_SHARE)) {
+                    return ['status' => 'error', 'message' => "The writable layers hold $totalMb MB and the RAM layer device holds $zramMb MB. Moving them to RAM would not fit (limit "
+                        . (int)floor(self::ZRAM_MAX_SHARE * 100) . ' % of the device). Save and merge the homes first, or keep the disk layer.'];
+                }
+            } else {
+                $persist = (string)($config['home_storage_path'] ?? '');
+                $freeMb = (int)($seams['free_mb'] ?? (int)floor((float)@disk_free_space($persist) / 1048576));
+                if ($freeMb < $totalMb + 512) {
+                    return ['status' => 'error', 'message' => "The persistence drive has $freeMb MB free and the move needs about " . ($totalMb + 512) . ' MB (the layers plus a margin). Free some space first.'];
+                }
+            }
+        }
+
+        if ($target === 'disk') {
+            $what = 'Each home\'s writable layer will live on the persistence drive. It survives a crash or power cut, and uses space on that drive.';
+        } else {
+            $what = 'Each home\'s writable layer will live in RAM. It is faster and wears no disk, but changes made since the last save are LOST if the server crashes or loses power. The plugin saves homes on a schedule and before shutdown.';
+        }
+        $message = $moves === []
+            ? $what . ' No home needs to move; only the setting changes.'
+            : $what . ' ' . count($moves) . ' home' . (count($moves) === 1 ? '' : 's') . ' (' . $totalMb . ' MB in the old layer) will move: every open workspace is closed first (each can be reopened and continues where it was), the changes are saved into a verified layer, then the home is mounted again on the new placement.';
+        return [
+            'status' => 'ok',
+            'target' => $target,
+            'current' => $current,
+            // Only the homes that matter to the person: one in use, or one that must move.
+            // (An Unraid user with no mounted home and no data is not a row.)
+            'homes' => array_values(array_filter($homes, static fn(array $h): bool => $h['mounted'] || $h['needs_move'])),
+            'moves' => count($moves),
+            'total_mb' => $totalMb,
+            'message' => $message,
+        ];
+    }
+
+    /** Change the placement and move the data. Never leaves the setting out of step with the data. */
+    public static function migrate(string $target, ?array $config = null, array $seams = []): array
+    {
+        $config = $config ?? ConfigService::getConfig();
+        $check = self::preflight($target, $config, $seams);
+        if (($check['status'] ?? '') !== 'ok') return $check;
+
+        $lock = $seams['lock'] ?? static function (): mixed {
+            @mkdir(dirname(self::LOCK_FILE), 0755, true);
+            $fp = @fopen(self::LOCK_FILE, 'c');
+            return ($fp && flock($fp, LOCK_EX | LOCK_NB)) ? $fp : false;
+        };
+        $fp = $lock();
+        if ($fp === false) {
+            return ['status' => 'error', 'message' => 'Another writable-layer move is already running.'];
+        }
+        $save = $seams['save_config'] ?? static fn(array $c): bool => (bool)ConfigService::saveConfig($c, false);
+        try {
+            $prev = self::currentMode($config);
+            $moves = array_values(array_filter($check['homes'], static fn(array $h): bool => $h['needs_move']));
+            if ($moves === []) {
+                if (!$save(['storage_upper_mode' => $target])) {
+                    return ['status' => 'error', 'message' => 'The setting could not be saved.'];
+                }
+                return ['status' => 'ok', 'message' => 'Writable layer set to ' . self::label($target) . '. No home needed to move.', 'moved' => []];
+            }
+
+            // No workspace may keep writing while its writable layer changes.
+            $evict = $seams['evict'] ?? static function (): void {
+                if (class_exists(TerminalService::class) && method_exists(TerminalService::class, 'captureResumeForShutdown')) {
+                    TerminalService::captureResumeForShutdown(null, 60);
+                }
+                ProcessManager::evictAll();
+            };
+            $evict();
+
+            // The bake decides the layer of the remount from the saved policy, so save it first
+            // and put the old value back if any home does not move.
+            if (!$save(['storage_upper_mode' => $target])) {
+                return ['status' => 'error', 'message' => 'The setting could not be saved. Nothing was moved.'];
+            }
+            $persist = $seams['persist'] ?? static function (string $id): array {
+                $r = FileStorage::persist('home/' . $id);
+                return ['saved' => (bool)$r->saved || (bool)$r->ok, 'exit' => $r->exit, 'reason' => $r->deferReason];
+            };
+            $reasons = [];
+            foreach ($moves as $h) {
+                $r = $persist($h['id']);
+                if (empty($r['saved'])) $reasons[$h['id']] = ($r['reason'] ?? '') ?: ('save exit ' . ($r['exit'] ?? '?'));
+            }
+
+            $after = self::homeStates($target, $config, $seams);
+            $failed = [];
+            foreach ($after as $h) {
+                if ($h['needs_move']) $failed[$h['id']] = $reasons[$h['id']] ?? 'the home is still in use, so it could not be mounted again on the new placement';
+            }
+            if ($failed !== []) {
+                $save(['storage_upper_mode' => $prev]);
+                $list = [];
+                foreach ($failed as $id => $why) $list[] = "$id: $why";
+                return ['status' => 'error', 'message' => 'Not moved (' . implode('; ', $list) . '). The setting is back to ' . self::label($prev) . '; your data is where it was and nothing was deleted.', 'moved' => []];
+            }
+            return ['status' => 'ok',
+                'message' => 'Moved ' . count($moves) . ' home' . (count($moves) === 1 ? '' : 's') . ' to ' . self::label($target) . '. Reopen your workspaces to continue.',
+                'moved' => array_map(static fn(array $h): string => $h['id'], $moves)];
+        } finally {
+            if (is_resource($fp)) { @flock($fp, LOCK_UN); @fclose($fp); }
+        }
+    }
+}

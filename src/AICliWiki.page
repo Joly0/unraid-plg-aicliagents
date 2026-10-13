@@ -1,0 +1,55 @@
+Menu="Tasks"
+Title="Wiki"
+Icon="fa-book"
+Code="f02d"
+Cond="(((@parse_ini_file('/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg') ?: [])['wiki_page_enabled'] ?? '0') === '1')"
+---
+<?php
+/**
+ * <module_context>
+ * Description: The Wiki as its own Unraid page: read and edit the Notebook of a project without a terminal
+ *   (docs/specs/NOTEBOOK_WIKI_PAGE.md).
+ * Dependencies: AICliAgentsManager.php, the built bundle assets/ui/index.js (WikiPage.tsx).
+ * Constraints: The Tasks menu item shows only when the setting wiki_page_enabled is 1. The Cond rule above reads
+ *   the plugin config file for that. The page checks the setting again and prints one sentence when it is off,
+ *   with no bundle and no note data. It has the Unraid login like every page of the plugin, and every Notebook
+ *   call the page makes goes through AICliAjax.php with the CSRF token. The address holds only ?project=<key>.
+ * </module_context>
+ */
+// Forgejo #367: pin this request to ONE plugin generation (see AICliAjax.php).
+if (!defined('AICLI_GEN_SRC')) {
+    clearstatcache(true, '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+    define('AICLI_GEN_SRC', realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+}
+require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
+aicli_ensure_init(true);
+
+$version = \AICliAgents\Services\ConfigService::getVersion();
+// Cache-bust on the built asset's mtime (see AICliAgents.page).
+$asset_dir = '/usr/local/emhttp/plugins/unraid-aicliagents/assets/ui';
+$css_files = glob("$asset_dir/index*.css") ?: [];
+sort($css_files);
+$asset_ver = (string) max(array_merge(
+    [@filemtime("$asset_dir/index.js") ?: 0],
+    array_map(static fn($f) => @filemtime($f) ?: 0, $css_files)
+));
+if ($asset_ver === '0') { $asset_ver = $version; }
+$var = @parse_ini_file("/var/local/emhttp/var.ini");
+$csrf_token = $var['csrf_token'] ?? '';
+$wiki_on = (string)(\AICliAgents\Services\ConfigService::getConfig()['wiki_page_enabled'] ?? '0') === '1';
+?>
+<?php if (!$wiki_on): ?>
+<p>The Wiki page is turned off. A person turns it on in Settings, Notebook.</p>
+<?php else: ?>
+<div id="aicli-wiki-root"></div>
+<script>
+window.csrf_token = <?= json_encode($csrf_token) ?> || (typeof csrf_token !== 'undefined' ? csrf_token : '');
+window.aicli_version = <?= json_encode($version) ?>;
+</script>
+<?php foreach ($css_files as $css_file): ?>
+<link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/<?= htmlspecialchars(basename($css_file)) ?>?v=<?= htmlspecialchars($asset_ver) ?>">
+<?php endforeach; ?>
+<?php // Same import map as AICliAgents.page: the lazy renderer chunks import "./index.js" without ?v=, and must get the one module. ?>
+<script type="importmap">{"imports":{"/plugins/unraid-aicliagents/assets/ui/index.js":"/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($asset_ver) ?>"}}</script>
+<script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($asset_ver) ?>"></script>
+<?php endif; ?>

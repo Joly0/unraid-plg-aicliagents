@@ -991,6 +991,13 @@
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .av2-ff-row input:focus { outline: none; border-color: var(--orange, #ff8c00); }
+    /* Show-value eye button (aicliMaskEye in ManagerScripts.php). Same icon, size and
+       tooltip as the Notebook connection card. */
+    .aicli-eye-btn { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; height: 28px; margin-left: 4px; border-radius: 4px; cursor: pointer; color: inherit; opacity: 0.75; vertical-align: middle; }
+    .aicli-eye-btn[hidden] { display: none; }
+    .aicli-eye-btn:hover, .aicli-eye-btn[aria-pressed="true"] { opacity: 1; background: rgba(128,128,128,0.18); }
+    .aicli-eye-btn:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 1px; opacity: 1; }
+    @media (max-width: 640px) { .aicli-eye-btn { width: 44px; height: 44px; } }
     .av2-ff-eq { opacity: 0.5; font-size: 12px; }
     .av2-ff-del {
         flex: 0 0 auto; background: transparent; border: none; cursor: pointer;

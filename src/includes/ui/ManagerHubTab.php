@@ -229,7 +229,7 @@
                                 <input type="text" id="hub-git-remote-url" placeholder="https://github.com/you/agent-config.git" style="width:320px; font-family:monospace; font-size:11px;">
                             </label>
                             <label style="font-size:11px;">Access token<br>
-                                <input type="password" id="hub-git-token" autocomplete="new-password" placeholder="•••••••• (stored as HUB_GIT_TOKEN in the secrets vault)" style="width:280px; font-family:monospace; font-size:11px;">
+                                <input type="password" data-aicli-eye id="hub-git-token" autocomplete="new-password" placeholder="•••••••• (stored as HUB_GIT_TOKEN in the secrets vault)" style="width:280px; font-family:monospace; font-size:11px;">
                             </label>
                             <button type="button" class="aicli-btn-slim" onclick="hubGitSetRemote()"><i class="fa fa-check"></i> Save remote</button>
                             <button type="button" class="aicli-btn-slim" id="hub-git-push-btn" onclick="hubGitPush()"><i class="fa fa-cloud-upload"></i> Push</button>

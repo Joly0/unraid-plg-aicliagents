@@ -212,21 +212,144 @@ class UtilityService {
             // Convention (matches the frontend pollers): progress<=0 = failure,
             // progress>=100 = completion, anything else = a live step.
             $opId = "install_$agentId";
+            // ACTIVITY_TRAY_PLAIN_NOTICES.md R1/R5/R8: the tray gets the agent's
+            // display name and plain step words. The install-status file and the
+            // Nchan event above keep the raw message for the Store card.
+            $title = self::trayInstallTitle(self::trayAgentName((string)$agentId), false);
             if ($progress >= 100) {
-                ActivityService::finish($opId, (string)$message);
+                ActivityService::finish($opId, self::trayInstallStep((string)$message));
             } elseif ($progress <= 0) {
-                ActivityService::fail($opId, $reason !== '' ? (string)$reason : (string)$message, null, [
-                    'type' => 'install', 'label' => "Installing $agentId", 'step' => (string)$message,
+                // The raw reason (it can hold a reason code, a PHP path or a stack
+                // trace) goes to the log. The tray gets one sentence.
+                LogService::log("Install of $agentId failed: $message" . ((string)$reason !== '' ? " — $reason" : ''), LogService::LOG_ERROR, "UtilityService");
+                $f = self::trayInstallFailure((string)$message, (string)$reason);
+                ActivityService::fail($opId, $f['error'], $f['recovery'], [
+                    'type' => 'install', 'label' => $title, 'step' => '',
                 ]);
             } else {
                 ActivityService::update($opId, [
                     'type'     => 'install',
-                    'label'    => "Installing $agentId",
-                    'step'     => (string)$message,
+                    'label'    => $title,
+                    'step'     => self::trayInstallStep((string)$message),
                     'progress' => (int)$progress,
                 ]);
             }
         }
+    }
+
+    /**
+     * The agent's display name for a tray title ("Claude Code", not "claude-code").
+     * Falls back to the id when the registry has no entry
+     * (ACTIVITY_TRAY_PLAIN_NOTICES.md R4).
+     */
+    public static function trayAgentName(string $agentId): string {
+        try {
+            $reg = AgentRegistry::getRegistry();
+            $n = is_array($reg[$agentId] ?? null) ? trim((string)($reg[$agentId]['name'] ?? '')) : '';
+            if ($n !== '') return $n;
+        } catch (\Throwable $e) {
+        }
+        return $agentId;
+    }
+
+    /**
+     * The tray title of an install row: "Installing Claude Code" or
+     * "Upgrading Claude Code to 2.1.4" (ACTIVITY_TRAY_PLAIN_NOTICES.md R1).
+     * Pure: no I/O. $version null or empty gives "Upgrading Claude Code".
+     */
+    public static function trayInstallTitle(string $agentName, bool $isUpgrade, ?string $version = null): string {
+        if (!$isUpgrade) return "Installing $agentName";
+        $version = $version === null ? '' : trim($version);
+        return $version !== '' ? "Upgrading $agentName to $version" : "Upgrading $agentName";
+    }
+
+    /**
+     * The grey line of an installed upgrade that waits for open workspaces to
+     * close before it switches (ACTIVITY_TRAY_PLAIN_NOTICES.md row 12). Pure.
+     */
+    public static function trayInstalledWaitStep(int $openWorkspaces): string {
+        if ($openWorkspaces <= 0) return 'Installed — waiting for the old version to stop before it switches';
+        return 'Installed — waiting for ' . $openWorkspaces . ' workspace' . ($openWorkspaces === 1 ? '' : 's')
+            . ' to close before it switches';
+    }
+
+    /**
+     * An install step message, in the plain words the tray shows
+     * (ACTIVITY_TRAY_PLAIN_NOTICES.md R8, row 9-11). Pure: no I/O.
+     * The message stays raw in the install-status file for the Store card.
+     */
+    public static function trayInstallStep(string $message): string {
+        $m = trim($message);
+        if ($m === '') return '';
+        $map = [
+            // [prefix, words]; the first prefix that matches wins.
+            ['Installed — waiting for', null],              // already plain (install-bg.php row 12)
+            ['Installation complete', ''],                  // the pill says it
+            ['Emergency install complete', ''],
+            ['Upgrade starting', 'Starting'],
+            ['Starting installation job', 'Starting'],
+            ['Starting queued upgrade', 'Starting'],
+            ['Starting emergency install', 'Starting'],
+            ['Queued — waiting for another agent upgrade', 'Waiting for another agent upgrade to finish'],
+            ['Upgrade queued — saving workspace data', 'Saving workspace data first'],
+            ['Upgrade queued', null],                       // PendingAgentUpgradeService words, already plain
+            ['Backing up current version', 'Backing up the current version'],
+            ['Preparing emergency install', 'Preparing storage'],
+            ['Preparing storage', 'Preparing storage'],
+            ['Storage ready', 'Preparing storage'],
+            ['Starting install', 'Preparing the install'],
+            ['Resolving release', 'Finding the release'],
+            ['Fetching install script', 'Downloading'],
+            ['Downloading', 'Downloading'],
+            ['Fetching packages', 'Downloading'],
+            ['Extracting', 'Unpacking'],
+            ['Linking dependencies', 'Installing'],
+            ['Installing:', 'Installing'],
+            ['Finalizing permissions', 'Setting permissions'],
+            ['Setting permissions', 'Setting permissions'],
+            ['Baking SquashFS delta', 'Saving the new version'],
+            ['Activating upgraded version', 'Switching to the new version'],
+        ];
+        foreach ($map as [$prefix, $words]) {
+            if (stripos($m, $prefix) === 0) return $words === null ? $m : $words;
+        }
+        if (preg_match('/^Installing .+ to RAM/i', $m)) return 'Installing';
+        // "Running install script… 12s · last output line" -> "Running the installer (12 s)"
+        if (stripos($m, 'Running install script') === 0) {
+            return preg_match('/^Running install script\D*?(\d+)\s*s\b/u', $m, $mm)
+                ? "Running the installer ({$mm[1]} s)"
+                : 'Running the installer';
+        }
+        return $m;
+    }
+
+    /**
+     * The red sentence and the recovery sentence of a failed install
+     * (ACTIVITY_TRAY_PLAIN_NOTICES.md R5, rows 11). Pure: no I/O. One plain
+     * sentence; no reason code, no PHP path, no stack trace. The detail is in
+     * the Debug Console, which the recovery sentence names.
+     * @return array{error:string,recovery:?string}
+     */
+    public static function trayInstallFailure(string $message, string $reason): array {
+        $console = 'Details are in the Debug Console.';
+        $m = strtolower(trim($message));
+        // A caller that already wrote the sentence (install-bg.php fatal path).
+        if ($reason !== '' && preg_match('/^(.{1,200}?\.)\s*Details are in the Debug Console\.?$/s', $reason, $mm)) {
+            return ['error' => $mm[1], 'recovery' => $console];
+        }
+        if ($reason !== '' && stripos($reason, 'not enough free space') !== false) {
+            return ['error' => 'Not enough free space for the new version; the version in use is kept.',
+                    'recovery' => 'Free some space, then try again.'];
+        }
+        if (strpos($m, 'storage error') === 0) return ['error' => 'The storage for the agent could not be mounted.', 'recovery' => $console];
+        if (strpos($m, 'release channel') === 0) return ['error' => 'The version to install could not be chosen.', 'recovery' => $console];
+        if (strpos($m, 'no install source') === 0) return ['error' => 'This agent has no install source.', 'recovery' => $console];
+        if (strpos($m, 'install failed (bake') === 0) return ['error' => 'The new version could not be saved.', 'recovery' => $console];
+        if (strpos($m, 'backup failed') === 0) return ['error' => 'The backup of the current version failed, so the upgrade stopped and the current version is kept.', 'recovery' => $console];
+        if (strpos($m, 'emergency install not available') === 0) return ['error' => 'An emergency install is not possible for this agent.', 'recovery' => 'Start the array and try again.'];
+        if (strpos($m, 'emergency install failed') === 0) return ['error' => 'The emergency install did not finish.', 'recovery' => $console];
+        if (strpos($m, 'fatal error') === 0) return ['error' => 'The installer stopped with an error.', 'recovery' => $console];
+        return ['error' => 'The installer did not finish.', 'recovery' => $console];
     }
 
     /**

@@ -38,6 +38,7 @@ require_once __DIR__ . '/AtomicWriteService.php';
 require_once __DIR__ . '/PoolPathService.php';
 require_once __DIR__ . '/SecretService.php';
 require_once __DIR__ . '/EventBus.php';
+require_once __DIR__ . '/PerfTrace.php';
 
 class NotebookService {
 
@@ -46,17 +47,26 @@ class NotebookService {
     public static ?string $rootOverride = null;
     /** @var string|null Replace /tmp/unraid-aicliagents/notebook-state. */
     public static ?string $stateDirOverride = null;
+    /** Test seam: a fixed list of workspace records for wikiProjects(). Null reads the real registry. */
+    public static ?array $workspacesOverride = null;
     /** @var array|null In-memory vault: notebookId => [KEY => value]. When set, SecretService is not touched. */
     public static ?array $vaultStub = null;
     /** @var callable|null Receives the event payload instead of EventBus::publish(). */
     public static $eventSink = null;
     /** Test seam: receives the spoken line instead of VoiceService. Under PHPUnit nothing speaks without it. */
     public static $speakSink = null;
-    /** @var callable|null Receives [opId, tool, description, params, caller] instead of ActivityService::propose(). */
+    /** @var callable|null Receives [opId, tool, short question, params, caller, full statement] instead of ActivityService::propose(). */
     public static $activitySink = null;
 
     // ----- Limits (contract section 6) -----
-    public const MAX_FILE_BYTES    = 262144;
+    public const MAX_FILE_BYTES    = 1048576;   // 1 MB per file (docs/specs/ARTEFACTS_CONTRACT.md)
+    /** The file size limit in plain words, for messages ("1 MB"). */
+    public static function limitLabel(): string { return self::sizeLabel(self::MAX_FILE_BYTES); }
+    /** A byte count in plain words: whole megabytes as "N MB", anything else as "N KB". */
+    public static function sizeLabel(int $bytes): string {
+        if ($bytes % 1048576 === 0) return intdiv($bytes, 1048576) . ' MB';
+        return intdiv($bytes, 1024) . ' KB';
+    }
     public const MAX_ARTEFACTS     = 2000;
     public const MAX_ASSET_BYTES   = 5242880;
     public const MAX_ASSETS_TOTAL  = 104857600;
@@ -85,6 +95,24 @@ class NotebookService {
     /** @var array<string,array{0:float,1:?array}> */
     private static array $gitCache = [];
 
+    // ----- Workspace lookup cache (docs/specs/NOTEBOOK_HANG_OBSERVABILITY.md R3, R4) -----
+    /** The cache file. Under PHPUnit (AICLI_TEST_TMP) it is OFF unless setWorkspaceCachePath() names a file. */
+    private const WS_CACHE_FILE = '/tmp/unraid-aicliagents/notebook-ws-cache.json';
+    /** An entry older than this many seconds is not used. */
+    private const WS_CACHE_TTL = 20;
+    private const WS_CACHE_MAX_ENTRIES = 200;
+    /** Test seam: the cache file path. Null = the default file (and no cache under test). */
+    private static ?string $wsCachePathOverride = null;
+    /** True when the last findWorkspace() answered from the cache. contextFor() reads it for the trace. */
+    private static bool $lastLookupWasCacheHit = false;
+    /** Test seam: replaces the registry read. Returns the list of workspace records. @var callable|null */
+    public static $registryLookup = null;
+
+    /** Test seam: point the workspace cache at a file (null = default; under test the cache is then off). */
+    public static function setWorkspaceCachePath(?string $path): void {
+        self::$wsCachePathOverride = $path;
+    }
+
     // ======================================================================
     // Context and author
     // ======================================================================
@@ -108,7 +136,9 @@ class NotebookService {
             } elseif ($scope === 'global') {
                 $root = self::GLOBAL_ROOT;
             } else {
+                $lookupT0 = PerfTrace::start();
                 $rec = self::findWorkspace($workspaceId);
+                PerfTrace::point('notebook.context', $lookupT0, 500, "ws=$workspaceId cache=" . (self::$lastLookupWasCacheHit ? 'hit' : 'miss'));
                 if ($rec === null) return ['error' => "There is no workspace '$workspaceId'."];
                 $path = rtrim((string)($rec['path'] ?? ''), '/');
                 if ($path === '' || !is_dir($path)) return ['error' => self::NO_PROJECT];
@@ -264,6 +294,51 @@ class NotebookService {
         } catch (\Throwable $e) {
             self::log('get failed: ' . $e->getMessage());
             return ['error' => 'The artefact could not be read.'];
+        }
+    }
+
+    /**
+     * Ask the agent of this notebook's workspace to read a note again (Forgejo #446,
+     * docs/specs/NOTEBOOK_REFRESH_REQUEST.md R2/R3). One message is typed into the workspace
+     * terminal through AdminService::sendInput, so the idle-prompt check, the rate limit, the
+     * ledger event and the tray entry all apply. The text names the note by title, absolute
+     * path and id. Nothing is queued: a busy agent answers `deferred`.
+     *
+     * @param array<string,mixed> $ctx
+     * @param array<string,mixed> $seams optional `send` callable(workspaceId, text): array
+     * @return array<string,mixed> ['delivered'=>bool,'deferred'=>bool,'reason'?,'chars'] or ['error'=>...]
+     */
+    public static function requestRefresh(array $ctx, string $id, string $note = '', array $seams = []): array {
+        if (isset($ctx['error'])) return $ctx;
+        if (($ctx['scope'] ?? '') === 'global' || (string)($ctx['workspaceId'] ?? '') === '' || $ctx['workspaceId'] === 'global') {
+            return ['error' => 'The global Notebook has no agent to ask. Open the Notebook of a workspace.'];
+        }
+        try {
+            $rec = self::findRecord($ctx, $id);
+            if ($rec === null) return ['error' => "There is no artefact with id '$id' in this notebook."];
+            $title = trim((string)preg_replace('/[\x00-\x1f\x7f]+/', ' ', (string)($rec['meta']['title'] ?? '')));
+            $path = rtrim((string)$ctx['root'], '/') . '/' . ltrim((string)($rec['rel'] ?? ''), '/');
+            $note = trim((string)preg_replace('/[\x00-\x1f\x7f]+/', ' ', $note));
+            if (function_exists('mb_substr')) $note = mb_substr($note, 0, 300); else $note = substr($note, 0, 300);
+            $text = 'Please refresh the Notebook note "' . $title . '" (file: ' . $path . ', id ' . $id . '). '
+                . 'Read it again, update it so it matches the current state, and save your answer in the Notebook, not here.'
+                . ($note !== '' ? ' What changed: ' . $note : '');
+            $send = $seams['send'] ?? static function (string $ws, string $t): array {
+                if (!class_exists('AICliAgents\Services\AdminService', false)) require_once __DIR__ . '/AdminService.php';
+                return AdminService::sendInput($ws, $t, true, false);
+            };
+            $r = $send((string)$ctx['workspaceId'], $text);
+            if (isset($r['error'])) return ['error' => (string)$r['error']];
+            return [
+                'delivered' => !empty($r['delivered']),
+                'deferred' => !empty($r['deferred']),
+                'reason' => (string)($r['reason'] ?? ''),
+                'chars' => strlen($text),
+                'path' => $path,
+            ];
+        } catch (\Throwable $e) {
+            self::log('requestRefresh failed: ' . $e->getMessage());
+            return ['error' => 'The refresh request could not be sent.'];
         }
     }
 
@@ -505,7 +580,7 @@ class NotebookService {
                     $baseSlug = NotebookFormat::slug($meta['title']);
                 }
                 $raw = NotebookFormat::build($meta, $body, $ext, $prefix);
-                if (strlen($raw) > self::MAX_FILE_BYTES) return ['error' => 'This artefact is larger than ' . (self::MAX_FILE_BYTES / 1024) . ' KB, which is the limit.'];
+                if (strlen($raw) > self::MAX_FILE_BYTES) return ['error' => 'This artefact is larger than ' . self::limitLabel() . ', which is the limit.'];
                 if (!$confirm && ($hit = NotebookSecretGuard::scan($raw)) !== null) return self::secretRefusal($hit);
                 $name = self::uniqueName($ctx, $baseSlug, $ext, $id);
                 $abs = $ctx['root'] . '/' . $area . '/' . $name;
@@ -534,7 +609,7 @@ class NotebookService {
 
     public static function save(array $ctx, string $id, string $raw, string $expectedVersion, array $author): array {
         if (isset($ctx['error'])) return $ctx;
-        if (strlen($raw) > self::MAX_FILE_BYTES) return ['error' => 'This artefact is larger than ' . (self::MAX_FILE_BYTES / 1024) . ' KB, which is the limit.'];
+        if (strlen($raw) > self::MAX_FILE_BYTES) return ['error' => 'This artefact is larger than ' . self::limitLabel() . ', which is the limit.'];
         $confirm = !empty($author['confirmSecret']);
         return self::mutate($ctx, $id, $expectedVersion, $author, 'updated', [], $confirm, function (array $rec) use ($raw) {
             $p = NotebookFormat::parse($raw, $rec['ext']);
@@ -824,12 +899,15 @@ class NotebookService {
                 . '. Git is the only way back, and only if the file was committed.';
             $params = ['workspaceId' => $ctx['workspaceId'], 'id' => $id, 'path' => $rec['rel'], 'title' => $rec['meta']['title']];
             $caller = ['workspaceId' => (string)($author['workspaceId'] ?? ''), 'agentId' => (string)($author['agentId'] ?? ''), 'name' => (string)($author['name'] ?? '')];
+            // ACTIVITY_TRAY_PLAIN_NOTICES.md R6: the tray title is a short question; the full
+            // statement of what approval does goes in meta.statement, for the block under the title.
+            $question = 'Remove the Notebook file "' . $rec['meta']['title'] . '" for good?';
             if (self::$activitySink !== null) {
-                (self::$activitySink)($opId, $tool, $desc, $params, $caller);
+                (self::$activitySink)($opId, $tool, $question, $params, $caller, $desc);
                 $entry = true;
             } else {
                 if (!class_exists('AICliAgents\Services\ActivityService', false)) require_once __DIR__ . '/ActivityService.php';
-                $entry = ActivityService::propose($opId, $tool, $desc, $params, $caller);
+                $entry = ActivityService::propose($opId, $tool, $desc, $params, $caller, ['label' => $question]);
             }
             if ($entry === null) return ['error' => 'Could not create the pending approval item.'];
             return [
@@ -839,6 +917,32 @@ class NotebookService {
         } catch (\Throwable $e) {
             self::log('purgeRequest failed: ' . $e->getMessage());
             return ['error' => 'The purge request could not be created.'];
+        }
+    }
+
+    /**
+     * A person removes a note that is already in the Archive, for good (docs/specs/NOTEBOOK_LIST_QUICK_DELETE.md R5, R7).
+     * The browser calls this when the Undo pill of a Delete runs out. An agent author is refused;
+     * an agent still goes through purgeRequest and a person's approval. A note outside the Archive is refused.
+     * @param array<string,mixed> $ctx
+     * @param array<string,mixed> $author
+     * @return array<string,mixed>
+     */
+    public static function remove(array $ctx, string $id, ?string $expectedVersion, array $author): array {
+        if (isset($ctx['error'])) return $ctx;
+        if (($author['kind'] ?? '') === 'agent') return ['error' => 'Only a person can remove a note for good. An agent proposes a purge and a person approves it.'];
+        if (!preg_match('/^a_[0-9a-f]{12}$/', $id)) return ['error' => "'$id' is not an artefact id."];
+        try {
+            $rec = self::findRecord($ctx, $id);
+            if ($rec === null) return ['error' => "There is no artefact with id '$id' in this notebook."];
+            if ($rec['area'] !== 'archive') return ['error' => 'Only a note in the Archive can be removed for good. Archive it first.'];
+            if ($expectedVersion !== null && $expectedVersion !== '' && $expectedVersion !== $rec['version']) return self::stale($rec['version']);
+            $r = self::purgeExecute(['workspaceId' => (string)($ctx['workspaceId'] ?? ''), 'id' => $id]);
+            if (isset($r['error'])) return $r;
+            return ['purged' => true, 'id' => $id];
+        } catch (\Throwable $e) {
+            self::log('remove failed: ' . $e->getMessage());
+            return ['error' => 'The note could not be removed.'];
         }
     }
 
@@ -973,7 +1077,7 @@ class NotebookService {
         });
     }
 
-    /** The wiki section of a record: meta `section`, else a tag `section:<name>`, else ''. */
+    /** The legacy wiki section of a record: meta `section`, else a tag `section:<name>`, else ''. It only decides membership now. */
     private static function sectionOf(array $rec): string {
         $s = $rec['meta']['section'] ?? '';
         if (is_string($s) && trim($s) !== '') return mb_substr(trim($s), 0, 80);
@@ -984,12 +1088,29 @@ class NotebookService {
     }
 
     /**
+     * Is this record a wiki page? (docs/specs/NOTEBOOK_WIKI_LINK_STRUCTURE.md R1.)
+     * Yes when it has the tag `wiki`, or the metadata kind `wiki`, or (legacy) a section.
+     * Being linked from a wiki page does not make a page a wiki page.
+     */
+    public static function isWikiPage(array $rec): bool {
+        foreach ((array)($rec['meta']['tags'] ?? []) as $t) {
+            if (is_string($t) && strtolower(trim($t)) === 'wiki') return true;
+        }
+        $kind = $rec['meta']['kind'] ?? '';
+        if (is_string($kind) && strtolower(trim($kind)) === 'wiki') return true;
+        return self::sectionOf($rec) !== '';
+    }
+
+    /**
      * Ids that a Markdown body links to with [[a_ID]] or [[Title]] (or [[Title|label]]).
      * @param array<string,mixed> $byId  id => record
      * @param array<string,string> $byTitle  lower-case title => id
      * @return string[]
      */
     private static function linkTargets(string $text, array $byId, array $byTitle): array {
+        if (strpos($text, '[[') === false) return [];
+        // A [[x]] in a code fence or in inline code is text about the link syntax, not a link.
+        $text = self::withoutCode($text);
         if (strpos($text, '[[') === false || !preg_match_all('/\[\[([^\[\]\r\n]{1,200})\]\]/', $text, $m)) return [];
         $out = [];
         foreach ($m[1] as $raw) {
@@ -1006,6 +1127,22 @@ class NotebookService {
         return array_keys($out);
     }
 
+    /** The text with fenced code blocks and inline code spans removed (they hold no links). */
+    private static function withoutCode(string $text): string {
+        $keep = [];
+        $fence = '';
+        foreach (preg_split('/\R/', $text) ?: [] as $line) {
+            if ($fence === '') {
+                if (preg_match('/^ {0,3}(`{3,}|~{3,})/', $line, $m)) { $fence = $m[1]; continue; }
+                $keep[] = $line;
+            } elseif (preg_match('/^ {0,3}(' . ($fence[0] === '`' ? '`' : '~') . '{' . strlen($fence) . ',})\s*$/', $line)) {
+                $fence = '';
+            }
+        }
+        $out = implode("\n", $keep);
+        return (string)preg_replace('/(`+)(?!`).*?(?<!`)\1(?!`)/', '', $out);
+    }
+
     /** Dated bullets of a "Things you should know" page, newest first. @return array<int,array{date:string,text:string}> */
     private static function knowNotes(string $body, int $max = 10): array {
         $notes = [];
@@ -1020,14 +1157,76 @@ class NotebookService {
     }
 
     /**
-     * The wiki view of the notebook: home page, section tree, recent changes, pages with no links,
-     * the link graph and the "Things you should know" notes. Archived pages are left out.
+     * The wiki tree (docs/specs/NOTEBOOK_WIKI_LINK_STRUCTURE.md R3, R4). Pure: it takes the wiki pages only.
+     * Roots: the home page, then each entry page (no link in from a wiki page, at least one link out to a
+     * wiki page), newest first. The children of a node are the wiki pages its text links to, in link order.
+     * The search is breadth first, so each page sits once, under the first parent that reaches it:
+     * the shallowest parent wins, a tie goes to the earlier root, then to the earlier link. A link to a
+     * page that is already placed is ignored, so there are no cycles. Pages that only link in a loop
+     * (no entry page reaches them) become roots too, newest first, after the entry pages.
+     * A page with no link in and no link out to a wiki page is "unlinked".
+     * @param array<string,array<string,mixed>> $pages  id => record (wiki pages only)
+     * @param array<string,string[]> $outLinks  id => ids it links to, in link order (wiki targets only)
+     * @return array{roots:string[],children:array<string,string[]>,unlinked:string[]}
+     */
+    private static function wikiTreeOf(array $pages, array $outLinks, ?string $homeId): array {
+        $inCount = [];
+        foreach ($outLinks as $from => $tos) foreach ($tos as $to) $inCount[$to] = ($inCount[$to] ?? 0) + 1;
+        $newestFirst = static function (array $ids) use ($pages): array {
+            usort($ids, static function ($a, $b) use ($pages) {
+                $c = strcmp((string)$pages[$b]['meta']['updatedAt'], (string)$pages[$a]['meta']['updatedAt']);
+                return $c !== 0 ? $c : strcmp($a, $b);
+            });
+            return $ids;
+        };
+        $quiet = static fn(string $id): bool => in_array($pages[$id]['meta']['kind'] ?? '', ['know', 'journal', 'journal-archive'], true);
+        $entries = [];
+        foreach ($pages as $id => $_) {
+            if ($id === $homeId || $quiet($id)) continue;
+            if (empty($inCount[$id]) && !empty($outLinks[$id])) $entries[] = $id;
+        }
+        $roots = $homeId !== null ? [$homeId] : [];
+        foreach ($newestFirst($entries) as $id) $roots[] = $id;
+
+        $placed = array_fill_keys($roots, true);
+        $children = [];
+        $grow = static function (array $queue) use (&$placed, &$children, $outLinks): void {
+            for ($i = 0; $i < count($queue); $i++) {
+                $id = $queue[$i];
+                foreach ($outLinks[$id] ?? [] as $to) {
+                    if (isset($placed[$to])) continue;
+                    $placed[$to] = true;
+                    $children[$id][] = $to;
+                    $queue[] = $to;
+                }
+            }
+        };
+        $grow($roots);
+        // A loop with no entry page: promote its newest page, then grow again.
+        $loops = [];
+        foreach ($pages as $id => $_) if (!isset($placed[$id]) && (!empty($outLinks[$id]) || !empty($inCount[$id])) && !$quiet($id)) $loops[] = $id;
+        foreach ($newestFirst($loops) as $id) {
+            if (isset($placed[$id])) continue;
+            $placed[$id] = true;
+            $roots[] = $id;
+            $grow([$id]);
+        }
+        $unlinked = [];
+        foreach ($pages as $id => $_) if (!isset($placed[$id]) && !$quiet($id)) $unlinked[] = $id;
+        return ['roots' => $roots, 'children' => $children, 'unlinked' => $newestFirst($unlinked)];
+    }
+
+    /**
+     * The wiki view of the notebook: home page, the tree of wiki pages built from their [[links]]
+     * (`tree`: nested nodes), the wiki pages not in the tree (`unlinked`), a flat list of every wiki
+     * page (`pages`), recent changes, the link graph and the "Things you should know" notes.
+     * Only wiki pages (isWikiPage) are in `tree`, `unlinked`, `pages` and `recent`. Archived pages are left out.
      * @return array<string,mixed>
      */
     public static function wikiIndex(array $ctx): array {
         if (isset($ctx['error'])) return $ctx;
         try {
-            $out = ['home' => null, 'tree' => [], 'recent' => [], 'orphans' => [], 'graph' => ['nodes' => [], 'edges' => []], 'know' => ['unread' => 0, 'items' => []]];
+            $out = ['home' => null, 'tree' => [], 'unlinked' => [], 'pages' => [], 'recent' => [], 'graph' => ['nodes' => [], 'edges' => []], 'know' => ['unread' => 0, 'items' => []]];
             if (!is_dir($ctx['root'])) return $out;
             $recs = [];
             foreach (self::scan($ctx) as $r) if ($r['area'] !== 'archive') $recs[] = $r;
@@ -1039,58 +1238,59 @@ class NotebookService {
             $byId = []; $byTitle = [];
             foreach ($recs as $r) {
                 $byId[$r['id']] = $r;
+                // Two pages with one title: the newest wins, as in the link in the page (MarkdownBody resolve()).
+                // On equal times the first in scan order stays.
                 $k = strtolower(trim($r['meta']['title']));
-                if (!isset($byTitle[$k])) $byTitle[$k] = $r['id'];
+                if (!isset($byTitle[$k]) || strcmp((string)$r['meta']['updatedAt'], (string)$byId[$byTitle[$k]]['meta']['updatedAt']) > 0) $byTitle[$k] = $r['id'];
             }
             $textTypes = ['markdown', 'checklist', 'connection', 'deck'];
-            $outEdges = []; $inEdges = [];
+            $outEdges = []; $outOrdered = [];
             foreach ($recs as $r) {
                 if (!in_array($r['type'], $textTypes, true)) continue;
                 foreach (self::linkTargets($r['body'], $byId, $byTitle) as $to) {
                     if ($to === $r['id']) continue;
                     $outEdges[$r['id']][$to] = true;
-                    $inEdges[$to][$r['id']] = true;
+                    $outOrdered[$r['id']][] = $to;
                 }
             }
 
-            // Home: the newest page with kind home (or the tag wiki-home).
+            // Wiki pages (R1) and the home page (R2: the newest page with kind home or the tag wiki-home).
+            $wiki = [];
+            foreach ($recs as $r) if (self::isWikiPage($r) || $kindOf($r) === 'home' || in_array('wiki-home', array_map('strtolower', $r['meta']['tags']), true)) $wiki[$r['id']] = $r;
             $home = null;
-            foreach ($recs as $r) {
+            foreach ($wiki as $r) {
                 $isHome = $kindOf($r) === 'home' || in_array('wiki-home', array_map('strtolower', $r['meta']['tags']), true);
                 if ($isHome && ($home === null || strcmp((string)$r['meta']['updatedAt'], (string)$home['meta']['updatedAt']) > 0)) $home = $r;
             }
             $out['home'] = $home['id'] ?? null;
 
-            // Tree.
-            $groups = [];
-            foreach ($recs as $r) {
-                if ($home !== null && $r['id'] === $home['id']) continue;
-                $name = self::sectionOf($r);
-                $slug = $name === '' ? 'other' : (NotebookFormat::slug($name) ?: 'other');
-                if (!isset($groups[$slug])) $groups[$slug] = ['section' => $slug, 'title' => $slug === 'other' ? 'Other' : $name, 'items' => []];
-                $groups[$slug]['items'][] = $item($r);
+            // Tree: links between wiki pages only. A link to a note that is not a wiki page is ignored.
+            $wikiOut = [];
+            foreach ($outOrdered as $from => $tos) {
+                if (!isset($wiki[$from])) continue;
+                foreach ($tos as $to) if (isset($wiki[$to])) $wikiOut[$from][] = $to;
             }
-            foreach ($groups as &$g) usort($g['items'], static fn($a, $b) => strcasecmp($a['title'], $b['title']));
-            unset($g);
-            uasort($groups, static function ($a, $b) {
-                if ($a['section'] === 'other') return 1;
-                if ($b['section'] === 'other') return -1;
-                return strcasecmp($a['title'], $b['title']);
-            });
-            $out['tree'] = array_values($groups);
+            $t = self::wikiTreeOf($wiki, $wikiOut, $out['home']);
+            $node = function (string $id) use (&$node, $t, $wiki, $item): array {
+                $n = $item($wiki[$id]);
+                $n['children'] = array_map($node, $t['children'][$id] ?? []);
+                return $n;
+            };
+            $out['tree'] = array_map($node, $t['roots']);
+            foreach ($t['unlinked'] as $id) $out['unlinked'][] = $item($wiki[$id]);
+            foreach ($wiki as $r) {
+                $flags = [];
+                if ($home !== null && $r['id'] === $home['id']) $flags[] = 'home';
+                if ($kindOf($r) === 'know') $flags[] = 'know';
+                if (in_array($kindOf($r), ['journal', 'journal-archive'], true)) $flags[] = 'journal';
+                if (!empty($r['meta']['locked'])) $flags[] = 'locked';
+                $out['pages'][] = $item($r) + ['flags' => $flags];
+            }
 
-            // Recently changed.
-            $sorted = $recs;
+            // Recently changed wiki pages.
+            $sorted = array_values($wiki);
             usort($sorted, static fn($a, $b) => strcmp((string)$b['meta']['updatedAt'], (string)$a['meta']['updatedAt']));
             foreach (array_slice($sorted, 0, 20) as $r) $out['recent'][] = $item($r);
-
-            // Pages with no link in or out (text pages only; the wiki's own service pages are exempt).
-            foreach ($recs as $r) {
-                if (!in_array($r['type'], $textTypes, true)) continue;
-                if (in_array($kindOf($r), ['home', 'know', 'journal'], true)) continue;
-                if ($home !== null && $r['id'] === $home['id']) continue;
-                if (empty($outEdges[$r['id']]) && empty($inEdges[$r['id']])) $out['orphans'][] = $r['id'];
-            }
 
             // Graph: pages with at least one link, the most linked 300.
             $deg = [];
@@ -1577,7 +1777,7 @@ class NotebookService {
 
     /** @return ?string null on success, else a reason */
     private static function importOne(array $ctx, string $area, string $fname, string $ext, string $data, array &$existing, bool $confirm, bool $single): ?string {
-        if (strlen($data) > self::MAX_FILE_BYTES) return 'larger than ' . (self::MAX_FILE_BYTES / 1024) . ' KB';
+        if (strlen($data) > self::MAX_FILE_BYTES) return 'larger than ' . self::limitLabel();
         if (!$confirm && ($hit = NotebookSecretGuard::scan($data)) !== null) return "looks like $hit";
         $res = self::withLock($ctx, function () use ($ctx, $area, $fname, $ext, $data, &$existing) {
             if ($e = self::ensureNotebook($ctx)) return ['error' => $e];
@@ -1602,6 +1802,9 @@ class NotebookService {
             $meta = self::normaliseMeta($meta, ['meta' => [], 'ext' => $ext, 'mtime' => time(), 'name' => $fname]);
             if (!empty($meta['secrets'])) unset($meta['secrets']); // vault references from another box point at nothing here
             $raw = NotebookFormat::build($meta, $body, $ext, $p['prefix']);
+            // The notebook details make the file bigger. scan() skips a file over the limit, so a file that
+            // grew over it would be saved and then be invisible. Refuse it before it is written.
+            if (strlen($raw) > self::MAX_FILE_BYTES) return ['error' => 'larger than ' . self::limitLabel() . ' once the notebook details are added'];
             $name = self::uniqueName($ctx, NotebookFormat::slug($meta['title']), $ext, (string)$meta['id']);
             $abs = $ctx['root'] . '/' . $area . '/' . $name;
             if (!AtomicWriteService::write($abs, $raw)) return ['error' => self::writeError($abs)];
@@ -1637,6 +1840,9 @@ class NotebookService {
                 $meta['pinned'] = false;
                 unset($meta['needsYou'], $meta['secrets']);
                 $raw = NotebookFormat::build($meta, $rec['body'], $rec['ext'], $rec['prefix']);
+                // The copy has a new "shared from" line, so it can be bigger than the original. scan() skips a
+                // file over the limit; refuse it, so the sender does not see "ok" for a copy nobody can see.
+                if (strlen($raw) > self::MAX_FILE_BYTES) return ['error' => 'This artefact is too close to the ' . self::limitLabel() . ' limit to be shared. The copy would be larger than ' . self::limitLabel() . '. Make the artefact smaller and try again.'];
                 $name = self::uniqueName($target, NotebookFormat::slug($meta['title']), $rec['ext'], $newId);
                 $abs = $target['root'] . '/inbox/' . $name;
                 if (!AtomicWriteService::write($abs, $raw)) return ['error' => self::writeError($abs)];
@@ -1774,6 +1980,8 @@ class NotebookService {
     /** @return array<int,array<string,mixed>> */
     private static function scan(array $ctx): array {
         $out = [];
+        $scanT0 = PerfTrace::start();
+        $scanBytes = 0;
         foreach (NotebookFormat::AREAS as $area) {
             $dir = $ctx['root'] . '/' . $area;
             if (!is_dir($dir)) continue;
@@ -1789,9 +1997,11 @@ class NotebookService {
                 if ($size > self::MAX_READ_BYTES) continue;
                 $raw = @file_get_contents($abs);
                 if ($raw === false) continue;
+                $scanBytes += strlen($raw);
                 $out[] = self::record($area, $name, $abs, $raw, $ext, (int)@filemtime($abs));
             }
         }
+        PerfTrace::point('notebook.scan', $scanT0, 100, 'files=' . count($out) . " bytes=$scanBytes");
         return $out;
     }
 
@@ -1887,7 +2097,7 @@ class NotebookService {
                 }
                 $meta['updatedAt'] = NotebookFormat::now();
                 $final = NotebookFormat::build($meta, (string)$r['body'], $rec['ext'], (string)($r['prefix'] ?? ''));
-                if (strlen($final) > self::MAX_FILE_BYTES) return ['error' => 'This artefact would be larger than ' . (self::MAX_FILE_BYTES / 1024) . ' KB, which is the limit.'];
+                if (strlen($final) > self::MAX_FILE_BYTES) return ['error' => 'This artefact would be larger than ' . self::limitLabel() . ', which is the limit.'];
                 if (!$confirm && ($hit = NotebookSecretGuard::addedFinding($rec['raw'], $final)) !== null) return self::secretRefusal($hit);
                 $cur = @file_get_contents($rec['abs']);
                 if ($cur === false || self::h12($cur) !== $rec['version']) return self::stale($cur === false ? '' : self::h12($cur));
@@ -2222,12 +2432,19 @@ class NotebookService {
         if ($fh === false) return ['error' => 'The notebook lock could not be opened.'];
         $deadline = microtime(true) + self::LOCK_WAIT_SECONDS;
         $got = false;
+        $lockT0 = PerfTrace::start();
         while (true) {
             if (flock($fh, LOCK_EX | LOCK_NB)) { $got = true; break; }
             if (microtime(true) >= $deadline) break;
             usleep(25000);
         }
-        if (!$got) { fclose($fh); return ['error' => 'The notebook is busy with another change. Try again in a moment.']; }
+        $lockNb = preg_replace('/[^A-Za-z0-9_\-]/', '', (string)$ctx['notebookId']);
+        if (!$got) {
+            fclose($fh);
+            PerfTrace::record('notebook.lock', PerfTrace::elapsedMs($lockT0), "nb=$lockNb result=timeout");
+            return ['error' => 'The notebook is busy with another change. Try again in a moment.'];
+        }
+        PerfTrace::point('notebook.lock', $lockT0, 250, "nb=$lockNb result=got");
         try {
             $r = $fn();
             return is_array($r) ? $r : ['error' => 'Internal error.'];
@@ -2391,11 +2608,13 @@ class NotebookService {
      * @return array{0:int,1:string}|null [exit code, stdout] or null on timeout or failure to start
      */
     private static function git(string $dir, array $args, int $timeoutMs = 3000, int $maxBytes = 262144): ?array {
+        $gitT0 = PerfTrace::start();
+        $gitVerb = preg_replace('/[^a-z0-9-]/', '', strtolower((string)($args[0] ?? '')));
         $cmd = array_merge(['git', '-c', 'safe.directory=*', '-C', $dir], $args);
         $env = array_merge(getenv() ?: [], ['GIT_OPTIONAL_LOCKS' => '0', 'GIT_TERMINAL_PROMPT' => '0', 'LC_ALL' => 'C', 'GIT_PAGER' => 'cat']);
         if (empty($env['HOME'])) $env['HOME'] = '/root';
         $proc = @proc_open($cmd, [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $env);
-        if (!is_resource($proc)) return null;
+        if (!is_resource($proc)) { PerfTrace::point('notebook.git', $gitT0, 300, "verb=$gitVerb rc=start-failed"); return null; }
         stream_set_blocking($pipes[1], false);
         stream_set_blocking($pipes[2], false);
         $out = '';
@@ -2422,10 +2641,12 @@ class NotebookService {
             @proc_terminate($proc, 9);
             foreach ($pipes as $p) @fclose($p);
             @proc_close($proc);
+            PerfTrace::record('notebook.git', PerfTrace::elapsedMs($gitT0), "verb=$gitVerb rc=timeout");
             return null;
         }
         foreach ($pipes as $p) @fclose($p);
         $rc = proc_close($proc);
+        PerfTrace::point('notebook.git', $gitT0, 300, "verb=$gitVerb rc=$rc");
         return [$rc, $out];
     }
 
@@ -2433,21 +2654,160 @@ class NotebookService {
     // Workspaces, settings, events, logging
     // ======================================================================
 
-    /** @return array<string,mixed>|null */
-    private static function findWorkspace(string $id): ?array {
-        try {
-            if (!class_exists('AICliAgents\Services\ConfigService', false)) {
-                $f = __DIR__ . '/ConfigService.php';
-                if (is_file($f)) require_once $f;
+    /**
+     * The projects the Wiki page can show (docs/specs/NOTEBOOK_WIKI_PAGE.md R2, R4). The Notebook API reaches a
+     * project through a workspace id, so each project is found from the workspace records: the records are grouped
+     * by project folder, and each group gives one entry. A stopped workspace still counts, because its record stays
+     * in the registry. LIMIT: a project whose workspaces are all deleted is not listed. A project is listed only
+     * when its notebook folder exists. Global is always the last entry.
+     * @return list<array{key:string,label:string,workspaceId:string,scope:string,workspaces:list<string>}>
+     */
+    public static function wikiProjects(): array {
+        $settings = self::settings();
+        if ($settings['enabled'] !== '1') return [];
+        $sessions = self::$workspacesOverride;
+        if ($sessions === null) {
+            $sessions = [];
+            try {
+                if (!class_exists('AICliAgents\Services\ConfigService', false)) {
+                    $f = __DIR__ . '/ConfigService.php';
+                    if (is_file($f)) require_once $f;
+                }
+                if (class_exists('AICliAgents\Services\ConfigService', false)) {
+                    $sessions = (array)(ConfigService::getWorkspaces()['sessions'] ?? []);
+                }
+            } catch (\Throwable $e) {
+                self::log('wiki projects lookup failed: ' . $e->getMessage());
             }
-            if (!class_exists('AICliAgents\Services\ConfigService', false)) return null;
-            foreach ((array)(ConfigService::getWorkspaces()['sessions'] ?? []) as $s) {
-                if (is_array($s) && (string)($s['id'] ?? '') === $id) return $s;
+        }
+        $groups = [];
+        foreach ($sessions as $s) {
+            if (!is_array($s)) continue;
+            $id = (string)($s['id'] ?? '');
+            if ($id === '' || !preg_match('/^[A-Za-z0-9_\-]{1,64}$/', $id)) continue;
+            $path = rtrim((string)($s['path'] ?? ''), '/');
+            if ($path === '' || !is_dir($path)) continue;
+            $project = PoolPathService::resolvePoolPath($path) ?? $path;
+            if (!is_dir($project . '/' . $settings['folder'])) continue;
+            $name = trim((string)($s['name'] ?? ''));
+            if ($name === '') $name = $id;
+            if (!isset($groups[$project])) $groups[$project] = ['workspaceId' => $id, 'names' => []];
+            if (!in_array($name, $groups[$project]['names'], true)) $groups[$project]['names'][] = $name;
+        }
+        $out = [];
+        foreach ($groups as $project => $g) {
+            $out[] = [
+                'key' => 'p_' . substr(sha1((string)$project), 0, 12),
+                'label' => implode(', ', $g['names']),
+                'workspaceId' => $g['workspaceId'],
+                'scope' => 'notebook',
+                'workspaces' => $g['names'],
+            ];
+        }
+        usort($out, static fn(array $a, array $b): int => strcasecmp($a['label'], $b['label']));
+        $out[] = ['key' => 'global', 'label' => 'Global', 'workspaceId' => 'global', 'scope' => 'global', 'workspaces' => []];
+        return $out;
+    }
+
+    /**
+     * The workspace record for an id, or null. A fresh cache entry answers first, so a poll does not
+     * read the whole registry (R3). Any cache failure falls back to the registry; the answer is the same.
+     * @return array<string,mixed>|null
+     */
+    private static function findWorkspace(string $id): ?array {
+        self::$lastLookupWasCacheHit = false;
+        $cached = self::wsCacheRead($id);
+        if ($cached !== null) {
+            self::$lastLookupWasCacheHit = true;
+            return $cached;
+        }
+        try {
+            if (self::$registryLookup !== null) {
+                $sessions = (array)(self::$registryLookup)();
+            } else {
+                if (!class_exists('AICliAgents\Services\ConfigService', false)) {
+                    $f = __DIR__ . '/ConfigService.php';
+                    if (is_file($f)) require_once $f;
+                }
+                if (!class_exists('AICliAgents\Services\ConfigService', false)) return null;
+                $sessions = (array)(ConfigService::getWorkspaces()['sessions'] ?? []);
+            }
+            foreach ($sessions as $s) {
+                if (is_array($s) && (string)($s['id'] ?? '') === $id) {
+                    self::wsCacheStore($id, $s);
+                    return $s;
+                }
             }
         } catch (\Throwable $e) {
             self::log('workspace lookup failed: ' . $e->getMessage());
         }
         return null;
+    }
+
+    /** The cache file, or null when the cache is off (under PHPUnit without setWorkspaceCachePath(), or an unsafe test path). */
+    private static function wsCachePath(): ?string {
+        if (self::$wsCachePathOverride !== null) {
+            $p = self::$wsCachePathOverride;
+            if ($p === '' || self::unsafeInTest(dirname($p))) return null;
+            return $p;
+        }
+        if (defined('AICLI_TEST_TMP')) return null;
+        return self::WS_CACHE_FILE;
+    }
+
+    /** @return array<string,mixed> the cache content: id => [name, path, at, rec]; empty on any problem */
+    private static function wsCacheLoad(string $path): array {
+        if (!is_file($path)) return [];
+        $raw = @file_get_contents($path);
+        if (!is_string($raw) || $raw === '') return [];
+        $d = json_decode($raw, true);
+        return is_array($d) ? $d : [];
+    }
+
+    /** A fresh cache record for $id whose folder still exists, or null. Never throws. @return array<string,mixed>|null */
+    private static function wsCacheRead(string $id): ?array {
+        try {
+            $file = self::wsCachePath();
+            if ($file === null) return null;
+            $e = self::wsCacheLoad($file)[$id] ?? null;
+            if (!is_array($e) || !is_array($e['rec'] ?? null) || !is_string($e['path'] ?? null)) return null;
+            if (!is_int($e['at'] ?? null) && !is_float($e['at'] ?? null)) return null;
+            $age = microtime(true) - (float)$e['at'];
+            if ($age < 0 || $age >= self::WS_CACHE_TTL) return null;
+            if ((string)($e['rec']['id'] ?? '') !== $id) return null;
+            $dir = rtrim($e['path'], '/');
+            if ($dir === '' || !is_dir($dir)) return null;
+            return $e['rec'];
+        } catch (\Throwable $t) {
+            return null;
+        }
+    }
+
+    /** Write one entry. A temp file and a rename, so a reader sees one whole file. Never throws, never changes the answer. */
+    private static function wsCacheStore(string $id, array $rec): void {
+        try {
+            $file = self::wsCachePath();
+            if ($file === null) return;
+            $dir = dirname($file);
+            if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) return;
+            $now = microtime(true);
+            $all = [];
+            foreach (self::wsCacheLoad($file) as $k => $e) {
+                if (!is_array($e) || !is_numeric($e['at'] ?? null)) continue;
+                $age = $now - (float)$e['at'];
+                if ($age >= 0 && $age < self::WS_CACHE_TTL) $all[(string)$k] = $e;
+            }
+            $all[$id] = ['name' => (string)($rec['name'] ?? ''), 'path' => (string)($rec['path'] ?? ''), 'at' => $now, 'rec' => $rec];
+            if (count($all) > self::WS_CACHE_MAX_ENTRIES) $all = array_slice($all, -self::WS_CACHE_MAX_ENTRIES, null, true);
+            $json = json_encode($all);
+            if (!is_string($json)) return;
+            $tmp = $file . '.' . getmypid() . '.' . bin2hex(random_bytes(4)) . '.tmp';
+            if (@file_put_contents($tmp, $json) === false) { @unlink($tmp); return; }
+            @chmod($tmp, 0600);
+            if (!@rename($tmp, $file)) @unlink($tmp);
+        } catch (\Throwable $t) {
+            // A cache failure never changes the result.
+        }
     }
 
     /** @return array{enabled:string,autoOpen:string,folder:string,allowProdSecrets:string,spokenNotice:string,journal:string,quietHours:string} */

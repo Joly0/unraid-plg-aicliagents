@@ -452,20 +452,26 @@ class InstallerService {
         }
         exec("pgrep -f 'ttyd.*$agentId' 2>/dev/null | xargs -r kill -15 > /dev/null 2>&1");
 
-        // 2. Unmount the stack
+        // 2. Unmount the stack: the stable name AND every side-by-side
+        //    generation mounted under agents/.versions/<id>/ (Forgejo #441).
         if (StorageMountService::isMounted($mnt)) {
             exec("umount -l " . escapeshellarg($mnt));
         }
+        self::unmountAgentGenerations($agentId);
 
-        // 3. Delete all SquashFS volumes from Flash
-        foreach (glob("$persistPath/agent_{$agentId}_*.sqsh") as $sqsh) {
-            @unlink($sqsh);
+        // 3 + 4. Delete every version of the agent from the storage location
+        //    (Forgejo #441, John 2026-10-07: "when an agent is uninstalled all
+        //    versions of the agent are deleted from the storage location"):
+        //    the SquashFS layers, the disk and RAM writable layers of every
+        //    generation, the passthrough version folders and stable folder,
+        //    and the rollback copies under the storage location.
+        $purge = self::purgeAgentStorage($agentId, $persistPath);
+        $oldSizeMB = round(($oldSize + $purge['bytes']) / 1024 / 1024, 2);
+        if ($purge['removed'] !== []) {
+            LogService::log("Removed " . count($purge['removed']) . " storage item(s) of $agentId: " . implode(', ', array_slice($purge['removed'], 0, 8)) . (count($purge['removed']) > 8 ? ', …' : ''), LogService::LOG_INFO, "InstallerService");
         }
-
-        // 4. Clear ZRAM upper/work directories
-        $zramBase = "/tmp/unraid-aicliagents/zram_upper/agents/$agentId";
-        if (is_dir($zramBase)) {
-            exec("rm -rf " . escapeshellarg($zramBase));
+        foreach ($purge['failed'] as $f) {
+            LogService::log("Could not remove $f during the uninstall of $agentId — remove it by hand.", LogService::LOG_WARN, "InstallerService");
         }
 
         // 5. Remove empty mount point directory (will be recreated on reinstall)
@@ -521,8 +527,81 @@ class InstallerService {
         @\AICliAgents\Services\HaltService::clearHalt('agent', $agentId, 'agent_uninstalled');
 
         LogService::log("Successfully uninstalled $agentId and purged $oldSizeMB MB of associated storage.", LogService::LOG_INFO, "InstallerService");
-        LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_uninstalled', ['agent' => $agentId, 'purged_mb' => $oldSizeMB]);
-        return ['status' => 'ok'];
+        LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_uninstalled', ['agent' => $agentId, 'purged_mb' => $oldSizeMB, 'removed' => count($purge['removed']), 'failed' => count($purge['failed'])]);
+        return ['status' => 'ok', 'purged_mb' => $oldSizeMB, 'removed' => $purge['removed'], 'failed' => $purge['failed']];
+    }
+
+    /**
+     * Forgejo #441: unmount every side-by-side generation of an agent
+     * (agents/.versions/<id>/<generation>, overlay or bind) and remove the
+     * now-empty generation directories and the stable symlink. A mount that
+     * refuses a real umount after the sessions were killed is detached lazily,
+     * as the stable mount always was. Best-effort; never throws.
+     */
+    private static function unmountAgentGenerations(string $agentId): void {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return;
+        $base = AgentRegistry::agentBase();
+        $versions = "$base/.versions/$agentId";
+        $out = [];
+        exec("findmnt -rn -o TARGET 2>/dev/null", $out);
+        foreach ($out as $target) {
+            $target = trim((string)$target);
+            if ($target === '') continue;
+            if (strncmp($target, "$versions/", strlen($versions) + 1) !== 0 && $target !== $versions) continue;
+            exec("umount " . escapeshellarg($target) . " 2>/dev/null", $ignored, $rc);
+            if ($rc !== 0) exec("umount -l " . escapeshellarg($target) . " 2>/dev/null");
+        }
+        if (is_dir($versions) && !StorageMountService::isMounted($versions)) {
+            self::rmdirContents($versions);
+            @rmdir($versions);
+        }
+        $stable = "$base/$agentId";
+        if (is_link($stable)) @unlink($stable);
+    }
+
+    /**
+     * Forgejo #441: every item of ONE agent under the storage location and the
+     * RAM writable layers, removed. Public so a test can run it against a
+     * temporary storage path. Items of other agents are never touched: every
+     * pattern is anchored on the exact agent id (`agent_<id>_`, `<id>`,
+     * `<id>@<generation>`).
+     *
+     * @return array{bytes:int, removed:string[], failed:string[]}
+     */
+    public static function purgeAgentStorage(string $agentId, string $persistPath): array {
+        $bytes = 0; $removed = []; $failed = [];
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return ['bytes' => 0, 'removed' => [], 'failed' => ["invalid id"]];
+        $persist = rtrim($persistPath, '/');
+        $q = preg_quote($agentId, '/');
+        $files = [];
+        $dirs = [];
+        // The SquashFS layers (delta and consolidated).
+        foreach (glob("$persist/agent_{$agentId}_*.sqsh") ?: [] as $f) $files[] = $f;
+        // Disk and RAM writable layers and work dirs: <id> and <id>@<generation>.
+        foreach (["$persist/_upper/agents", "$persist/_work/agents", "/tmp/unraid-aicliagents/zram_upper/agents"] as $parent) {
+            foreach (glob("$parent/" . $agentId . "*") ?: [] as $d) {
+                $name = basename($d);
+                if ($name === $agentId || preg_match('/^' . $q . '@/', $name)) $dirs[] = $d;
+            }
+        }
+        // Passthrough: the stable folder (dir or symlink) and the version folders.
+        $ptStable = "$persist/passthrough/agents/$agentId";
+        if (is_link($ptStable)) $files[] = $ptStable; elseif (is_dir($ptStable)) $dirs[] = $ptStable;
+        if (is_dir("$persist/passthrough/agents/.versions/$agentId")) $dirs[] = "$persist/passthrough/agents/.versions/$agentId";
+        // Rollback copies kept under the storage location.
+        if (is_dir("$persist/aicli-rollback/$agentId")) $dirs[] = "$persist/aicli-rollback/$agentId";
+
+        foreach ($files as $f) {
+            $b = is_link($f) ? 0 : (int)@filesize($f);
+            if (@unlink($f)) { $bytes += $b; $removed[] = $f; } else { $failed[] = $f; }
+        }
+        foreach ($dirs as $d) {
+            if (StorageMountService::isMounted($d)) { $failed[] = "$d (still mounted)"; continue; }
+            $b = self::directorySize($d);
+            self::rmdirContents($d);
+            if (@rmdir($d) || !file_exists($d)) { $bytes += $b; $removed[] = $d; } else { $failed[] = $d; }
+        }
+        return ['bytes' => $bytes, 'removed' => $removed, 'failed' => $failed];
     }
 
     /**

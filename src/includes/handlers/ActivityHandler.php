@@ -241,18 +241,33 @@ class ActivityHandler
             return ['status' => 'error', 'message' => 'activity has no retry context'];
         }
 
-        ActivityService::update($opId, ['status' => 'running', 'step' => 'retrying', 'progress' => 5, 'error' => null]);
+        // One click wins: the entry must still be failed, and the change to running is atomic.
+        // A second click (double click, second tab) while the retry runs gets a refusal and
+        // never starts a second terminal for the same workspace.
+        if (ActivityService::transitionIf($opId, ['failed'], ['status' => 'running', 'step' => 'retrying', 'progress' => 5, 'error' => null]) === null) {
+            return ['status' => 'error', 'message' => 'A retry is already running for this workspace.'];
+        }
         try {
             // startTerminal re-registers start_<sid> and steps it (T-09), so the
             // tray sees live progress for the retry as well.
             TerminalService::startTerminal($sid, $path, (string)($meta['chatId'] ?? 'auto'), $agentId, 'auto_launch');
         } catch (\Throwable $e) {
-            ActivityService::fail($opId, 'retry failed: ' . $e->getMessage(), 'retry', ['meta' => $meta]);
+            // R5: the exception message goes to the log; the tray gets one sentence.
+            \AICliAgents\Services\LogService::log('Retry of auto-launch ' . $sid . ' failed: ' . $e->getMessage(), \AICliAgents\Services\LogService::LOG_WARN, 'ActivityHandler');
+            TerminalService::recordStartFailure(
+                $opId, \AICliAgents\Services\UtilityService::trayAgentName($agentId),
+                'The start stopped with an error; details are in the Debug Console.',
+                'retry', $meta, TerminalService::START_RETRY_HINT
+            );
             return ['status' => 'error', 'message' => $e->getMessage()];
         }
 
         if (!ProcessManager::isRunning($sid)) {
-            ActivityService::fail($opId, 'retry failed: session did not start', 'retry', ['meta' => $meta]);
+            TerminalService::recordStartFailure(
+                $opId, \AICliAgents\Services\UtilityService::trayAgentName($agentId),
+                'The agent did not start again.',
+                'retry', $meta, TerminalService::START_RETRY_HINT
+            );
             return ['status' => 'error', 'message' => 'session did not start'];
         }
         return ['status' => 'ok', 'sessionId' => $sid];

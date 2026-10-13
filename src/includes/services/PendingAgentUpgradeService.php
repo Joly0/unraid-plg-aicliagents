@@ -97,17 +97,43 @@ class PendingAgentUpgradeService
             $status['active_sessions'] = $count;
             AtomicWriteService::writeJson($path, $status);
         }
-        ActivityService::update("install_$agentId", [
-            'type' => 'install', 'label' => "Upgrade queued for $agentId",
-            'step' => $message, 'progress' => 1,
-        ]);
+        // ACTIVITY_TRAY_PLAIN_NOTICES.md row 13: "Upgrade of Claude Code queued" with
+        // "waiting for 2 open workspaces to close" in the grey line. The Store card
+        // keeps $message (and its reason). ActivityService::update() keeps the label
+        // an entry was created with, and setInstallStatus() has just created this one
+        // as "Installing ...", so the entry is registered again under the queued title.
+        // A running install worker (it holds a pid for Cancel) is never replaced.
+        $opId = "install_$agentId";
+        $trayStep = self::queuedTrayStep($count);
+        $cur = ActivityService::get($opId);
+        $workerLive = is_array($cur) && (int)($cur['pid'] ?? 0) > 0 && in_array((string)($cur['status'] ?? ''), ['running', 'stalled'], true);
+        if (!$workerLive) {
+            ActivityService::register($opId, 'install', self::queuedTrayTitle($agentId), [
+                'step' => $trayStep, 'progress' => 1,
+            ]);
+        } else {
+            ActivityService::update($opId, ['step' => $trayStep, 'progress' => 1]);
+        }
         // A queued request has no install worker yet. It can legitimately wait
         // beyond the install watchdog's hard cap while its final legacy session
         // reaches a safe boundary, so represent that fact with ActivityService's
         // explicit no-deadline state rather than leaving this entry `running`.
         // wait() also repairs an activity a previous watchdog pass had already
         // marked failed; processReady will relaunch it once the sessions are gone.
-        ActivityService::wait("install_$agentId", $message, 1);
+        ActivityService::wait("install_$agentId", $trayStep, 1);
+    }
+
+    /** The tray title of a queued upgrade, e.g. "Upgrade of Claude Code queued". */
+    public static function queuedTrayTitle(string $agentId): string
+    {
+        return 'Upgrade of ' . UtilityService::trayAgentName($agentId) . ' queued';
+    }
+
+    /** The tray grey line of a queued upgrade, e.g. "waiting for 2 open workspaces to close". */
+    public static function queuedTrayStep(int $count): string
+    {
+        if ($count <= 0) return 'waiting for open workspaces to close';
+        return 'waiting for ' . $count . ' open workspace' . ($count === 1 ? '' : 's') . ' to close';
     }
 
     /**

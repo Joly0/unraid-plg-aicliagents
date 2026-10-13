@@ -300,6 +300,14 @@ final class VoiceMailService {
         });
         if (!$ok) return null;
 
+        // VOICE_MAIL_NOTEBOOK_COPY.md — a separate copy in the Notebook; never blocks the message.
+        try {
+            if (!class_exists('AICliAgents\\Services\\VoiceMailNotebookService', false)) require_once __DIR__ . '/VoiceMailNotebookService.php';
+            if (!class_exists('AICliAgents\\Services\\NotebookService', false)) require_once __DIR__ . '/NotebookService.php';
+            VoiceMailNotebookService::copy($message);
+        } catch (\Throwable $e) {
+        }
+
         self::publishChange($workspaceId, $id, 'kept');
         return $id;
     }

@@ -622,7 +622,59 @@ function syncChannelControl(agentId, channel) {
     if (control) control.checked = true;
 }
 
+// Forgejo #447: say what the version figures ARE. On load the cards show the last
+// CACHED "latest version"; nothing said so, nothing showed that an online check
+// was running (the page starts one in the background when the cache is stale),
+// and a click during that check returned "already in progress" as a plain OK, so
+// the button looked dead. One status line next to the button now carries the
+// truth, and the cards refresh the moment the check ends (the tray entry
+// `version_check` arrives on the page's event stream).
+function _vcAge(ts) {
+    var s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    if (s < 90) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    return Math.round(s / 86400) + ' d ago';
+}
+function renderVersionCheckStatus(r, note) {
+    var el = document.getElementById('version-check-status');
+    if (!el) return;
+    var checking = !!(r && r.checking);
+    var checkedAt = r && r.checked_at ? parseInt(r.checked_at, 10) : 0;
+    var errors = r && r.errors ? parseInt(r.errors, 10) : 0;
+    var firstError = (r && r.first_error) ? String(r.first_error) : '';
+    el.style.color = '';
+    if (checking) {
+        el.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Checking online for new versions\u2026';
+    } else if (errors > 0) {
+        el.style.color = 'var(--orange, #e68a00)';
+        el.textContent = 'Check failed for ' + errors + ' agent' + (errors === 1 ? '' : 's') + (firstError ? ': ' + firstError : '') + (checkedAt ? ' \u00b7 last good check ' + _vcAge(checkedAt) : '');
+    } else if (checkedAt) {
+        var age = _vcAge(checkedAt);
+        el.textContent = (note || (age === 'just now' ? 'Checked online just now' : 'Versions last checked ' + age + ' (cached)'));
+        if (Date.now() / 1000 - checkedAt > 3600) el.style.color = 'var(--orange, #e68a00)';
+    } else {
+        el.textContent = note || 'Versions not checked yet';
+    }
+    var btn = document.getElementById('version-check-btn');
+    if (btn) { btn.disabled = checking; btn.title = checking ? 'A check is running' : 'Look online for new versions now'; }
+}
+var _vcLiveHooked = false;
+function _vcHookLiveUpdates() {
+    if (_vcLiveHooked) return;
+    _vcLiveHooked = true;
+    try {
+        var bus = window.aicliEvents;
+        if (bus && typeof bus.on === 'function') {
+            bus.on('activity', function (evt) {
+                var d = evt && evt.data;
+                if (d && d.opId === 'version_check' && d.status && d.status !== 'running') loadVersionCache();
+            });
+        }
+    } catch (e) { /* the 30 s poll below still catches up */ }
+}
 function loadVersionCache() {
+    _vcHookLiveUpdates();
     var requestSeq = ++_versionCacheRequestSeq;
     if (_versionPollTimer) {
         clearInterval(_versionPollTimer);
@@ -633,6 +685,7 @@ function loadVersionCache() {
         // stable response arrive later and repaint the Beta picker.
         if (requestSeq !== _versionCacheRequestSeq) return;
         if (r.status !== 'ok' || !r.dropdowns) return;
+        renderVersionCheckStatus(r);
 
         var allHaveData = true;
         $.each(r.dropdowns, function(id, data) {
@@ -645,9 +698,10 @@ function loadVersionCache() {
             }
         });
 
-        // If any installed agent is missing version data, poll until the background check fills it in
+        // If any installed agent is missing version data, or a check is running
+        // (#447), poll until the background check fills it in
         // (getVersionCache triggers a background check when it detects stale entries)
-        if (!allHaveData) {
+        if (!allHaveData || r.checking) {
             if (!_versionPollTimer) {
                 var _pollCount = 0;
                 _versionPollTimer = setInterval(function() {
@@ -661,7 +715,8 @@ function loadVersionCache() {
                     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_version_cache&csrf_token=' + csrf, function(r2) {
                         if (requestSeq !== _versionCacheRequestSeq) return;
                         if (r2.status !== 'ok' || !r2.dropdowns) return;
-                        var nowAllHaveData = true;
+                        renderVersionCheckStatus(r2);
+                        var nowAllHaveData = !r2.checking;
                         $.each(r2.dropdowns, function(id, data) {
                             syncChannelControl(id, data.channel);
                             populateVersionPicker(id, data);
@@ -1151,13 +1206,25 @@ function checkUpdates(btn) {
         var $b = $(btn);
         $b.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Checking...');
     }
+    renderVersionCheckStatus({ checking: true });
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=check_versions&csrf_token=' + csrf, function(r) {
         if (btn) $(btn).prop('disabled', false).html('<i class="fa fa-refresh"></i> Check for Updates');
-        if (r.status === 'ok') {
-            loadVersionCache(); // Refresh dropdowns with new data
+        if (r.status === 'ok' && r.running) {
+            // #447: a check started by the page (or another tab) holds the lock.
+            // Say so and follow it to the end instead of pretending nothing happened.
+            renderVersionCheckStatus({ checking: true });
+            loadVersionCache();
+            return;
         }
-    }).fail(function() {
+        if (r.status === 'ok') {
+            renderVersionCheckStatus(r, 'Checked online just now');
+            loadVersionCache(); // Refresh dropdowns with new data
+        } else {
+            renderVersionCheckStatus({ errors: 1, first_error: r.message || 'unknown error' });
+        }
+    }).fail(function(xhr) {
         if (btn) $(btn).prop('disabled', false).html('<i class="fa fa-refresh"></i> Check for Updates');
+        renderVersionCheckStatus({ errors: 1, first_error: 'the request failed (' + (xhr && xhr.status ? xhr.status : 'network') + ')' });
         swal("Error", "Failed to check for updates. Check debug.log", "error");
     });
 }
@@ -1269,7 +1336,8 @@ function av2SaveSecrets(form, event) {
         success: function(r) {
             if (r && r.status === 'ok') {
                 if (typeof swal === 'function') swal({title: 'Saved', text: 'Secrets updated for ' + agentId, type: 'success', timer: 1300, showConfirmButton: false});
-                if (typeof av2HotApplyAgent === 'function') av2HotApplyAgent(agentId);
+                // #463: a save that changed nothing needs no restart notice.
+                if (r.changed !== false && typeof av2OfferRestart === 'function') av2OfferRestart(agentId);
             } else {
                 if (typeof swal === 'function') swal('Error', (r && r.message) || 'Save failed', 'error');
             }
@@ -1307,6 +1375,7 @@ function av2FfAddRow(btn, kind) {
         [av2mkel('i', { 'class': 'fa fa-trash-o' })]);
     var row = av2mkel('div', { 'class': 'av2-ff-row' }, [nameInput, av2mkel('span', { 'class': 'av2-ff-eq' }, ['=']), valInput, delBtn]);
     list.appendChild(row);
+    if (kind === 'secret' && window.aicliMaskEye) window.aicliMaskEye(valInput); // show-value eye (ManagerScripts.php)
     nameInput.focus();
 }
 
@@ -1328,23 +1397,137 @@ function av2FfCollect(form) {
     return out;
 }
 
-// After an agent-tier env/secret save, restart the agent's running sessions
-// in place (Ctrl-C → relaunch, picks up the new env via aicli-shell.sh's
-// _aicli_load_envs). Workspace/tmux/ttyd are untouched. Reuses the existing
-// agent_signal_reload + list_sessions_for_agent endpoints.
-function av2HotApplyAgent(agentId) {
-    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=list_sessions_for_agent&agentId='
+// #463: a Save never restarts a session by itself. After a successful save,
+// av2OfferRestart() counts the agent's running sessions and shows a notice with a
+// "Restart them now" button. The button opens a confirm dialog that lists each
+// session as busy or idle and restarts only the idle ones (Ctrl-C → relaunch, which
+// picks up the new env via aicli-shell.sh's _aicli_load_envs). A busy session is
+// never restarted from here: the server refuses it too (agent_signal_reload, no
+// force). Only sessions of this agent are listed (list_sessions_for_agent).
+// Spec: docs/specs/AGENT_SECRETS_SAVE_RELOAD_GUARD.md
+function av2RestartNoticeBox() {
+    var box = document.getElementById('av2-restart-notice');
+    if (box) return box;
+    box = av2mkel('div', { id: 'av2-restart-notice', style: 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:10001;max-width:90vw;background:#1f2937;color:#fff;border-radius:8px;padding:10px 14px;box-shadow:0 4px 16px rgba(0,0,0,.4);display:none;align-items:center;gap:12px' });
+    document.body.appendChild(box);
+    return box;
+}
+
+function av2OfferRestart(agentId) {
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=list_sessions_for_agent&busy=1&agentId='
               + encodeURIComponent(agentId) + '&csrf_token=' + csrf, function(r) {
-        var sessions = (r && r.sessions) || [];
-        sessions.forEach(function(s) {
-            if (!s || !s.id) return;
-            $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=agent_signal_reload&id='
-                      + encodeURIComponent(s.id) + '&csrf_token=' + csrf);
-        });
-        if (sessions.length > 0 && typeof swal === 'function') {
-            // brief, non-blocking
-            swal({ title: 'Applied', text: 'Restarted ' + sessions.length + ' running session(s) with the new env.', type: 'success', timer: 1800, showConfirmButton: false });
+        var sessions = ((r && r.sessions) || []).filter(function(s) { return s && s.id; });
+        var box = av2RestartNoticeBox();
+        while (box.firstChild) box.removeChild(box.firstChild);
+        if (sessions.length === 0) { box.style.display = 'none'; return; }
+        var n = sessions.length;
+        var text = av2mkel('span', {}, ['Saved. ' + n + ' running session' + (n === 1 ? ' uses' : 's use')
+            + ' the old values until ' + (n === 1 ? 'it restarts.' : 'they restart.')]);
+        var go = av2mkel('button', { type: 'button', 'class': 'aicli-btn-slim',
+            onclick: function() { av2ConfirmRestart(agentId, sessions); } }, ['Restart them now']);
+        var close = av2mkel('button', { type: 'button', 'class': 'aicli-btn-slim', title: 'Dismiss',
+            onclick: function() { box.style.display = 'none'; } }, ['Close']);
+        box.appendChild(text); box.appendChild(go); box.appendChild(close);
+        box.style.display = 'flex';
+    });
+}
+
+// The name of a workspace for a person: the name they gave it, else the folder name.
+// Never an id (a raw id means nothing to the person).
+function av2SessionLabel(s) {
+    var name = String((s && s.name) || '').trim();
+    if (name === '') name = String((s && s.path) || '').split('/').filter(Boolean).pop() || '';
+    return name !== '' ? name : 'a workspace';
+}
+
+// The result sentence of a restart: "2 restarted, 1 is busy and keeps its old values
+// until you restart it." Pure, so the wording has one test.
+function av2RestartSummary(done, busy, failed) {
+    var parts = [];
+    if (done.length > 0) parts.push(done.length + ' restarted');
+    if (busy.length > 0) {
+        parts.push(busy.length + (busy.length === 1
+            ? ' is busy and keeps its old values until you restart it'
+            : ' are busy and keep their old values until you restart them'));
+    }
+    if (failed.length > 0) parts.push(failed.length + ' could not be restarted');
+    if (parts.length === 0) return 'No workspace was restarted.';
+    var text = parts.join(', ');
+    var named = busy.concat(failed);
+    if (named.length > 0) text += '. Not restarted: ' + named.join(', ');
+    return text + '.';
+}
+
+// Shows the result in the notice box, with a Close button. The box stays until the
+// person closes it, so they can read which workspaces still run the old values.
+function av2ShowRestartResult(text) {
+    var box = av2RestartNoticeBox();
+    while (box.firstChild) box.removeChild(box.firstChild);
+    var close = av2mkel('button', { type: 'button', 'class': 'aicli-btn-slim', title: 'Dismiss',
+        onclick: function() { box.style.display = 'none'; } }, ['Close']);
+    box.appendChild(av2mkel('span', {}, [text]));
+    box.appendChild(close);
+    box.style.display = 'flex';
+}
+
+// "Restart them now": read the session list again (a session may have turned busy
+// or idle since the Save), then ask. If the list cannot be read, use the list from
+// the Save; the server still refuses a busy session.
+function av2ConfirmRestart(agentId, savedSessions) {
+    var show = function(sessions) { av2ShowRestartDialog(agentId, sessions); };
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=list_sessions_for_agent&busy=1&agentId='
+              + encodeURIComponent(agentId) + '&csrf_token=' + csrf, function(r) {
+        if (r && r.status === 'ok') {
+            show(((r.sessions) || []).filter(function(s) { return s && s.id; }));
+        } else {
+            show(savedSessions);
         }
+    }).fail(function() { show(savedSessions); });
+}
+
+function av2ShowRestartDialog(agentId, sessions) {
+    if (sessions.length === 0) {
+        av2ShowRestartResult('No workspace of this agent is running now.');
+        return;
+    }
+    var idle = sessions.filter(function(s) { return !s.busy; });
+    var busyNames = sessions.filter(function(s) { return s.busy; }).map(av2SessionLabel);
+    var lines = sessions.map(function(s) {
+        return '• ' + _escAttr(av2SessionLabel(s)) + ' — ' + (s.busy
+            ? '<b>busy</b>: kept running; restart it yourself when it is idle'
+            : 'idle: will restart');
+    }).join('<br>');
+    swal({
+        title: 'Restart sessions?',
+        text: '<div style="text-align:left;line-height:1.5">' + lines + '</div>',
+        html: true,
+        type: 'warning',
+        showCancelButton: true,
+        showConfirmButton: idle.length > 0,
+        confirmButtonText: 'Restart idle sessions',
+        cancelButtonText: 'Cancel',
+        closeOnConfirm: true
+    }, function(confirmed) {
+        if (!confirmed) return;
+        var restarted = [], refused = busyNames.slice(), failed = [], waiting = idle.length;
+        // idle is never empty here: the confirm button is hidden when it is.
+        var finish = function() {
+            if (--waiting > 0) return;
+            av2ShowRestartResult(av2RestartSummary(restarted, refused, failed));
+        };
+        idle.forEach(function(s) {
+            var label = av2SessionLabel(s);
+            // No force: the server checks again and refuses a session that became busy.
+            $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=agent_signal_reload&id='
+                      + encodeURIComponent(s.id) + '&csrf_token=' + csrf)
+                .done(function(r) {
+                    if (r && r.status === 'ok') restarted.push(label);
+                    else if (r && r.status === 'busy') refused.push(label);
+                    else failed.push(label);
+                })
+                .fail(function() { failed.push(label); })
+                .always(finish);
+        });
     });
 }
 
@@ -1359,7 +1542,8 @@ function av2FfSave(form, event, action, agentId, label) {
         success: function(r) {
             if (r && r.status === 'ok') {
                 if (typeof swal === 'function') swal({ title: 'Saved', text: label + ' updated for ' + agentId, type: 'success', timer: 1300, showConfirmButton: false });
-                av2HotApplyAgent(agentId);
+                // #463: a save that changed nothing needs no restart notice.
+                if (r.changed !== false) av2OfferRestart(agentId);
             } else {
                 if (typeof swal === 'function') swal('Error', (r && r.message) || 'Save failed', 'error');
             }

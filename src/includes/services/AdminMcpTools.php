@@ -336,7 +336,7 @@ class AdminMcpTools {
             ['name'=>'aicli_search_artefacts','description'=>'Read-only. Search the title, tags and body of the artefacts in your notebook for the text `q`. Returns id, title, type, area, a short snippet and a score. Secrets are never searched.'.$mine.$data.' Changes nothing.','inputSchema'=>['type'=>'object','properties'=>['q'=>$str,'scope'=>$scope],'required'=>['q']]] + self::readOnly(true),
             ['name'=>'aicli_list_artefact_templates','description'=>'Read-only. List the ready-made templates you can pass as `template` to aicli_create_artefact (key, title, type, description), for example a manual test script or a connection card. Changes nothing.','inputSchema'=>['type'=>'object','properties'=>new \stdClass()]] + self::readOnly(true),
 
-            ['name'=>'aicli_create_artefact','description'=>'Tier 2 (change). Put a new artefact in your Notebook: a page the person can read, tick, answer or look up later. Use it for anything a person must follow, keep, compare or decide (a manual test script, a design, a decision, the login for the app under test); keep short answers in the terminal. `type`: markdown, checklist, connection, deck, mermaid, svg, html, table, chart, status, log, json, diff, form, board, walkthrough, media, link, progress. `content` is the body in that type\'s format (Markdown text, Mermaid source, or JSON text for table, chart, form, board, progress); the plugin adds the metadata block. Or pass `template` (see aicli_list_artefact_templates). `area` is inbox (default: new things for the person), working (your own scratch work), notes (kept reference) or archive. `needsYou:true` marks it as waiting for the person. `open:true` asks the drawer to open (the person can turn that off). Limits: 256 KB a file, 2000 artefacts a notebook, 60 changes a minute. NEVER put a password, token or key in `content`: a save that looks like a secret is refused (`confirmSecret:true` overrides that, only for text that is not a secret); put a secret on a connection card with aicli_set_artefact_secret. Returns `artefact` (id, path) and `link`, the text `artefact:<id>`: tell the person where it is, for example "I put it in your Notebook: artefact:<id>".'.$mine.$data.' Recorded in the Activity tray.','inputSchema'=>['type'=>'object','properties'=>['title'=>$str,'type'=>$str,'content'=>$str,'area'=>$area,'tags'=>$tags,'template'=>$str,'scope'=>$scope,'needsYou'=>$bool,'open'=>$bool,'confirmSecret'=>$bool],'required'=>['title','type']]] + self::readOnly(false),
+            ['name'=>'aicli_create_artefact','description'=>'Tier 2 (change). Put a new artefact in your Notebook: a page the person can read, tick, answer or look up later. Use it for anything a person must follow, keep, compare or decide (a manual test script, a design, a decision, the login for the app under test); keep short answers in the terminal. `type`: markdown, checklist, connection, deck, mermaid, svg, html, table, chart, status, log, json, diff, form, board, walkthrough, media, link, progress. `content` is the body in that type\'s format (Markdown text, Mermaid source, or JSON text for table, chart, form, board, progress); the plugin adds the metadata block. Or pass `template` (see aicli_list_artefact_templates). `area` is inbox (default: new things for the person), working (your own scratch work), notes (kept reference) or archive. `needsYou:true` marks it as waiting for the person. `open:true` asks the drawer to open (the person can turn that off). Limits: 1 MB a file, 2000 artefacts a notebook, 60 changes a minute. NEVER put a password, token or key in `content`: a save that looks like a secret is refused (`confirmSecret:true` overrides that, only for text that is not a secret); put a secret on a connection card with aicli_set_artefact_secret. Returns `artefact` (id, path) and `link`, the text `artefact:<id>`: tell the person where it is, for example "I put it in your Notebook: artefact:<id>".'.$mine.$data.' Recorded in the Activity tray.','inputSchema'=>['type'=>'object','properties'=>['title'=>$str,'type'=>$str,'content'=>$str,'area'=>$area,'tags'=>$tags,'template'=>$str,'scope'=>$scope,'needsYou'=>$bool,'open'=>$bool,'confirmSecret'=>$bool],'required'=>['title','type']]] + self::readOnly(false),
             ['name'=>'aicli_update_artefact','description'=>'Tier 2 (change). Change an artefact. Two ways. (1) `ops`: a short list of patch steps, the safe way for small changes and the only way to tick a checklist item, answer a form or move a board card: {"op":"append","text"}, {"op":"replaceSection","heading","text"}, {"op":"setItemState","item","result","note"} (result: pending, pass, fail, blocked, skipped), {"op":"setField","field","value"} (a connection card field; a secret field goes to the vault), {"op":"setTitle","title"}, {"op":"setTags","tags":[]}, {"op":"answer","question","value","note"}, {"op":"moveCard","card","toColumn","index"}, {"op":"addCard","column","card"}, {"op":"setProgress","state","percent","status","steps","tiles","appendLog"}. `expectedVersion` is optional with `ops`. `title` and `tags` also change those two fields. (2) `content`: replace the WHOLE file, exactly as `raw` from aicli_get_artefact with the metadata block kept. This REQUIRES `expectedVersion`, the `version` you read: if the file changed since (a person edited it, or another agent), the call is refused and carries the current version; read it again and merge, never overwrite blind. Send `content` OR `ops`/`title`/`tags`, not both. A text that looks like a secret is refused unless `confirmSecret:true`. Nothing is deleted; git keeps the history.'.$mine.$data.' Recorded in the Activity tray.','inputSchema'=>['type'=>'object','properties'=>['id'=>$str,'content'=>$str,'expectedVersion'=>$str,'ops'=>['type'=>'array','items'=>['type'=>'object']],'title'=>$str,'tags'=>$tags,'confirmSecret'=>$bool,'scope'=>$scope],'required'=>['id']]] + self::readOnly(false),
             ['name'=>'aicli_move_artefact','description'=>'Tier 2 (change). Move an artefact to another area: inbox, working, notes or archive. A file move; nothing is deleted.'.$mine.' Recorded in the Activity tray.','inputSchema'=>['type'=>'object','properties'=>['id'=>$str,'area'=>$area,'scope'=>$scope],'required'=>['id','area']]] + self::readOnly(false),
             ['name'=>'aicli_pin_artefact','description'=>'Tier 2 (change). Pin an artefact so it stays at the top of the list, or unpin it (`pinned:false`). Default is pin.'.$mine.' Recorded in the Activity tray.','inputSchema'=>['type'=>'object','properties'=>['id'=>$str,'pinned'=>$bool,'scope'=>$scope],'required'=>['id']]] + self::readOnly(false),
@@ -346,7 +346,7 @@ class AdminMcpTools {
             ['name'=>'aicli_set_artefact_secret','description'=>'Tier 2 (change). Store one secret of a CONNECTION card in the encrypted vault: `field` is password, token or apiKey, `value` is the secret. The value is NEVER returned, logged, written to the card file, git, search or the tray, by this or any other tool; only the name of the field is kept on the card. There is no tool that reads a secret back. A `global` card may not hold a secret and refuses. A value that looks like a production key is refused unless a person allowed that in Settings > Notebook. Use this, never `content`, for any login detail.','inputSchema'=>['type'=>'object','properties'=>['id'=>$str,'field'=>$str,'value'=>$str],'required'=>['id','field','value']]] + self::readOnly(false),
             ['name'=>'aicli_share_artefact','description'=>'Tier 2 (change). Copy one of your artefacts into the inbox of ANOTHER workspace\'s notebook (`targetWorkspaceId`, from aicli_list_workspaces). The copy records where it came from (`sharedFrom`). The original stays. A connection card is copied without its secrets. Only share when the person asked for it.'.$mine.' Recorded in the Activity tray.','inputSchema'=>['type'=>'object','properties'=>['id'=>$str,'targetWorkspaceId'=>$str,'scope'=>$scope],'required'=>['id','targetWorkspaceId']]] + self::readOnly(false),
 
-            ['name'=>'aicli_wiki_index','description'=>'Read-only. The wiki view of your notebook: `home` (the id of the wiki home page, or null), `tree` (sections, each with its pages: id, title, type, updatedAt, tags; a page joins a section through a `section` field or a tag `section:<name>`, the rest are under Other), `recent` (the 20 newest changes), `orphans` (ids of text pages that no page links to and that link to no page: they need links), `graph` (nodes and edges of the [[links]] between pages) and `know` (the notes on the Things you should know page and how many a person has not read yet). Use it before you write a page, to find where it belongs and to link it with [[Title]] or [[a_ID]] instead of making a duplicate. A page marked `locked` was locked by a person: you may only comment on it.'.$mine.$data.' Changes nothing.','inputSchema'=>['type'=>'object','properties'=>['scope'=>$scope]]] + self::readOnly(true),
+            ['name'=>'aicli_wiki_index','description'=>'Read-only. The wiki view of your notebook: `home` (the id of the wiki home page, or null), `tree` (the wiki pages as a tree built from their [[links]]: nested nodes with id, title, type, updatedAt and children; the roots are the home page, then each page that no wiki page links to), `unlinked` (wiki pages that are not in the tree: no link in and no link out to a wiki page; they need links), `pages` (a flat list of every wiki page: id, title, type, updatedAt, tags, flags). Make a wiki page with the tag `wiki`, and link it from its parent page with [[Parent page title]] style links in the parent\'s text. Do not use `section:` tags. `recent` (the 20 newest changes), `graph` (nodes and edges of the [[links]] between pages) and `know` (the notes on the Things you should know page and how many a person has not read yet). Use it before you write a page, to find where it belongs and to link it with [[Title]] or [[a_ID]] instead of making a duplicate. A page marked `locked` was locked by a person: you may only comment on it.'.$mine.$data.' Changes nothing.','inputSchema'=>['type'=>'object','properties'=>['scope'=>$scope]]] + self::readOnly(true),
             ['name'=>'aicli_journal_artefact','description'=>'Tier 2 (change). Add one dated line to the notebook page Agent journal (area working): `text` says what you did and why, in one or two short sentences, for example "Moved the login test to the working area because the plan changed". The line is stored as `- <date time> - <your name>: <text>`. At most 500 characters. Use it for short "what I did and why" entries; never put a password, token, key or other secret in it, and do not paste long output. It is REFUSED with a plain sentence when a person has not switched the agent journal on (Settings > Notebook), so a refusal is normal: do not try again and do not work around it. The page keeps the newest 500 lines; older lines move to the archive and are never deleted.'.$mine.' Recorded in the Activity tray.','inputSchema'=>['type'=>'object','properties'=>['text'=>$str,'scope'=>$scope],'required'=>['text']]] + self::readOnly(false),
             ['name'=>'aicli_purge_artefact','description'=>'Tier 3 (destructive proposal, does NOT remove anything itself). Asks a person to approve removing the artefact FILE for good, in the Manager UI Activity tray. It is the only way a notebook file is removed. Prefer aicli_archive_artefact; propose a purge only when a person asked for the file to be gone. Returns an opId and a plain description. Nothing is removed unless and until a person approves; you cannot approve your own proposal and must not poll for it.'.$mine,'inputSchema'=>['type'=>'object','properties'=>['id'=>$str,'scope'=>$scope],'required'=>['id']]] + self::readOnly(false),
         ];
@@ -887,12 +887,211 @@ class AdminMcpTools {
     }
 
     /**
+     * Every Tier 2 change tool that has a phrase for the Activity tray. A tool
+     * that is not in this list falls back to "Changed something in the plugin",
+     * and AdminToolsTest fails: a tool name never reaches the tray (ACTIVITY_TRAY_PLAIN_NOTICES.md R1).
+     */
+    public const AUDIT_TOOLS = [
+        'create_artefact', 'update_artefact', 'move_artefact', 'pin_artefact', 'archive_artefact',
+        'restore_artefact', 'comment_artefact', 'journal_artefact', 'share_artefact', 'set_artefact_secret',
+        'speak', 'preview_voice', 'send_input',
+        'create_workspace', 'update_workspace', 'set_workspace_args', 'set_workspace_env',
+        'set_auto_launch', 'set_agent_channel', 'check_updates', 'set_setting',
+        'mark_voicemail_heard', 'add_favourite', 'remove_favourite', 'persist_home',
+        'set_scheduled_continue', 'clear_scheduled_continue', 'propose_autocontinue_pattern',
+    ];
+
+    /** Past participle for a Notebook change, used when a burst of the same change is counted ("3 Notebook pages updated"). */
+    private const AUDIT_PAGE_PARTICIPLES = [
+        'create_artefact' => 'created', 'update_artefact' => 'updated', 'move_artefact' => 'moved',
+        'pin_artefact' => 'pinned', 'archive_artefact' => 'archived', 'restore_artefact' => 'restored',
+        'share_artefact' => 'shared',
+    ];
+
+    /** Plain names for the settings an agent may change. A key not listed here is shown as its own words. */
+    private const AUDIT_SETTING_LABELS = [
+        'theme' => 'Theme', 'font_size' => 'Font size', 'debug_logging' => 'Debug logging',
+        'debug_log_format' => 'Debug log format', 'voice_enabled' => 'Voice', 'tts_voice' => 'Voice',
+        'tts_speed' => 'Voice speed', 'stt_model' => 'Transcription model', 'stt_language' => 'Transcription language',
+        'voicemail_max_per_workspace' => 'Voice mail kept per workspace', 'voicemail_max_age_days' => 'Voice mail keep time',
+        'backup_target' => 'Backup folder', 'backup_quiesce' => 'Backup mode', 'backup_keep' => 'Backups kept',
+        'backup_schedule' => 'Backup schedule', 'backup_excludes' => 'Backup exclusions',
+        'backup_nudge_working' => 'Continue after backup', 'upload_max_bytes' => 'Upload size limit',
+    ];
+
+    /** One line of text, whitespace collapsed, cut at $max characters with an ellipsis. */
+    private static function auditClip(string $text, int $max): string {
+        $text = trim((string)preg_replace('/\s+/', ' ', $text));
+        $len = function_exists('mb_strlen') ? mb_strlen($text) : strlen($text);
+        if ($len <= $max) return $text;
+        return (function_exists('mb_substr') ? mb_substr($text, 0, $max) : substr($text, 0, $max)) . '…';
+    }
+
+    /**
+     * Text an agent spoke or typed, made safe for the tray record, the JSON store and the
+     * `aicli_activity` broadcast to every open browser: a token, a password assignment, an
+     * Authorization line or a long key is replaced by the shared RedactionService, and the
+     * rest of the text is kept. The whole text is redacted BEFORE any clipping, so a secret
+     * cut in half by the clip cannot survive. Fail closed: when redaction is unavailable or
+     * throws, no text is shown at all.
+     */
+    private static function auditSafeText(string $text): string {
+        if ($text === '') return '';
+        try {
+            if (!class_exists('\\AICliAgents\\Services\\RedactionService')) return '';
+            return RedactionService::redact($text, RedactionService::loadKnownSecrets());
+        } catch (\Throwable $e) {
+            return '';
+        }
+    }
+
+    /** The display name of an agent ("Claude Code"); the id only when the registry does not know it; '' when there is no id. */
+    private static function auditAgentName(string $agentId): string {
+        if ($agentId === '') return '';
+        try {
+            $name = trim((string)(AgentRegistry::getRegistry()[$agentId]['name'] ?? ''));
+            if ($name !== '') return $name;
+        } catch (\Throwable $e) {
+            // fall through to the id
+        }
+        return $agentId;
+    }
+
+    /** The name of a workspace; $idFallback decides whether its id is returned when it has no name. */
+    private static function auditWorkspaceName(string $workspaceId, bool $idFallback = false): string {
+        if ($workspaceId === '') return '';
+        try {
+            foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $w) {
+                if (is_array($w) && (string)($w['id'] ?? '') === $workspaceId) {
+                    $name = trim((string)($w['name'] ?? ''));
+                    if ($name !== '') return $name;
+                    break;
+                }
+            }
+        } catch (\Throwable $e) {
+            // fall through
+        }
+        return $idFallback ? $workspaceId : '';
+    }
+
+    /**
+     * The title and the grey line of a tray record for one change tool
+     * (ACTIVITY_TRAY_PLAIN_NOTICES.md R1, R2, R7). Returns [title, grey line].
+     * The title names the OBJECT; the grey line says who did it: "by <Agent name> in <workspace name>",
+     * then the detail that helps. No tool name and no id ever appears.
+     *
+     * $info keys (all optional): title (a Notebook page), pages (a burst: list of {title, verb}),
+     * target (workspace name), name (workspace or favourite name), agent (agent display name),
+     * text (spoken or typed text), mode, voice, enabled (bool), channel, setting (label), value, keys,
+     * user, when (a ready date string), repeat.
+     *
+     * @param array<string,mixed> $info
+     * @return array{0:string,1:string}
+     */
+    public static function auditLabel(string $tool, string $agentName, string $workspaceName, array $info = []): array {
+        $key = (string)preg_replace('/^aicli_/', '', $tool);
+        $s = static fn(string $k): string => trim((string)($info[$k] ?? ''));
+        $with = static fn(string $head, string $tail, string $sep): string => $tail !== '' ? $head . $sep . $tail : $head;
+        $extra = [];
+        $page = self::auditClip($s('title'), 50);
+
+        switch ($key) {
+            case 'create_artefact':  $title = $with('Notebook page created', $page, ': '); break;
+            case 'update_artefact':  $title = $with('Notebook page updated', $page, ': '); break;
+            case 'move_artefact':    $title = $with('Notebook page moved', $page, ': '); break;
+            case 'pin_artefact':     $title = $with('Notebook page pinned', $page, ': '); break;
+            case 'archive_artefact': $title = $with('Notebook page archived', $page, ': '); break;
+            case 'restore_artefact': $title = $with('Notebook page restored', $page, ': '); break;
+            case 'share_artefact':   $title = $with('Notebook page shared', $page, ': '); break;
+            case 'comment_artefact': $title = $page !== '' ? "Comment added on: $page" : 'Comment added on a Notebook page'; break;
+            case 'journal_artefact': $title = $page !== '' ? "Journal note added to: $page" : 'Journal note added to the Notebook'; break;
+            case 'set_artefact_secret': $title = $page !== '' ? "Secret changed on: $page" : 'Secret changed on a Notebook page'; break;
+            case 'speak':
+                $said = self::auditClip($s('text'), 40);
+                $title = $said !== '' ? 'Spoke: "' . $said . '"' : 'Spoke';
+                $mode = $s('mode');
+                if ($mode === 'mail') $extra[] = 'as voice mail';
+                elseif ($mode === 'audio') $extra[] = 'audio';
+                break;
+            case 'preview_voice':
+                $title = $with('Voice previewed', $s('voice'), ': ');
+                break;
+            case 'send_input':
+                $title = $s('target') !== '' ? 'Typed into ' . $s('target') : 'Typed into a workspace';
+                $typed = self::auditClip($s('text'), 60);
+                if ($typed !== '') $extra[] = '"' . $typed . '"';
+                break;
+            case 'create_workspace': $title = $with('Workspace created', $s('name'), ': '); break;
+            case 'update_workspace': $title = $with('Workspace changed', $s('name'), ': '); break;
+            case 'set_workspace_args':
+                $title = $with('Launch arguments changed', $s('name'), ' for ');
+                break;
+            case 'set_workspace_env':
+                $title = $with('Environment variables changed', $s('name'), ' for ');
+                if ($s('keys') !== '') $extra[] = $s('keys');
+                break;
+            case 'set_auto_launch':
+                $state = !empty($info['enabled']) ? 'on' : 'off';
+                $title = $s('agent') !== '' ? "Auto-launch turned $state for " . $s('agent') : "Auto-launch turned $state";
+                break;
+            case 'set_agent_channel':
+                $title = $s('agent') !== '' ? 'Release channel for ' . $s('agent') . ($s('channel') !== '' ? ': ' . $s('channel') : '') : 'Release channel changed';
+                break;
+            case 'check_updates': $title = 'Version check started'; break;
+            case 'set_setting':
+                $title = $with('Setting changed', $s('setting'), ': ');
+                if ($s('value') !== '') $title .= ' to ' . $s('value');
+                break;
+            case 'mark_voicemail_heard': $title = 'Voice mail marked heard'; break;
+            case 'add_favourite':    $title = $with('Favourite added', $s('name'), ': '); break;
+            case 'remove_favourite': $title = $with('Favourite removed', $s('name'), ': '); break;
+            case 'persist_home':     $title = $with('Home save requested', $s('user'), ' for '); break;
+            case 'set_scheduled_continue':
+                $title = $s('target') !== '' ? 'Continue scheduled for ' . $s('target') : 'Continue scheduled';
+                if ($s('when') !== '') $title .= ': ' . $s('when');
+                if ($s('repeat') === 'daily') $extra[] = 'repeats every day';
+                elseif ($s('repeat') === 'weekly') $extra[] = 'repeats every week';
+                break;
+            case 'clear_scheduled_continue': $title = $with('Scheduled continue cleared', $s('target'), ' for '); break;
+            case 'propose_autocontinue_pattern': $title = 'Auto-continue pattern proposed'; break;
+            default: $title = 'Changed something in the plugin';
+        }
+
+        // R7: a burst of Notebook changes is counted on the pages, newest first.
+        $pages = is_array($info['pages'] ?? null) ? array_values($info['pages']) : [];
+        if (count($pages) > 1 && strpos($key, '_artefact') !== false) {
+            $n = count($pages);
+            $verbs = array_unique(array_map(static fn($p) => (string)($p['verb'] ?? ''), $pages));
+            $same = count($verbs) === 1 ? (self::AUDIT_PAGE_PARTICIPLES[$verbs[0]] ?? '') : '';
+            $title = $same !== '' ? "$n Notebook pages $same" : "$n changes to Notebook pages";
+            $names = [];
+            foreach ($pages as $p) {
+                $t = self::auditClip((string)($p['title'] ?? ''), 30);
+                if ($t !== '') $names[] = $t;
+            }
+            if ($names !== []) {
+                $shown = array_slice($names, 0, 3);
+                $list = implode(', ', $shown);
+                if (count($names) > 3) $list .= ' and ' . (count($names) - 3) . ' more';
+                $extra[] = $list;
+            }
+        }
+
+        $by = 'by ' . ($agentName !== '' ? $agentName : 'an unknown agent');
+        if ($workspaceName !== '') $by .= ' in ' . $workspaceName;
+        return [$title, implode(' · ', array_merge([$by], $extra))];
+    }
+
+    /**
      * Tier 2 audit (non-negotiable #6, PLUGIN_MANAGEMENT_TOOLS.md "Audit"): record
-     * a successful mutation in the Activity tray, naming the tool and the calling
-     * agent/workspace (AdminService::callerIdentity(), resolved from
+     * a successful mutation in the Activity tray, naming the changed object and the
+     * calling agent/workspace (AdminService::callerIdentity(), resolved from
      * AICLI_SESSION_ID). Reuses ActivityService — the SAME registry the tray,
      * cancel(), and every other in-flight-operation record in this plugin already
      * uses — never a second, parallel log.
+     *
+     * The row is a RECORD (meta.kind = 'record', ACTIVITY_TRAY_PLAIN_NOTICES.md R3):
+     * the title names the object, the grey line says "by <Agent name> in <workspace name>".
      *
      * Called ONLY when the mutation actually succeeded: a refusal (bad id,
      * disabled feature, failed allow-list check) changed nothing, so there is
@@ -908,52 +1107,130 @@ class AdminMcpTools {
     private static function recordChangeAudit(string $tool, array $result, array $args = []): void {
         try {
             $caller = AdminService::callerIdentity();
-            $who    = $caller['agentId'] !== '' ? $caller['agentId'] : 'unknown agent';
+            $key = (string)preg_replace('/^aicli_/', '', $tool);
+            $agentName = self::auditAgentName($caller['agentId']);
             // #384: name the workspace a person knows (its display name), not only its id.
-            $where  = $caller['name'] !== '' ? $caller['name'] : ($caller['workspaceId'] !== '' ? $caller['workspaceId'] : 'unknown workspace');
-            $label  = "$tool via $who ($where)";
-            // #384: a spoken message shows what was said (first 60 characters) and what
-            // happened to it (mode: played aloud, kept as voice mail, ...).
-            if ($tool === 'aicli_speak') {
-                $said = trim((string)preg_replace('/\s+/', ' ', (string)($args['text'] ?? '')));
-                if ($said !== '') {
-                    $label .= ': "' . (function_exists('mb_substr') ? mb_substr($said, 0, 60) : substr($said, 0, 60)) . (strlen($said) > 60 ? '…' : '') . '"';
-                }
-                $mode = (string)($result['speak']['mode'] ?? '');
-                if ($mode !== '') $label .= " [$mode]";
-            }
-            $meta   = ['tool' => $tool, 'agentId' => $caller['agentId'], 'workspaceId' => $caller['workspaceId']];
+            $where = $caller['name'] !== '' ? $caller['name'] : $caller['workspaceId'];
+            $info = self::auditInfo($key, $result, $args);
+            $meta = ['tool' => $tool, 'agentId' => $caller['agentId'], 'workspaceId' => $caller['workspaceId'],
+                     'kind' => 'record', 'by' => ['agentName' => $agentName, 'workspaceName' => $where]];
             // WORKSPACE_SEND_INPUT.md R5: this tool acts on a DIFFERENT workspace
             // than the caller's own — the Activity entry must name which one was
             // typed into, not just who asked. Generic on purpose: any future tool
             // whose result names a 'workspaceId' target gets the same treatment.
             $target = (string)($result['workspaceId'] ?? '');
             if ($target !== '' && $target !== $caller['workspaceId']) {
-                $label .= " -> $target";
                 $meta['targetWorkspaceId'] = $target;
             }
             $opId = 'admin_' . preg_replace('/[^a-z0-9_]/', '_', $tool) . '_' . bin2hex(random_bytes(4));
             // ARTEFACTS.md "Events and audit": a burst of artefact changes from one
             // caller inside the same 10 seconds is ONE tray line, not one per call.
-            // The entry id is fixed for (caller workspace, 10-second window); a later
+            // The entry id is fixed for (caller workspace, notebook, 10-second window); a later
             // call in the window re-registers it with a count. Never the secret value
-            // or the content: only the tool name and, for a create, the title.
+            // or the content: only the page title.
             if (strpos($tool, '_artefact') !== false) {
-                $title = (string)($result['artefact']['title'] ?? '');
-                if ($title !== '') $label .= ': "' . (function_exists('mb_substr') ? mb_substr($title, 0, 60) : substr($title, 0, 60)) . '"';
-                $opId = 'admin_artefacts_' . preg_replace('/[^a-z0-9]/', '', $caller['workspaceId'] !== '' ? $caller['workspaceId'] : 'none') . '_' . intdiv(time(), 10);
-                $prior = ActivityService::get($opId);
-                $count = 1 + (int)($prior['meta']['count'] ?? 0);
-                $meta['count'] = $count;
-                if ($count > 1) {
-                    $label = "$count Notebook changes via $who ($where), latest: $tool";
+                $artId = (string)($result['artefact']['id'] ?? '');
+                $isGlobal = (string)($args['scope'] ?? ($result['artefact']['scope'] ?? 'notebook')) === 'global';
+                // OPEN NOTE button (NOTEBOOK_REFRESH_REQUEST.md R6): where the note lives and which one.
+                if ($artId !== '' && $caller['workspaceId'] !== '' && !$isGlobal) {
+                    $meta['artefactId'] = $artId;
                 }
+                $wsKey = preg_replace('/[^a-z0-9]/', '', $caller['workspaceId'] !== '' ? $caller['workspaceId'] : 'none');
+                $opId = 'admin_artefacts_' . $wsKey . ($isGlobal ? '_global' : '') . '_' . intdiv(time(), 10);
+                $prior = ActivityService::get($opId);
+                $meta['count'] = 1 + (int)($prior['meta']['count'] ?? 0);
+                // The pages changed in this window, newest first, each page once.
+                $pages = is_array($prior['meta']['pages'] ?? null) ? $prior['meta']['pages'] : [];
+                if ($artId !== '') {
+                    $pages = array_values(array_filter($pages, static fn($p) => (string)($p['id'] ?? '') !== $artId));
+                }
+                array_unshift($pages, ['id' => $artId, 'title' => (string)($info['title'] ?? ''), 'verb' => $key]);
+                $meta['pages'] = array_slice($pages, 0, 20);
+                $info['pages'] = $meta['pages'];
             }
-            ActivityService::register($opId, 'admin', $label, ['meta' => $meta]);
-            ActivityService::finish($opId, 'Applied');
+            [$title, $detail] = self::auditLabel($tool, $agentName, $where, $info);
+            ActivityService::register($opId, 'admin', $title, ['meta' => $meta]);
+            ActivityService::finish($opId, $detail);
         } catch (\Throwable $e) {
             // Swallowed on purpose — see doc comment above.
         }
+    }
+
+    /**
+     * What a tray record says about the object of one change: names and short values read from the
+     * arguments and the result. A secret value is never copied (an env value, a Notebook secret).
+     *
+     * @param array<string,mixed> $result
+     * @param array<string,mixed> $args
+     * @return array<string,mixed>
+     */
+    private static function auditInfo(string $key, array $result, array $args): array {
+        $info = [];
+        $str = static fn($v): string => is_scalar($v) ? trim((string)$v) : '';
+        switch ($key) {
+            case 'speak':
+                $info['text'] = self::auditSafeText($str($args['text'] ?? ''));
+                $info['mode'] = $str($result['speak']['mode'] ?? '');
+                break;
+            case 'preview_voice':
+                $info['voice'] = $str($args['voice'] ?? '');
+                break;
+            case 'send_input':
+                $info['target'] = self::auditWorkspaceName($str($result['workspaceId'] ?? ($args['workspaceId'] ?? '')));
+                $info['text'] = self::auditSafeText($str($args['text'] ?? ''));
+                break;
+            case 'create_workspace':
+            case 'update_workspace':
+                $info['name'] = $str($result['workspace']['name'] ?? '');
+                break;
+            case 'set_workspace_args':
+                $info['name'] = self::auditWorkspaceName($str($args['id'] ?? ''));
+                break;
+            case 'set_workspace_env':
+                $info['name'] = self::auditWorkspaceName($str($args['id'] ?? ''));
+                $info['keys'] = $str($args['key'] ?? '');
+                break;
+            case 'set_auto_launch':
+                $info['agent'] = self::auditAgentName($str($result['agent']['agentId'] ?? ($args['agentId'] ?? '')));
+                $info['enabled'] = !empty($result['agent']['autoLaunch']);
+                break;
+            case 'set_agent_channel':
+                $info['agent'] = self::auditAgentName($str($result['agent']['agentId'] ?? ($args['agentId'] ?? '')));
+                $info['channel'] = $str($result['agent']['channel'] ?? '');
+                break;
+            case 'set_setting':
+                $settingKey = $str($result['setting']['key'] ?? ($args['key'] ?? ''));
+                $info['setting'] = self::AUDIT_SETTING_LABELS[$settingKey] ?? ucfirst(str_replace('_', ' ', $settingKey));
+                $value = $str($result['setting']['value'] ?? '');
+                if ($value !== '' && strlen($value) <= 24 && !preg_match('/token|secret|password|key|credential/i', $settingKey)) {
+                    $info['value'] = (in_array($settingKey, ['voice_enabled', 'debug_logging', 'backup_nudge_working'], true) && ($value === '0' || $value === '1'))
+                        ? ($value === '1' ? 'on' : 'off') : $value;
+                }
+                break;
+            case 'add_favourite':
+                $info['name'] = $str($result['favourite']['name'] ?? '');
+                break;
+            case 'remove_favourite':
+                $info['name'] = $str($result['favourite']['name'] ?? '');
+                break;
+            case 'persist_home':
+                $info['user'] = $str($result['persist']['user'] ?? ($args['user'] ?? ''));
+                break;
+            case 'set_scheduled_continue':
+                $info['target'] = self::auditWorkspaceName($str($result['schedule']['workspaceId'] ?? ($args['workspaceId'] ?? '')));
+                $at = (int)($result['schedule']['at'] ?? 0);
+                $info['when'] = $at > 0 ? date('D j M, H:i', $at) : '';
+                $info['repeat'] = $str($result['schedule']['repeat'] ?? '');
+                break;
+            case 'clear_scheduled_continue':
+                $info['target'] = self::auditWorkspaceName($str($result['schedule']['workspaceId'] ?? ($args['workspaceId'] ?? '')));
+                break;
+            default:
+                if (strpos($key, '_artefact') !== false) {
+                    $info['title'] = $str($result['artefact']['title'] ?? '');
+                }
+        }
+        return $info;
     }
 
     /** Clamp `limit` into [1, MAX_ACTIVITIES_LIMIT], defaulting when absent/non-numeric. */

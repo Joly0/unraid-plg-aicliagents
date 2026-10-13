@@ -2,7 +2,7 @@
 /**
  * <module_context>
  * Description: Shared JavaScript logging + AJAX helpers for AICliAgents.
- * Dependencies: AICliAjax.php?action=log.
+ * Dependencies: AICliAjax.php?action=log, $config (the page's settings; perf_trace sets window.AICLI_PERF_TRACE).
  * Constraints: Atomic UI fragment (< 130 lines). aicliAjax() is the canonical
  * jQuery AJAX wrapper (R-06): it stamps every call with an X-Aicli-Trace id so
  * server/shell log lines are grep-joinable per request. PLUGIN_EVENT_LEDGER_
@@ -16,6 +16,9 @@
  */
 ?>
 <script>
+// NOTEBOOK_HANG_OBSERVABILITY.md R12: the browser counter summaries are written to the server log only
+// while the setting perf_trace is on (Debug Console tab). Read when the page loads.
+window.AICLI_PERF_TRACE = <?= (((string)(($config['perf_trace'] ?? '0'))) === '1') ? 'true' : 'false' ?>;
 // R-06 trace correlation: 4-hex per-page-load prefix + 4-hex per-call suffix
 // = an 8-char [a-z0-9] id the server adopts verbatim (validated server-side).
 // The shared prefix groups all calls from one page visit; the suffix separates

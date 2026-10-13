@@ -157,8 +157,33 @@ entity_upper_mode() {
     # that did not source it (PHP via `--upper-mode`) gets the same answer.
     local _policy
     _policy="$(_entity_upper_policy)"
-    if [ "$_policy" = "layering" ]; then printf 'zram'; return 0; fi
+    if [ "$_policy" = "layering" ]; then
+        # docs/specs/HOME_UPPER_PLACEMENT_SETTING.md (#456): for a HOME the person
+        # chooses RAM or disk with storage_upper_mode. Disk is refused on removable
+        # flash (wear): there the answer stays zram. Agents keep zram.
+        if [ "${2:-}" = "home" ] && [ "$(_entity_upper_pref)" = "disk" ] \
+           && [ "$(backend_for "${1:-/}")" != "flash" ]; then
+            printf 'disk'; return 0
+        fi
+        printf 'zram'; return 0
+    fi
     if [ "$(backend_for "${1:-/}")" = "flash" ]; then printf 'zram'; else printf 'disk'; fi
+}
+
+# _entity_upper_pref -> 'disk' | 'zram': the storage_upper_mode the person chose
+# for homes ('zram' when absent or anything else). AICLI_STORAGE_UPPER_PREF wins (tests).
+_entity_upper_pref() {
+    local _v
+    if [ -n "${AICLI_STORAGE_UPPER_PREF:-}" ]; then
+        _v="$AICLI_STORAGE_UPPER_PREF"
+    elif declare -f _rp_read_cfg >/dev/null 2>&1; then
+        _v="$(_rp_read_cfg storage_upper_mode 2>/dev/null || true)"
+    else
+        local _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+        _v=""
+        [ -f "$_cfg" ] && _v="$(grep -oP '^storage_upper_mode="?\K[^"]*(?="?$)' "$_cfg" 2>/dev/null | head -1)"
+    fi
+    [ "$_v" = "disk" ] && printf 'disk' || printf 'zram'
 }
 
 # _entity_upper_policy -> the RAW storage_backend_mode ('' when the key is
@@ -734,7 +759,7 @@ if [ "${BASH_SOURCE[0]:-_x}" = "${0:-_y}" ]; then
         # #372: the upper mode for a NEW mount (policy, then device test) —
         # PHP StorageMountService::resolveHomeUpperPath reads it, so PHP and
         # bash decide the mode in one place.
-        entity_upper_mode "${2:-/}"
+        entity_upper_mode "${2:-/}" "${3:-}"
         printf '\n'
     else
         backend_for "${1:-/}"

@@ -59,6 +59,32 @@ class ProcessManager {
     /** @var (callable(int):?string)|null Bug #141 test seam — overrides resolveOwningSessionId. */
     public static $owningSessionProbe = null;
 
+    /** @var (callable(int):?array{exe:string,sid:int})|null Test seam — a pid's executable path and session id (system-service exemption). */
+    public static $processIdentityProbe = null;
+
+    /**
+     * Where the operating system's own programs live. A process that daemonised
+     * (it leads its own process session) AND runs one of these is a system
+     * service, never an agent child — even when its environment still carries a
+     * workspace's AICLI_SESSION_ID because an agent's shell started it.
+     * 2026-10-07 on the test server: the host syslog daemon had been restarted
+     * from a workspace shell five days earlier; closing that workspace reaped it,
+     * and the box ran without syslog for three hours
+     * (docs/specs/AGENT_UPGRADE_ORPHAN_REAP.md, "System services are left alone").
+     */
+    public const SYSTEM_PROGRAM_ROOTS = ['/usr/sbin/', '/sbin/', '/usr/local/sbin/', '/usr/bin/', '/bin/', '/usr/local/bin/'];
+
+    /**
+     * Programs that only RUN something else. A shell or interpreter that leads
+     * its own session is a workspace wrapper (`aicli-run-<sid>.sh`, a detached
+     * node or python helper), never a service in its own right, so it is reaped.
+     * The first release of the exemption (v2026.10.07.01) spared six `/bin/bash`
+     * wrappers of closed test workspaces; this list is the correction.
+     */
+    public const INTERPRETER_NAMES = ['bash', 'sh', 'dash', 'zsh', 'ksh', 'fish', 'busybox', 'env', 'nohup', 'setsid', 'timeout',
+        'runuser', 'su', 'sudo', 'script', 'expect', 'node', 'nodejs', 'bun', 'deno', 'python', 'python3', 'perl', 'php', 'ruby',
+        'tmux', 'screen', 'ttyd', 'npm', 'npx', 'pnpm', 'yarn', 'uv', 'uvx'];
+
     /** @var (callable(string):string)|null #142 test seam — overrides sessionLaunchGeneration. */
     public static $sessionGenerationProbe = null;
 
@@ -135,6 +161,7 @@ class ProcessManager {
         self::$tmuxServerProbe = null;
         self::$processInfoProbe = null;
         self::$owningSessionProbe = null;
+        self::$processIdentityProbe = null;
         self::$sessionGenerationProbe = null;
         self::$bridgeRestartProbe = null;
         self::$tmuxSessionListProbe = null;
@@ -407,6 +434,44 @@ class ProcessManager {
      * or a genuinely detached child) — callers then fall back to the env match,
      * preserving the original reap behaviour for those.
      */
+    /** Executable path and process-session id of a pid, or null when it is gone. */
+    private static function processIdentity(int $pid): ?array {
+        if (is_callable(self::$processIdentityProbe)) {
+            $v = call_user_func(self::$processIdentityProbe, $pid);
+            return is_array($v) && isset($v['exe'], $v['sid']) ? ['exe' => (string)$v['exe'], 'sid' => (int)$v['sid']] : null;
+        }
+        $stat = @file_get_contents("/proc/$pid/stat");
+        if (!is_string($stat) || $stat === '') return null;
+        $close = strrpos($stat, ')');
+        if ($close === false) return null;
+        $fields = preg_split('/\s+/', trim(substr($stat, $close + 1)));
+        // after the comm: state(0) ppid(1) pgrp(2) session(3)
+        $sid = isset($fields[3]) ? (int)$fields[3] : 0;
+        $exe = @readlink("/proc/$pid/exe");
+        $exe = is_string($exe) ? preg_replace('/ \(deleted\)$/', '', $exe) : '';
+        return ['exe' => (string)$exe, 'sid' => $sid];
+    }
+
+    /**
+     * The executable of a SYSTEM SERVICE that inherited a workspace environment,
+     * or null when the pid is an ordinary agent child. A service is a process that
+     * leads its own session (it called setsid, as every daemon does) and runs a
+     * program from SYSTEM_PROGRAM_ROOTS. An agent's own binaries live under the
+     * plugin's agent tree or the home, so they never match; a child that did not
+     * daemonise (an MCP server run from /usr/bin/python3) is still reaped.
+     */
+    public static function systemServiceExe(int $pid): ?string {
+        $id = self::processIdentity($pid);
+        if ($id === null || $id['exe'] === '' || $id['sid'] !== $pid) return null;
+        $name = basename($id['exe']);
+        $name = (string)preg_replace('/\d+(\.\d+)*$/', '', $name); // python3.11 -> python
+        if (in_array($name, self::INTERPRETER_NAMES, true)) return null;
+        foreach (self::SYSTEM_PROGRAM_ROOTS as $root) {
+            if (strpos($id['exe'], $root) === 0) return $id['exe'];
+        }
+        return null;
+    }
+
     public static function resolveOwningSessionId(int $pid): ?string {
         if (is_callable(self::$owningSessionProbe)) {
             $v = call_user_func(self::$owningSessionProbe, $pid);
@@ -697,6 +762,9 @@ class ProcessManager {
      *
      * @return array<int,int> PIDs signalled (unique, in discovery order).
      */
+    /** @var array<int,bool> pids already reported as spared system services (one log line each per request). */
+    private static array $sparedServices = [];
+
     public static function terminateSessionDescendants(string $sessionId): array
     {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $sessionId);
@@ -739,6 +807,16 @@ class ProcessManager {
                 $discover(),
                 static function (int $pid) use ($safeId): bool {
                     if (self::isTmuxServerProcess($pid)) return false;
+                    // A daemon an agent started (the host syslog daemon, a docker
+                    // helper) is not ours to stop: leave it, and say so once.
+                    $service = self::systemServiceExe($pid);
+                    if ($service !== null) {
+                        if (empty(self::$sparedServices[$pid])) {
+                            self::$sparedServices[$pid] = true;
+                            LogService::log("terminateSessionDescendants: left alone pid $pid ($service) — a system service that inherited the workspace environment of $safeId, not an agent child", LogService::LOG_WARN, "ProcessManager");
+                        }
+                        return false;
+                    }
                     $owner = self::resolveOwningSessionId($pid);
                     return $owner === null || $owner === $safeId;
                 }

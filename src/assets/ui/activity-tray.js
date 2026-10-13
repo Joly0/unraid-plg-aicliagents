@@ -32,8 +32,16 @@
         mounting_home_queued: 'Mounting home storage (queued)',
         launching_ttyd: 'Starting terminal server',
         starting_agent: 'Launching agent',
-        retrying: 'Retrying…'
+        retrying: 'Retrying…',
+        // ACTIVITY_TRAY_PLAIN_NOTICES.md R8: raw step words are never shown.
+        queued: 'Queued',
+        running: 'Running',
+        done: '',
+        completed: ''
     };
+
+    // R2: a grey line that only repeats the pill (or says the work is done) is not drawn.
+    var REPEATS_PILL = { done: 1, applied: 1, sent: 1, completed: 1, dropped: 1 };
 
     function csrf() {
         if (window.csrf_token) return window.csrf_token;
@@ -52,8 +60,55 @@
     }
 
     function stepText(entry) {
-        var s = entry.step || '';
-        return STEP_LABELS[s] || s;
+        var s = String(entry.step || '').trim();
+        var low = s.toLowerCase();
+        return Object.prototype.hasOwnProperty.call(STEP_LABELS, low) ? STEP_LABELS[low] : s;
+    }
+
+    // The word the pill shows for an entry (same rule _row() draws).
+    function pillWord(a) {
+        if (a.status === 'pending_approval') return 'needs approval';
+        if (a.status === 'relay_waiting') return 'waiting';
+        return (a.meta && a.meta.chip) ? a.meta.chip : String(a.status || '');
+    }
+
+    // R5: a FAILED row with a recovery sentence (anything but the hook word `retry`) shows it as the grey line.
+    function recoveryText(a) {
+        var r = a.recovery;
+        return (a.status === 'failed' && typeof r === 'string' && r.trim() !== '' && r.trim().toLowerCase() !== 'retry') ? r.trim() : '';
+    }
+
+    // R2/R5/R8: the grey line of a row, or '' when nothing is drawn.
+    function greyLine(a) {
+        var t = recoveryText(a) || stepText(a);
+        if (!t) return '';
+        var n = t.toLowerCase().replace(/[.!\s]+$/, '');
+        if (n === pillWord(a).toLowerCase() || n === String(a.status || '').toLowerCase() || REPEATS_PILL[n]) return '';
+        return t;
+    }
+
+    // R3: a finished record of a change shows its age where the pill would be.
+    function isRecord(a) {
+        return !!(a.meta && a.meta.kind === 'record');
+    }
+    function ageText(a, nowS) {
+        var t = parseInt(a.heartbeatAt, 10) || parseInt(a.startedAt, 10) || nowS;
+        var d = Math.max(0, nowS - t);
+        if (d < 60) return 'just now';
+        if (d < 3600) return Math.floor(d / 60) + ' min ago';
+        if (d < 86400) return Math.floor(d / 3600) + ' h ago';
+        return Math.floor(d / 86400) + ' d ago';
+    }
+
+    // R3/R9: Cancel only where it stops a live worker. A record never has one; a row
+    // whose Cancel only flips the row (meta.cancel === 'none') has none either.
+    function showsCancel(a) {
+        return !!ACTIVE[a.status] && !isRecord(a) && !(a.meta && a.meta.cancel === 'none');
+    }
+
+    // R6: the full sentence under a proposal's title; an older proposal has only the label.
+    function statementText(a) {
+        return (a.meta && typeof a.meta.statement === 'string' && a.meta.statement.trim() !== '') ? a.meta.statement : (a.label || '');
     }
 
     function esc(s) {
@@ -112,7 +167,9 @@
         + '.row { padding: 10px 12px; border-bottom: 1px solid var(--border-color, #3a3a3a); }'
         + '.row:last-child { border-bottom: none; }'
         + '.row .top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }'
-        + '.row .label { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }'
+        // R1: the title wraps to two lines; the full text stays in the tooltip.
+        + '.row .label { font-weight: 700; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;'
+        + '  -webkit-line-clamp: 2; line-clamp: 2; word-break: break-word; min-width: 0; }'
         + '.row .status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;'
         + '  padding: 1px 7px; border-radius: 9px; flex-shrink: 0; }'
         // Epic #307: each status label mixes its hue with the theme text colour,
@@ -123,6 +180,10 @@
         + '.status.waiting { background: rgba(91,155,213,0.18); color: color-mix(in srgb, #5b9bd5 50%, var(--text-color, #e0e0e0)); }'
         + '.status.failed  { background: rgba(217,83,79,0.18); color: color-mix(in srgb, #d9534f 60%, var(--text-color, #e0e0e0)); }'
         + '.status.done    { background: rgba(0,128,64,0.2); color: color-mix(in srgb, #4caf50 50%, var(--text-color, #e0e0e0)); }'
+        // R3: a finished record shows its age as plain small text, not a state pill.
+        + '.status.age { background: transparent; text-transform: none; letter-spacing: 0; font-size: 11px; opacity: 0.7; padding: 1px 0; }'
+        // An approved proposal is being carried out: a calmer purple than the "needs you" pill.
+        + '.status.approved { background: rgba(155,89,182,0.12); color: color-mix(in srgb, #9b59b6 70%, var(--text-color, #e0e0e0)); }'
         // pending_approval: Tier 3 (PLUGIN_MANAGEMENT_TOOLS.md "Phase 3 as built",
         // 2026-09-09) — a tool validated a destructive request and is waiting for a
         // human, not a worker. Distinct purple so it reads as "needs YOUR action",
@@ -141,7 +202,7 @@
         // operator overruling a safety check, so it is amber, not the calm teal of
         // the "go and look" step that precedes it.
         + '.btn.force { border-color: #e68a00; color: #e68a00; font-weight: 700; }'
-        + '.row .step { margin-top: 4px; font-family: monospace; font-size: 11px; opacity: 0.65; }'
+        + '.row .step { margin-top: 4px; font-size: 11px; opacity: 0.65; word-break: break-word; }'
         + '.row .err { margin-top: 4px; font-size: 11px; color: #d9534f; word-break: break-word; }'
         + '.row .consequence { margin-top: 4px; font-size: 11px; opacity: 0.85; word-break: break-word; }'
         + '.btn.approve { border-color: #9b59b6; color: #9b59b6; font-weight: 700; }'
@@ -258,6 +319,12 @@
             // in the row. The tray used to throw this reply away, so a refused
             // delivery looked exactly like a successful one.
             this._relayNote = {};
+            // opId -> {count, at} of the newest relay message the tray has seen for that
+            // row. A message that is newer than this resets the arming and the note, so
+            // Force inject is never offered for a message the person has not looked at.
+            this._relaySeen = {};
+            this._connected = false;
+            this._offActivity = null;
             this._open = false;
             this._es = null;
             this._esBroken = false;
@@ -268,11 +335,17 @@
             this._snapshotTs = 0;
             this._onLocal = this._onLocal.bind(this);
             this._onVisibility = this._onVisibility.bind(this);
+            this._onReconcile = this._onReconcile.bind(this);
+            this._onEventStatus = this._onEventStatus.bind(this);
             this.attachShadow({ mode: 'open' });
         }
 
         connectedCallback() {
             var self = this;
+            this._connected = true;
+            // A tray that is removed and attached again starts from an empty shadow
+            // root, so it never holds two styles or two panels.
+            while (this.shadowRoot.firstChild) this.shadowRoot.removeChild(this.shadowRoot.firstChild);
             var style = document.createElement('style');
             style.textContent = TRAY_CSS;
             this.shadowRoot.appendChild(style);
@@ -297,13 +370,18 @@
             // the initial list_activities read has landed (success or failure),
             // so _snapshotTs already holds a real value before the first message
             // can arrive.
-            this._poll(function () { self._subscribe(); });
+            this._poll(function () { if (self._connected) self._subscribe(); });
             this._schedulePoll();
             this._render();
         }
 
         disconnectedCallback() {
+            // After this point no timer, poll reply or pushed entry may draw or re-arm anything.
+            this._connected = false;
             window.removeEventListener('aicli-activity-local', this._onLocal);
+            window.removeEventListener('aicli-reconcile', this._onReconcile);
+            window.removeEventListener('aicli-event-status', this._onEventStatus);
+            if (this._offActivity) { try { this._offActivity(); } catch (e) { /* noop */ } this._offActivity = null; }
             if (this._onResize) {
                 window.removeEventListener('resize', this._onResize);
                 window.removeEventListener('aicli-tray-layout', this._onResize);
@@ -311,7 +389,24 @@
             }
             document.removeEventListener('visibilitychange', this._onVisibility);
             if (this._es) { try { this._es.close(); } catch (e) { /* noop */ } this._es = null; }
-            if (this._pollTimer) clearTimeout(this._pollTimer);
+            if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+            if (this._ageTimer) { clearTimeout(this._ageTimer); this._ageTimer = null; }
+            if (this._gotoTimers) {
+                for (var k in this._gotoTimers) { clearTimeout(this._gotoTimers[k]); }
+                this._gotoTimers = {};
+            }
+        }
+
+        // D4 (EVENT_ARCHITECTURE_REVIEW.md): one reconcile read on every (re)connect of the
+        // page's stream. Named methods, so disconnectedCallback can remove them.
+        _onReconcile() {
+            if (this._connected) this._poll();
+        }
+
+        _onEventStatus(e) {
+            var status = e && e.detail && e.detail.status;
+            // Broken or absent stream -> the fallback poll tightens to 5 s.
+            this._esBroken = (status === 'broken' || status === 'unsupported');
         }
 
         // R6: a tab that comes back to the foreground gets one immediate
@@ -384,15 +479,12 @@
             // of its own when that script is on the page.
             if (window.aicliEvents && typeof window.aicliEvents.on === 'function') {
                 this._esBroken = (window.aicliEvents.status === 'broken' || window.aicliEvents.status === 'unsupported');
-                window.aicliEvents.on('activity', function (evt) { apply(evt.data); });
+                if (this._offActivity) { try { this._offActivity(); } catch (e) { /* noop */ } }
+                this._offActivity = window.aicliEvents.on('activity', function (evt) { if (self._connected) apply(evt.data); });
                 // D4 (EVENT_ARCHITECTURE_REVIEW.md): one reconcile read on every
                 // (re)connect closes the gap the Nchan buffer cannot replay.
-                window.addEventListener('aicli-reconcile', function () { self._poll(); });
-                window.addEventListener('aicli-event-status', function (e) {
-                    var status = e && e.detail && e.detail.status;
-                    // Broken or absent stream -> the fallback poll tightens to 5 s.
-                    self._esBroken = (status === 'broken' || status === 'unsupported');
-                });
+                window.addEventListener('aicli-reconcile', this._onReconcile);
+                window.addEventListener('aicli-event-status', this._onEventStatus);
                 return;
             }
             // Fallback: a page shell without aicli-events.js (an older page
@@ -418,10 +510,35 @@
             }
         }
 
+        // A held Relay message is the unit the person looked at before Force inject. When a
+        // newer message arrives for the same row (a bigger count, or a later arrival time),
+        // the "I have looked" arming and the "Injected" note belong to the old message and go.
+        _relayTrack(a) {
+            var at = '';
+            if (a.meta && Array.isArray(a.meta.senders)) {
+                a.meta.senders.forEach(function (s) { var x = String((s && s.at) || ''); if (x > at) at = x; });
+            }
+            var sig = { count: parseInt(a.count, 10) || 0, at: at };
+            var prev = this._relaySeen[a.opId];
+            if (prev && (sig.count > prev.count || sig.at > prev.at)) {
+                delete this._relayArmed[a.opId];
+                delete this._relayNote[a.opId];
+            }
+            this._relaySeen[a.opId] = sig;
+        }
+
+        _relayForget(opId) {
+            delete this._relayArmed[opId];
+            delete this._relayNote[opId];
+            delete this._relaySeen[opId];
+        }
+
         _merge(entry) {
             if (entry.dismissed) {
                 this._activities = this._activities.filter(function (a) { return a.opId !== entry.opId; });
+                this._relayForget(entry.opId);
             } else {
+                if (entry.status === 'relay_waiting') this._relayTrack(entry);
                 var found = false;
                 this._activities = this._activities.map(function (a) {
                     if (a.opId === entry.opId) { found = true; return entry; }
@@ -441,9 +558,12 @@
          */
         _poll(onDone) {
             var self = this;
+            // A tray that is not in the page asks the server for nothing.
+            if (!this._connected) return;
             fetch(ajaxUrl('list_activities'))
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
+                    if (!self._connected) return;
                     if (data && data.status === 'ok' && Array.isArray(data.activities)) {
                         // R4/R5: the read's own `ts` (server epoch ms) becomes the new
                         // reconcile snapshot time; a payload with no `ts` (an older
@@ -452,6 +572,13 @@
                         self._activities = data.activities;
                         // Drop local placeholders the server now knows about.
                         data.activities.forEach(function (a) { delete self._local[a.opId]; });
+                        // A relay row that is gone from the read has drained: forget it.
+                        // One that is still there may hold a newer message.
+                        var live = {};
+                        data.activities.forEach(function (a) {
+                            if (a.status === 'relay_waiting') { live[a.opId] = 1; self._relayTrack(a); }
+                        });
+                        Object.keys(self._relaySeen).forEach(function (k) { if (!live[k]) self._relayForget(k); });
                         self._emit();
                         self._render();
                     }
@@ -468,6 +595,7 @@
             // entry can no longer hide out on the idle cadence), 60 s idle.
             var interval = this._esBroken ? 5000 : (_needsFastPoll(this._all()) ? 30000 : 60000);
             this._pollTimer = setTimeout(function () {
+                if (!self._connected) return;
                 self._poll();
                 self._schedulePoll();
             }, interval);
@@ -506,26 +634,52 @@
                 this._render();
                 return;
             }
+            // A reply that is not OK must show in the row. The person pressed a button
+            // (often Approve on a destructive change) and has to know what happened.
+            var isDeliver = action === 'deliver_relay_waiting';
+            var showFailure = function (res, unreadable) {
+                if (unreadable) {
+                    self._relayNote[opId] = isDeliver
+                        ? 'Could not reach the server — nothing was injected.'
+                        : 'Could not reach the server.';
+                } else {
+                    var m = (res && typeof res.message === 'string') ? res.message.trim() : '';
+                    self._relayNote[opId] = m || (isDeliver ? 'Nothing was injected.' : 'The server did not accept this.');
+                }
+                self._render();
+                self._poll();
+            };
             fetch(ajaxUrl(action, { opId: opId }))
-                .then(function (r) { return r.json(); })
-                .then(function (res) {
+                .then(function (r) {
+                    // A login page or a proxy error page is not JSON: treat it as no answer.
+                    return Promise.resolve().then(function () { return r.json(); }).then(
+                        function (res) { return { res: res }; },
+                        function () { return { res: undefined }; }
+                    );
+                })
+                .then(function (box) {
+                    var res = box.res;
+                    var readable = !!res && typeof res === 'object';
+                    if (!readable) { showFailure(null, true); return; }
+                    if (res.status === 'error') { showFailure(res, false); return; }
                     // A forced injection is the one action whose ANSWER matters to
                     // the operator: the queue may have drained itself, or the pane
                     // may hold no live agent at all. Show what happened in the row
                     // instead of leaving an unchanged pill to be read as failure.
-                    if (action === 'deliver_relay_waiting' && res) {
+                    if (isDeliver) {
                         self._relayNote[opId] = res.delivered
                             ? 'Injected into the session.'
                             : (res.message || 'Nothing was injected.');
+                    } else {
+                        delete self._relayNote[opId];
                     }
+                    // Draw the new note (or the cleared one) now. The list read below
+                    // draws again when it lands, but it may be slow or may fail.
+                    self._render();
                     self._poll();
                 })
                 .catch(function () {
-                    if (action === 'deliver_relay_waiting') {
-                        self._relayNote[opId] = 'Could not reach the server — nothing was injected.';
-                        self._render();
-                    }
-                    /* next poll re-syncs */
+                    showFailure(null, true);
                 });
         }
 
@@ -536,14 +690,14 @@
          * the same hash. `#aicliagents-root` exists only on the tab itself, which
          * is what tells the two pages apart.
          */
-        _gotoWorkspace(sessionId) {
+        _gotoWorkspace(sessionId, noteId) {
             // Returns '' when the route was started, or a short sentence the row
             // shows when it cannot be (#431: a silent no-op looked like a broken
             // button). Same id shape as ui-build/src/lib/workspaceRoute.ts.
             if (!sessionId || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) {
                 return 'This notice does not name a workspace, so nothing was opened.';
             }
-            var hash = '#aicli-workspace=' + encodeURIComponent(sessionId);
+            var hash = '#aicli-workspace=' + encodeURIComponent(sessionId) + (noteId && /^[A-Za-z0-9_-]{1,128}$/.test(noteId) ? '&note=' + encodeURIComponent(noteId) : '');
             if (document.getElementById('aicliagents-root')) {
                 // Same page: assigning an unchanged hash fires no hashchange, so
                 // clear it first — the operator may be returning to the same
@@ -572,6 +726,9 @@
 
         _render() {
             var self = this;
+            // A tray that is not in the page draws nothing and arms no timer.
+            if (!this._connected || !this._root) return;
+            if (this._ageTimer) { clearTimeout(this._ageTimer); this._ageTimer = null; }
             // relay_waiting entries a Dismiss click suppressed are filtered out
             // here — NOT deleted anywhere — so a new arrival (count grows past
             // what was dismissed) makes the pill reappear on its own (spec Edge
@@ -579,6 +736,7 @@
             var nowS = Math.floor(Date.now() / 1000);
             var all = this._all().filter(function (a) {
                 if (a.type === 'start' && !startRowVisible(a, nowS)) return false;
+                if (self._opened && self._opened[a.opId]) return false;
                 if (a.status !== 'relay_waiting') return true;
                 var dismissedAt = self._relayDismissed[a.opId];
                 return dismissedAt === undefined || (a.count || 0) > dismissedAt;
@@ -589,10 +747,13 @@
             var waiting = all.filter(function (a) { return a.status === 'waiting'; }).length;
             var pending = all.filter(function (a) { return a.status === 'pending_approval'; }).length;
             var relayWaiting = all.filter(function (a) { return a.status === 'relay_waiting'; }).length;
+            // NOTEBOOK_REFRESH_REQUEST.md R6: a note an agent just made or changed is news the person
+            // wants to see, so it is the one `done` entry that may show the pill (it has an Open note button).
+            var notes = all.filter(function (a) { return a.status === 'done' && a.meta && a.meta.artefactId && a.meta.workspaceId; }).length;
 
             // Invisible when idle: transient `done` entries (every successful
             // session start produces one for up to 60 s) must not summon the pill.
-            if (all.length === 0 || (!this._open && running + stalled + failed + waiting + pending + relayWaiting === 0)) {
+            if (all.length === 0 || (!this._open && running + stalled + failed + waiting + pending + relayWaiting + notes === 0)) {
                 this._root.innerHTML = '';
                 return;
             }
@@ -602,6 +763,7 @@
             if (failed > 0) pillText += (pillText ? ', ' : '') + failed + ' failed';
             if (waiting > 0) pillText += (pillText ? ', ' : '') + waiting + ' waiting';
             if (relayWaiting > 0) pillText += (pillText ? ', ' : '') + relayWaiting + ' message' + (relayWaiting > 1 ? 's' : '') + ' waiting';
+            if (notes > 0) pillText += (pillText ? ', ' : '') + notes + ' Notebook update' + (notes > 1 ? 's' : '');
             // pending_approval leads the pill text (before "failed") when present:
             // a proposal sitting unread is the one state that needs a human to act,
             // not just notice.
@@ -624,7 +786,7 @@
                 html += '</div>';
             }
             var fullText = pillText || all.length + ' item' + (all.length > 1 ? 's' : '');
-            var shortText = _pillShortText({ running: running, stalled: stalled, failed: failed, waiting: waiting, pending: pending, relay: relayWaiting }, all.length);
+            var shortText = _pillShortText({ running: running, stalled: stalled, failed: failed, waiting: waiting + notes, pending: pending, relay: relayWaiting }, all.length);
             html += '<button type="button" class="pill" data-act="toggle" aria-expanded="' + (this._open ? 'true' : 'false') + '"'
                 + ' aria-label="Activity: ' + esc(fullText) + '" title="' + esc(fullText) + '">'
                 + '<span class="' + dotClass + '" aria-hidden="true"></span>'
@@ -633,6 +795,11 @@
 
             this._root.classList.toggle('open', !!this._open);
             this._root.innerHTML = html;
+            // R3: the age of a finished record ("just now", "4 min ago") is worked out on each
+            // draw, so an open panel redraws every 30 s while it shows one.
+            if (this._open && all.some(function (a) { return isRecord(a) && a.status === 'done'; })) {
+                this._ageTimer = setTimeout(function () { self._render(); }, 30000);
+            }
             this._positionAboveFooter();   // re-measure: footer height varies by viewport/version
 
             this._root.querySelectorAll('[data-act]').forEach(function (el) {
@@ -659,6 +826,20 @@
                     // "Look, then force": the first click never touches the pane. It
                     // takes the operator to the workspace the message is waiting for,
                     // and only then does the button become Force inject.
+                    // NOTEBOOK_REFRESH_REQUEST.md R6: a Notebook change line leads to the note.
+                    if (act === 'goto_note') {
+                        var nWs = el.getAttribute('data-session') || '';
+                        var nId = el.getAttribute('data-note') || '';
+                        var nWhy = self._gotoWorkspace(nWs, nId);
+                        if (nWhy) { self._relayNote[opId] = nWhy; self._render(); return; }
+                        // The note is on its way to the screen: this line has done its job.
+                        // Dismiss it like the Dismiss button does (a second click on a line that
+                        // is still there looked like a dead button).
+                        (self._opened = self._opened || {})[opId] = true;
+                        self._render();
+                        self._action('dismiss_activity', opId, isLocal);
+                        return;
+                    }
                     if (act === 'goto_relay_workspace') {
                         var sid = el.getAttribute('data-session') || '';
                         var why = self._gotoWorkspace(sid);
@@ -671,7 +852,12 @@
                         self._relayArmed[opId] = true;
                         delete self._relayNote[opId];
                         self._render();
-                        setTimeout(function () {
+                        // The 1.5 s check belongs to this tray: disconnectedCallback clears it, so it can
+                        // never fire after the tray (or the page) is gone.
+                        self._gotoTimers = self._gotoTimers || {};
+                        if (self._gotoTimers[opId]) clearTimeout(self._gotoTimers[opId]);
+                        self._gotoTimers[opId] = setTimeout(function () {
+                            delete self._gotoTimers[opId];
                             if (self._gotoStuck(sid)) {
                                 self._relayNote[opId] = 'The workspace did not open. Reload the page and try again.';
                                 self._render();
@@ -716,6 +902,9 @@
             // the EXISTING drain for that session. Dismiss is local-only (see
             // _render()'s filter) — it never discards the message.
             var relayWaiting = a.status === 'relay_waiting';
+            // An approved proposal is being carried out. The row has no Dismiss and no
+            // Cancel until it ends: a Dismiss now would drop the outcome of the action.
+            var approved = a.status === 'approved';
             var btns = '';
             if (pending) {
                 btns += '<button class="btn approve" data-act="approve_activity" data-opid="' + esc(a.opId) + '">Approve</button>';
@@ -755,10 +944,17 @@
                 btns += '<button class="btn" data-act="dismiss_activity" data-opid="' + esc(a.opId) + '"'
                     + ' title="Hides this notice. The banner on the terminal page stays until the tidy-up is done.">Later</button>';
             }
-            if (active) {
+            // Open note: the workspace that owns the note, and the note id, are in the entry meta.
+            var noteWs = a.meta && a.meta.workspaceId, noteId = a.meta && a.meta.artefactId;
+            if (!active && !pending && noteWs && noteId && /^[A-Za-z0-9_-]{1,128}$/.test(noteWs) && /^[A-Za-z0-9_-]{1,128}$/.test(noteId)) {
+                btns += '<button class="btn deliver" data-act="goto_note" data-opid="' + esc(a.opId) + '"'
+                    + ' data-session="' + esc(noteWs) + '" data-note="' + esc(noteId) + '"'
+                    + ' title="Opens this workspace and shows the note in its Notebook.">Open note</button>';
+            }
+            if (showsCancel(a)) {
                 btns += '<button class="btn" data-act="cancel_activity" data-opid="' + esc(a.opId) + '">Cancel</button>';
             }
-            if (!pending && !relayWaiting && !reclaimAsk && !reclaimTidy && (!active || a.status === 'stalled')) {
+            if (!pending && !approved && !relayWaiting && !reclaimAsk && !reclaimTidy && (!active || a.status === 'stalled')) {
                 btns += '<button class="btn" data-act="dismiss_activity" data-opid="' + esc(a.opId) + '"'
                     + (isLocal ? ' data-local="1"' : '') + '>Dismiss</button>';
             }
@@ -767,20 +963,24 @@
                 btns += '<button class="btn retry" data-act="retry_auto_launch" data-opid="' + esc(a.opId) + '">Retry</button>';
             }
             var pct = Math.max(0, Math.min(100, parseInt(a.progress, 10) || 0));
-            // The pending item's own label IS the full plain-language consequence
-            // (AdminService's validateX() built it; ActivityService::propose() set
-            // it as 'label') — show it in full below the (possibly truncated) title,
-            // never just in the title's hover tooltip, since a human must read this
-            // before clicking Approve.
+            // R3: a finished record shows its age where the pill would be.
+            var record = isRecord(a) && a.status === 'done';
+            var pillHtml = record
+                ? '<span class="status age">' + esc(ageText(a, Math.floor(Date.now() / 1000))) + '</span>'
+                : '<span class="status ' + esc(a.status) + '">' + esc(pillWord(a)) + '</span>';
+            var grey = pending ? '' : greyLine(a);
+            // The pending item's full plain-language consequence (R6: meta.statement when the
+            // title is a short question, else the label itself — an older proposal) is shown in
+            // full below the title, never just in the hover tooltip, since a human must read
+            // this before clicking Approve.
             return '<div class="row">'
                 + '<div class="top"><span class="label" title="' + esc(a.label) + '">' + esc(a.label || a.opId) + '</span>'
-                + '<span class="status ' + esc(a.status) + '">' + esc(a.status === 'pending_approval' ? 'needs approval' : (relayWaiting ? 'waiting' : (a.meta && a.meta.chip ? a.meta.chip : a.status))) + '</span></div>'
-                + (pending && a.label ? '<div class="consequence">' + esc(a.label) + '</div>' : '')
-                // Plain-language reason the notice was held (TmuxService::relayHeldReasonLabel()).
-                + (relayWaiting && a.reason ? '<div class="consequence">Held because ' + esc(a.reason) + '.</div>' : '')
+                + pillHtml + '</div>'
+                + (pending && statementText(a) ? '<div class="consequence">' + esc(statementText(a)) + '</div>' : '')
+                // The grey step line carries "from <sender> · held because <reason>" (R2); no separate reason line.
                 // What the last Force inject actually did — see _action().
-                + (relayWaiting && this._relayNote[a.opId] ? '<div class="consequence">' + esc(this._relayNote[a.opId]) + '</div>' : '')
-                + (a.step && !pending ? '<div class="step">' + esc(stepText(a)) + '</div>' : '')
+                + (this._relayNote[a.opId] ? '<div class="consequence">' + esc(this._relayNote[a.opId]) + '</div>' : '')
+                + (grey ? '<div class="step">' + esc(grey) + '</div>' : '')
                 + (a.error && a.status === 'failed' ? '<div class="err">' + esc(a.error) + '</div>' : '')
                 + (active ? '<div class="bar' + (a.status === 'stalled' ? ' stalled' : '') + '"><div style="width:' + pct + '%"></div></div>' : '')
                 + (btns ? '<div class="btns">' + btns + '</div>' : '')
@@ -790,6 +990,11 @@
 
     // Pure layout helpers, read by ui-build/src/__tests__/activityTrayLayout.test.ts.
     AicliActivityTray.layout = { clearAvoid: _clearAvoid, pillShortText: _pillShortText };
+    // Pure row rules (ACTIVITY_TRAY_PLAIN_NOTICES.md), read by ui-build/src/__tests__/activityTrayRows.test.ts.
+    AicliActivityTray.rules = {
+        stepText: stepText, pillWord: pillWord, greyLine: greyLine, ageText: ageText,
+        isRecord: isRecord, showsCancel: showsCancel, statementText: statementText
+    };
 
     if (!customElements.get('aicli-activity-tray')) {
         customElements.define('aicli-activity-tray', AicliActivityTray);

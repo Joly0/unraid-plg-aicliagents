@@ -123,8 +123,8 @@ class TerminalHandler {
         // acting by itself and already has its own trail.
         if ($source === 'user') {
             $when = date('D j M, H:i', (int)($r['at'] ?? $at));
-            $every = ($r['repeat'] ?? 'none') === 'none' ? '' : ' (repeats ' . (($r['repeat'] ?? '') === 'daily' ? 'every day' : 'every week') . ')';
-            self::recordScheduleActivity((string)$id, "Scheduled Continue set for {$when}{$every}");
+            $every = ($r['repeat'] ?? 'none') === 'none' ? '' : 'repeats ' . (($r['repeat'] ?? '') === 'daily' ? 'every day' : 'every week');
+            self::recordScheduleActivity((string)$id, "Continue scheduled: {$when}", $every);
         }
         return array_merge(['status' => 'ok'], $r);
     }
@@ -132,28 +132,41 @@ class TerminalHandler {
     private static function clearScheduledContinueAction($id): array {
         $r = \AICliAgents\Services\AdminService::clearScheduledContinue((string)$id);
         if (isset($r['error'])) return ['status' => 'error', 'message' => (string)$r['error']];
-        self::recordScheduleActivity((string)$id, 'Scheduled Continue cancelled');
+        self::recordScheduleActivity((string)$id, 'Scheduled continue cleared');
         return array_merge(['status' => 'ok'], $r);
     }
 
     /**
      * Write one finished Activity tray entry for a Scheduled Continue change made
-     * from the Drawer. The label names the workspace the way a person knows it.
+     * from the Drawer. The title says what happened ("Continue scheduled: Tue 13 Oct,
+     * 09:30"); the grey line names the workspace the way a person knows it, then
+     * $extra ("repeats every day"). A record of a change, not a job.
      * Best effort: a tray write must never fail a save that already worked.
-     * Spec: docs/specs/SCHEDULED_CONTINUE.md
+     * Spec: docs/specs/SCHEDULED_CONTINUE.md, docs/specs/ACTIVITY_TRAY_PLAIN_NOTICES.md rows 40-41
      */
-    private static function recordScheduleActivity(string $id, string $what): void {
+    private static function recordScheduleActivity(string $id, string $title, string $extra = ''): void {
         try {
             $name = $id;
             foreach (\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
                 if ((string)($w['id'] ?? '') === $id) { $name = (string)($w['name'] ?? '') !== '' ? (string)$w['name'] : $id; break; }
             }
             $opId = 'schedule_continue_' . preg_replace('/[^a-z0-9_]/i', '_', $id) . '_' . bin2hex(random_bytes(4));
-            \AICliAgents\Services\ActivityService::register($opId, 'admin', "$what — $name", ['meta' => ['tool' => 'schedule_continue', 'workspaceId' => $id]]);
-            \AICliAgents\Services\ActivityService::finish($opId, 'Applied');
+            \AICliAgents\Services\ActivityService::register($opId, 'admin', $title, ['meta' => ['tool' => 'schedule_continue', 'kind' => 'record', 'workspaceId' => $id]]);
+            \AICliAgents\Services\ActivityService::finish($opId, $extra !== '' ? "$name · $extra" : $name);
         } catch (\Throwable $e) {
             // Swallowed on purpose — see doc comment above.
         }
+    }
+
+    /** The agent's display name ("Claude Code"), or its id when the registry has no name. */
+    private static function agentDisplayName(string $agentId): string {
+        try {
+            $name = trim((string)(\AICliAgents\Services\AgentRegistry::getRegistry()[$agentId]['name'] ?? ''));
+            if ($name !== '') return $name;
+        } catch (\Throwable $e) {
+            // Fall through to the id.
+        }
+        return $agentId;
     }
 
     /** tmpfs directory holding one per-session cooldown marker file. */
@@ -434,6 +447,30 @@ class TerminalHandler {
      * be gracefully closed before the upgrade runs, and by the New Workspace
      * overlay / Drawer to mark in-progress-upgrade agents busy.
      */
+    /**
+     * #463 R3: add `busy` (bool) and `busy_reason` to each session record. The Store
+     * reads `busy` to decide which sessions a restart may touch. Any failure to read
+     * the state gives busy=true.
+     *
+     * @param array<int,array<string,mixed>> $sessions
+     * @return array<int,array<string,mixed>>
+     */
+    public static function withBusyFlag(string $agentId, array $sessions): array {
+        foreach ($sessions as $i => $s) {
+            $busy = ['busy' => true, 'reason' => 'unreadable'];
+            try {
+                if (!empty($s['id'])) {
+                    $busy = \AICliAgents\Services\TmuxService::sessionBusy($agentId, (string)$s['id']);
+                }
+            } catch (\Throwable $e) {
+                // keep the safe answer: busy
+            }
+            $sessions[$i]['busy'] = (bool)$busy['busy'];
+            $sessions[$i]['busy_reason'] = (string)$busy['reason'];
+        }
+        return $sessions;
+    }
+
     private static function listSessionsForAgent() {
         $agentId = $_GET['agentId'] ?? '';
         if (empty($agentId)) {
@@ -472,10 +509,28 @@ class TerminalHandler {
                 . "falling back to the cautious flow: " . $e->getMessage(),
                 \AICliAgents\Services\LogService::LOG_WARN, "TerminalHandler");
         }
+        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId);
+        // #463: the display name of each workspace, so the restart dialog names it by
+        // the name the person gave it. '' when it is not known: the page picks a plain
+        // fallback and never prints an id.
+        foreach ($sessions as $i => $sess) {
+            $name = '';
+            try {
+                $name = \AICliAgents\Services\ConfigService::workspaceName((string)($sess['id'] ?? ''));
+            } catch (\Throwable $e) {
+                // keep ''
+            }
+            $sessions[$i]['name'] = $name;
+        }
+        // #463: the busy check reads each pane (up to 0.4 s each), so only the
+        // callers that ask for it with busy=1 pay for it. The install dialog does not.
+        if (($_GET['busy'] ?? '') === '1') {
+            $sessions = self::withBusyFlag($agentId, $sessions);
+        }
         return [
             'status'       => 'ok',
             'agentId'      => $agentId,
-            'sessions'     => \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId),
+            'sessions'     => $sessions,
             'side_by_side' => ($waitReason === null),
             'wait_reason'  => $waitReason,
         ];
@@ -594,7 +649,7 @@ class TerminalHandler {
                 // T-09: surface the wait in the start activity so the cold-start
                 // overlay + tray show "mount queued" instead of a silent spinner.
                 \AICliAgents\Services\ActivityService::update("start_$id", [
-                    'type'  => 'start', 'label' => "Starting $agentId",
+                    'type'  => 'start', 'label' => 'Starting ' . self::agentDisplayName((string)$agentId),
                     'step'  => 'mounting_home_queued', 'progress' => 10,
                     'meta'  => ['sessionId' => $id, 'agentId' => $agentId,
                                 'path' => (string)($workspacePath ?? ''),
@@ -1012,6 +1067,50 @@ class TerminalHandler {
      * with the new args. Used by the "Apply now" button in the workspace args
      * confirmation modal (WP #274).
      */
+    /**
+     * #463 R4: the refusal for agentSignalReload, or null when the reload may go on.
+     * Two refusals, both with no keys sent:
+     *  - an install of the agent of this session runs (an install marker exists):
+     *    status 'busy', reason 'install-running'. Force does not override this.
+     *  - the session is busy (TmuxService::sessionBusy): status 'busy', reason is the
+     *    busy reason. Only force=1 overrides this: the person pressed "Apply now"
+     *    for this one workspace.
+     * The agent id comes from the tmux session name "aicli-agent-<agent>-<session>".
+     *
+     * @return array{status:string,reason:string,message:string}|null
+     */
+    public static function reloadGuard(string $safeId, string $sessName, bool $force): ?array {
+        $agentId = '';
+        $prefix = 'aicli-agent-';
+        $suffix = '-' . $safeId;
+        if (strncmp($sessName, $prefix, strlen($prefix)) === 0
+            && strlen($sessName) > strlen($prefix) + strlen($suffix)
+            && substr($sessName, -strlen($suffix)) === $suffix) {
+            $agentId = substr($sessName, strlen($prefix), strlen($sessName) - strlen($prefix) - strlen($suffix));
+        }
+        if ($agentId !== '') {
+            $handlerFile = __DIR__ . '/AgentHandler.php';
+            if (!class_exists('\\AICliAgents\\Handlers\\AgentHandler', false) && is_file($handlerFile)) {
+                require_once $handlerFile;
+            }
+            if (class_exists('\\AICliAgents\\Handlers\\AgentHandler', false)
+                && \AICliAgents\Handlers\AgentHandler::isInstallInProgress($agentId)) {
+                return ['status' => 'busy', 'reason' => 'install-running',
+                    'message' => 'An install of this agent is running. Try again when it ends.'];
+            }
+        }
+        if ($force) return null;
+        // An unknown agent id cannot be checked: count the session as busy.
+        $busy = ($agentId === '')
+            ? ['busy' => true, 'reason' => 'agent-unknown']
+            : \AICliAgents\Services\TmuxService::sessionBusy($agentId, $safeId);
+        if ($busy['busy']) {
+            return ['status' => 'busy', 'reason' => $busy['reason'],
+                'message' => 'The session is busy, so it was not restarted. Restart it yourself when it is idle.'];
+        }
+        return null;
+    }
+
     private static function agentSignalReload($id) {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
         // Same locate-by-suffix pattern as gracefulClose.
@@ -1021,6 +1120,18 @@ class TerminalHandler {
         if (empty($sessName)) {
             aicli_log("agentSignalReload: no tmux session matching $id", AICLI_LOG_WARN, "TerminalHandler");
             return ['status' => 'error', 'message' => 'No active tmux session for ' . $safeId];
+        }
+
+        // #463 R4/R5: one log line with the caller, then the guards. The caller is
+        // the action name, the page path of the Referer (never its query string,
+        // which holds the CSRF token) and the session id.
+        $force = (($_GET['force'] ?? '') === '1');
+        $page = (string)(parse_url((string)($_SERVER['HTTP_REFERER'] ?? ''), PHP_URL_PATH) ?? '');
+        aicli_log("agentSignalReload: action=agent_signal_reload page=" . ($page !== '' ? $page : '-') . " session=$safeId force=" . ($force ? '1' : '0'), AICLI_LOG_INFO, "TerminalHandler");
+        $guard = self::reloadGuard($safeId, $sessName, $force);
+        if ($guard !== null) {
+            aicli_log("agentSignalReload: refused for $safeId: " . $guard['reason'], AICLI_LOG_INFO, "TerminalHandler");
+            return $guard;
         }
 
         // WP #275: drop an auto-reload sentinel BEFORE the Ctrl-C so aicli-shell.sh
@@ -1151,28 +1262,29 @@ class TerminalHandler {
         // antigravity-cli benefits from the same pane-scrape pipeline as
         // the other agents. The leading flag list is the same shape:
         // {--resume|--conversation|-s} followed by `= ` or whitespace.
-        $regexFull   = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{20,})/';
-        $regexQuoted = '/(?:--resume[= ]|--conversation[= ]|-s\s+)(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\')/';
-        $regexShort  = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{8,})/';
-        for ($attempt = 0; $attempt < 3; $attempt++) {
+        // Forgejo #448: Codex prints no resume hint; its ids live on disk and the
+        // scrape can only catch something that is not an id (it caught the
+        // `-s --format` of a git command the agent had run). Disk is the source.
+        $scrapePane = !in_array($agentId, self::DISK_RESUME_ID_AGENTS, true);
+        for ($attempt = 0; $scrapePane && $attempt < 3; $attempt++) {
             usleep($attempt === 0 ? 1800000 : 1000000);
             $pane = (string) shell_exec("$tmuxBin capture-pane -p -J -S -200 -t $escSess 2>/dev/null");
-            if (preg_match($regexFull, $pane, $m)) {
-                aicli_log("captureResumeForClose: captured full-length id on attempt " . ($attempt + 1) . " (" . strlen($pane) . " bytes of pane) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
-                break;
-            }
-            if (preg_match($regexQuoted, $pane, $qm)) {
-                // Collapse either quote group into the standard $m[1] slot.
-                $m = [$qm[0], !empty($qm[1]) ? $qm[1] : ($qm[2] ?? '')];
-                aicli_log("captureResumeForClose: captured quoted name on attempt " . ($attempt + 1) . " | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+            $found = self::resumeIdFromPane($pane, false);
+            if ($found !== null) {
+                $m = [$found, $found];
+                aicli_log("captureResumeForClose: captured id on attempt " . ($attempt + 1) . " (" . strlen($pane) . " bytes of pane) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
                 break;
             }
             aicli_log("captureResumeForClose: attempt " . ($attempt + 1) . " did not yield a full id yet (pane " . strlen($pane) . " bytes) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
         }
         // Fall back to the permissive 8+ regex if none of the attempts
         // yielded a full-length id - some agents use short session ids.
-        if (empty($m) && preg_match($regexShort, $pane, $m)) {
-            aicli_log("captureResumeForClose: captured short id via fallback regex | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+        if ($scrapePane && empty($m)) {
+            $found = self::resumeIdFromPane($pane, true);
+            if ($found !== null) {
+                $m = [$found, $found];
+                aicli_log("captureResumeForClose: captured short id via fallback regex | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+            }
         }
 
         // #1316: a renamed claude-code session's NAME is its resume id (may be short / contain
@@ -1207,6 +1319,33 @@ class TerminalHandler {
         }
 
         return $capturedId !== '' ? $capturedId : null;
+    }
+
+    /**
+     * Agents whose conversation id is read from their own files on disk, never
+     * from the exit screen (Forgejo #448). Codex prints no resume hint, so a
+     * screen scrape can only catch a token that is not an id.
+     */
+    public const DISK_RESUME_ID_AGENTS = ['codex-cli'];
+
+    /**
+     * The resume id an agent printed on its exit screen, or null. Three forms,
+     * tried in order: a full-length bare token (UUIDs, 20+), a quoted name
+     * (Claude's /rename), and — only when $permissive — a short bare token
+     * (8+, opencode and kilocode ids). Forgejo #448: a token that starts with
+     * `-` is a flag, never an id: the permissive form once returned `--format`
+     * from `git show -s --format=…` in an agent's output, and four workspaces
+     * could not resume.
+     */
+    public static function resumeIdFromPane(string $pane, bool $permissive): ?string {
+        $lead = '(?:--resume[= ]|--conversation[= ]|-s\s+)';
+        if (preg_match('/' . $lead . '([A-Za-z0-9_][A-Za-z0-9_-]{19,})/', $pane, $m)) return $m[1];
+        if (preg_match('/' . $lead . '(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\')/', $pane, $m)) {
+            $name = !empty($m[1]) ? $m[1] : ($m[2] ?? '');
+            if ($name !== '' && $name[0] !== '-') return $name;
+        }
+        if ($permissive && preg_match('/' . $lead . '([A-Za-z0-9_][A-Za-z0-9_-]{7,})/', $pane, $m)) return $m[1];
+        return null;
     }
 
     /**
@@ -1368,6 +1507,12 @@ class TerminalHandler {
                 $cwd = rtrim(str_replace('\\', '/', (string)($payload['cwd'] ?? '')), '/');
                 if (!preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/', $id)) continue;
                 if (!in_array($cwd, $wantedCwds, true)) continue;
+                // Forgejo #448: since Codex 0.159 the sub-agent threads an agent
+                // spawns are stored the same way, with `source: {subagent: …}`,
+                // `thread_source: "subagent"` and `parent_thread_id`. Codex refuses
+                // to resume one ("cannot resume an unloaded multi-agent v2
+                // sub-agent through its parent"). Only a person's own thread counts.
+                if (self::codexRecordIsSubThread($payload)) continue;
                 $mtime = $file->getMTime();
                 if ($mtime > $newestMtime) {
                     $newestMtime = $mtime;
@@ -1378,6 +1523,15 @@ class TerminalHandler {
         }
 
         return null;
+    }
+
+    /** Forgejo #448: true for a Codex session_meta payload that is a sub-agent or forked thread. */
+    public static function codexRecordIsSubThread(array $payload): bool {
+        if (!empty($payload['parent_thread_id']) || !empty($payload['forked_from_id'])) return true;
+        if (array_key_exists('source', $payload) && !is_string($payload['source'])) return true;
+        $ts = $payload['thread_source'] ?? null;
+        if ($ts !== null && $ts !== 'user') return true;
+        return false;
     }
 
     private static function restart($id) {

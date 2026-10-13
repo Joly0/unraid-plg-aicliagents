@@ -572,6 +572,7 @@
         del.addEventListener('click', function () { row.remove(); });
         row.appendChild(k); row.appendChild(v); row.appendChild(del);
         rows.appendChild(row);
+        if (window.aicliMaskEye) window.aicliMaskEye(v); // show-value eye (ManagerScripts.php)
     };
 
     window.hubSaveServer = function () {
@@ -700,7 +701,7 @@
                 rb.type = 'button'; rb.className = 'aicli-btn-slim'; rb.textContent = 'Reload agent';
                 rb.addEventListener('click', function () {
                     rb.disabled = true;
-                    hubAjax('agent_signal_reload&id=' + encodeURIComponent(sess.id)).then(function () { rb.textContent = 'Reload sent'; });
+                    hubAjax('agent_signal_reload&force=1&id=' + encodeURIComponent(sess.id)).then(function () { rb.textContent = 'Reload sent'; });
                 });
                 line.appendChild(rb);
                 wrap.appendChild(line);

@@ -920,7 +920,9 @@ class AgentHandler {
     private static function checkVersions() {
         set_time_limit(180);
         if (\AICliAgents\Services\VersionCheckService::isCheckRunning()) {
-            return ['status' => 'ok', 'message' => 'Check already in progress', 'cache' => \AICliAgents\Services\VersionCheckService::getCachedResults()];
+            // Forgejo #447: `running` lets the page say a check is under way and follow it,
+            // instead of reading this plain "ok" as "nothing to do".
+            return ['status' => 'ok', 'running' => true, 'message' => 'Check already in progress', 'cache' => \AICliAgents\Services\VersionCheckService::getCachedResults()];
         }
         $cache = \AICliAgents\Services\VersionCheckService::checkAllAgents(true);
         return ['status' => 'ok', 'cache' => $cache];
@@ -1013,7 +1015,11 @@ class AgentHandler {
             ];
         }
 
-        return ['status' => 'ok', 'dropdowns' => $dropdowns, 'checking' => $checking];
+        // Forgejo #447: one summary for the status line next to the button: when the
+        // figures were last fetched, and how many agents' last check failed.
+        $summary = \AICliAgents\Services\VersionCheckService::summariseCache(is_array($cache) ? $cache : [], array_keys($dropdowns));
+        return ['status' => 'ok', 'dropdowns' => $dropdowns, 'checking' => $checking,
+                'checked_at' => $summary['checked_at'], 'errors' => $summary['errors'], 'first_error' => $summary['first_error']];
     }
 
     /**

@@ -10,6 +10,8 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/PerfTrace.php';
+
 class AtomicWriteService {
     /** @var array{stage:string,path:string,warning:string}|null Diagnostic for the most recent write in this request. */
     private static ?array $lastFailure = null;
@@ -137,6 +139,16 @@ class AtomicWriteService {
      * Best-effort: any failure is swallowed (the write already succeeded).
      */
     private static function syncFilesystem(string $path): void {
+        // NOTEBOOK_HANG_OBSERVABILITY R7: time the whole flush. The wait is NOT shortened.
+        $t0 = PerfTrace::start();
+        try {
+            self::syncFilesystemUntraced($path);
+        } finally {
+            PerfTrace::point('atomic.sync', $t0, 2000, "path=$path");
+        }
+    }
+
+    private static function syncFilesystemUntraced(string $path): void {
         $attempts = [['sync', '-f', $path], ['sync']];
         foreach ($attempts as $argv) {
             $proc = @proc_open($argv, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);

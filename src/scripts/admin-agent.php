@@ -289,7 +289,7 @@
  *   artefact <id> [--global]     whole file (raw), meta, version, committed, comments
  *   artefact-search <text...> [--global]
  *   artefact-templates
- *   wiki [--global]              the wiki view: home, section tree, recent changes,
+ *   wiki [--global]              the wiki view: home, link tree, recent changes,
  *                                unlinked pages, link graph, Things you should know
  *   artefact-journal <text...> [--global]
  *                                add one dated "what I did and why" line to the
@@ -385,7 +385,7 @@ const ADMIN_AGENT_USAGE = [
     'artefact' => 'artefact <id> [--global] -- one artefact: whole file (raw), meta, version, committed, unresolved comments',
     'artefact-search' => 'artefact-search <text...> [--global]',
     'artefact-templates' => 'artefact-templates -- ready-made templates for artefact-new --template',
-    'wiki' => 'wiki [--global] -- the wiki view of the Notebook: home page, section tree, recent changes, unlinked pages, link graph, Things you should know',
+    'wiki' => 'wiki [--global] -- the wiki view of the Notebook: home page, link tree, recent changes, unlinked pages, link graph, Things you should know',
     'artefact-journal' => 'artefact-journal <text...> [--global] -- CHANGES state; adds one dated "what I did and why" line to the Agent journal (refused when the journal is off; never a secret)',
     'artefact-new' => 'artefact-new --type=<t> [--title=<text>] [--area=<a>] [--tags=a,b] [--template=<key>] [--needs-you] [--open] [--global] [--confirm-secret] [--file=<path>] -- CHANGES state; body from --file or stdin',
     'artefact-set' => 'artefact-set <id> --expected=<version> [--file=<path>] [--confirm-secret] -- CHANGES state; replaces the whole file; body from --file or stdin',

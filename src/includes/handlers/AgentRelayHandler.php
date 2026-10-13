@@ -2,10 +2,26 @@
 namespace AICliAgents\Handlers;
 use AICliAgents\Services\AgentRelayService;
 use AICliAgents\Services\RelayPeerService;
+use AICliAgents\Services\RelayNoticeWording;
 class AgentRelayHandler {
     public static function handle($action, $id) {
         $session = $id !== 'default' ? $id : (string)($_REQUEST['session_id'] ?? '');
         switch ($action) {
+            // RELAY_NOTICE_WORDING.md R5: read-only preview of both notices for a style and custom text,
+            // and whether the custom text is allowed. Nothing is saved.
+            case 'relay_get_notice_preview': {
+                $style = (string)($_REQUEST['style'] ?? 'short');
+                if (!in_array($style, RelayNoticeWording::STYLES, true)) return ['status'=>'error','message'=>'Unknown style.'];
+                $custom = trim((string)preg_replace('/[\r\n]+/', ' ', (string)($_REQUEST['custom'] ?? '')));
+                $problem = $style === 'custom' ? RelayNoticeWording::validateCustom($custom) : null;
+                if ($problem !== null) return ['status'=>'error','message'=>$problem];
+                $w = ['style' => $style, 'custom' => $custom];
+                $actor = \AICliAgents\Services\TmuxService::relayActorNotice('project.review', 'request', 'req_0123456789abcdef', $w);
+                $direct = (new \ReflectionMethod(\AICliAgents\Services\TmuxService::class, 'relayDirectNotice'));
+                $direct->setAccessible(true);
+                $d = (string)$direct->invoke(null, [['id' => 's1a2b3c', 'name' => 'Builder']], $w);
+                return ['status'=>'ok','actor'=>$actor,'direct'=>$d,'words_actor'=>str_word_count($actor),'words_direct'=>str_word_count($d)];
+            }
             case 'relay_get_session': return ['status'=>'ok','relay'=>AgentRelayService::subscriptions($session),'topics'=>AgentRelayService::topicCatalog(true),'inbox'=>AgentRelayService::inbox($session, 5)];
             // Full per-workspace message history for the drawer's "Relay inbox" view:
             // direct messages (sent + received) + received topic events + contacts.

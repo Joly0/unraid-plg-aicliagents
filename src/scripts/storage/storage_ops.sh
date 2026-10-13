@@ -1605,6 +1605,18 @@ if [ "$TYPE" = "home" ] && home_mount_in_use "$MNT_POINT"; then
         log "Home busy and last persist within ${_BUSY_COOLDOWN_SEC}s cooldown — skipping redundant bake (data already persisted; reclaim deferred to idle)."
         _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_busy_cooldown" "busy_cooldown" "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
     fi
+    # Forgejo #445: an AUTOMATIC bake of a busy home whose writable layer lives
+    # on durable DISK writes nothing. The reclaim would defer anyway (the upper
+    # is not emptied while a session holds the home), the data is already
+    # durable across a reboot, and the layer would only copy the whole upper
+    # onto the same device every cooldown. A person's Persist and the other
+    # explicit callers (no AICLI_BAKE_REASON) still bake.
+    if _busy_bake_pointless_on_disk "${ENTITY_UPPER_MODE:-}" "${AICLI_BAKE_REASON:-}"; then
+        log "Home busy and its writable layer is on disk ($UPPER_DIR), so the data is already durable — this automatic save writes no layer. A compact layer is written when the home is idle."
+        date +%s > "$_COOLDOWN_MARKER" 2>/dev/null || true
+        _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_busy_disk_upper" "upper_on_disk" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"upper\":\"$UPPER_DIR\",\"bake_reason\":\"${AICLI_BAKE_REASON:-}\"}"
+    fi
 fi
 
 # 1. Keep regenerable caches OUT of the layer (H: the emptiness check MUST come
@@ -2453,6 +2465,25 @@ update_task_status() {
         "$step" "$progress" "$completed" "$(date +%s)" "$reason" > "$TASK_STATUS_FILE"
 }
 
+# Forgejo #454: tell the Activity tray which step of the merge is running.
+# The job id comes from the supervisor in AICLI_JOB_ID. With no job id (a
+# manual run, a test) nothing is set. Never fails the merge.
+_consol_phase() {
+    [ -n "${AICLI_JOB_ID:-}" ] || return 0
+    declare -f job_ledger_set_phase >/dev/null 2>&1 || return 0
+    job_ledger_set_phase "$AICLI_JOB_ID" "$1" 2>/dev/null || true
+}
+
+# Forgejo #454: hook that atomic_write_layer calls with the percentage that
+# mksquashfs prints. The write phase covers progress 40 to 78.
+_consol_bake_progress() {
+    local pct="${1:-0}"
+    case "$pct" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$pct" -gt 100 ] && pct=100
+    update_task_status "Writing the new layer (can take several minutes)" $((40 + pct * 38 / 100)) ""
+}
+export AICLI_BAKE_PROGRESS_HOOK=_consol_bake_progress
+
 # _consol_recheck_binding <stage> [layer_to_discard]
 # Forgejo #296 (2026-09-23). Derive the live writable layer again and compare
 # it with the baseline. If a mount call bound a different layer while the
@@ -2492,6 +2523,7 @@ guard_path "$MNT_POINT" "MNT_POINT" || { error "Mount point failed validation: $
 # 1. Ensure stack is mounted to get merged view
 lifecycle_log "info" "consolidate_layers" "bash_consolidate_start" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
 update_task_status "Initializing..." 5 ""
+_consol_phase "pre-flight"
 if ! mountpoint -q "$MNT_POINT"; then
     log "Stack not mounted. Attempting remount..."
     update_task_status "Mounting stack..." 10 ""
@@ -2730,6 +2762,7 @@ fi
 #          after the new consolidated volume lands. This is the manifest-driven explicit
 #          cleanup that replaces the wildcard find-delete (finding D).
 log "Baking consolidated volume (atomic)..."
+_consol_phase "writing"
 update_task_status "Baking consolidated volume..." 40 ""
 
 # Snapshot pre-bake layer list. nullglob ensures empty array when no layers present.
@@ -2829,7 +2862,7 @@ aicli_on_exit _consol_scratch_cleanup
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
-_SWEPT="$(sqlite_stage_sweep_orphans "$_SQLITE_STAGE_ROOT" "$AICLI_SQLITE_STAGE_LEGACY_ROOT")"
+_SWEPT="$(sqlite_stage_sweep_orphans "$_SQLITE_STAGE_ROOT" "$AICLI_SQLITE_STAGE_LEGACY_ROOT" "$(consolidate_stage_fallback_root)")"
 if [ -n "$_SWEPT" ]; then
     log "Removed stage folder(s) of ended processes: $(printf '%s' "$_SWEPT" | tr '\n' ' ')"
 fi
@@ -2837,13 +2870,23 @@ fi
 if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
     log "Detected $SQLITE_DB_COUNT SQLite DB(s) in merged view — backing up via Online Backup API"
     update_task_status "Backing up SQLite DBs..." 35 ""
+    _consol_phase "backing-up"
     # shellcheck disable=SC2086 — intentional word-splitting on the path list
-    if ! sqlite_stage_fits "$_SQLITE_STAGE_ROOT" $SQLITE_DBS; then
+    # docs/specs/CONSOLIDATE_STAGE_FALLBACK_LOCATION.md: when the default stage
+    # folder has no room, a configured pool/array folder (never RAM, never the
+    # flash) takes the copies instead.
+    _STAGE_DEFAULT_ROOT="$_SQLITE_STAGE_ROOT"
+    if ! sqlite_stage_choose_root $SQLITE_DBS; then
         rm -f "$CONSOLIDATE_MARKER"
         error "Not enough room to stage $SQLITE_DB_COUNT SQLite backup(s) in $_SQLITE_STAGE_ROOT: need about ${STAGE_NEED_MB} MB, ${STAGE_FREE_MB} MB free. Nothing was changed."
         update_task_status "Deferred" 0 "Not enough free space to copy the databases"
         _op_defer "$TYPE" "$ID" "consolidate_layers" "bash_consolidate_deferred" "no_space" \
-            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_stage_no_space\",\"db_count\":$SQLITE_DB_COUNT,\"need_mb\":$STAGE_NEED_MB,\"free_mb\":\"$STAGE_FREE_MB\",\"stage_root\":\"$_SQLITE_STAGE_ROOT\"}" "warn"
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_stage_no_space\",\"db_count\":$SQLITE_DB_COUNT,\"need_mb\":$STAGE_NEED_MB,\"free_mb\":\"$STAGE_FREE_MB\",\"stage_root\":\"$_SQLITE_STAGE_ROOT\",\"fallback_configured\":$([ -n "$(consolidate_stage_fallback_root)" ] && echo true || echo false)}" "warn"
+    fi
+    if [ "${STAGE_FALLBACK_USED:-0}" = "1" ]; then
+        log "SQLite stage: $_STAGE_DEFAULT_ROOT has no room (need ${STAGE_NEED_MB} MB) — staging in $_SQLITE_STAGE_ROOT instead"
+        lifecycle_log "info" "consolidate_layers" "consolidate_stage_fallback_used" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"default_root\":\"$_STAGE_DEFAULT_ROOT\",\"stage_root\":\"$_SQLITE_STAGE_ROOT\"}" 2>/dev/null || true
     fi
     SQLITE_STAGE="$(sqlite_stage_path "$_SQLITE_STAGE_ROOT" "consol" "$TYPE" "$ID" "${BASHPID:-$$}")"
     rm -rf "$SQLITE_STAGE" 2>/dev/null
@@ -2892,6 +2935,7 @@ fi
 FINAL_NAME=""
 if [ "$SQLITE_DB_COUNT" -gt 0 ] && [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ]; then
     log "Consolidating via no-mount pseudo-file merge ($SQLITE_DB_COUNT SQLite backup(s) shadow live DBs)..."
+    _consol_phase "writing"
     update_task_status "Baking consolidated volume..." 40 ""
     # shellcheck disable=SC2086 — intentional word-splitting on the DB path list
     if ! FINAL_NAME=$(bake_via_pseudofile_merge "$TYPE" "$ID" "$PERSIST_PATH" "$_CONSOL_VIEW" "$SQLITE_STAGE" "consolidated" $SQLITE_DBS); then
@@ -2906,6 +2950,7 @@ if [ "$SQLITE_DB_COUNT" -gt 0 ] && [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE
     lifecycle_log "info" "consolidate_layers" "bash_consolidate_sqlite_merged" \
         "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$FINAL_NAME\",\"db_count\":$SQLITE_DB_COUNT}" 2>/dev/null || true
 else
+    _consol_phase "writing"
     update_task_status "Baking consolidated volume..." 40 ""
     if ! FINAL_NAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$_CONSOL_VIEW" "consolidated"); then
         error "Atomic consolidation bake failed."
@@ -2917,6 +2962,7 @@ else
 fi
 
 log "Consolidated volume written: $FINAL_NAME"
+_consol_phase "finalizing"
 update_task_status "Finalizing volume..." 80 ""
 
 # Sanity: check FAT32 size limit on the final file
@@ -3042,6 +3088,7 @@ _itest_sigkill_window "after_manifest_replace"
 #     If SIGTERM fires here, the old files are untracked (reconcile recovers),
 #     not missing (reconcile halts).
 log "Cleaning up old layers..."
+_consol_phase "cleaning"
 update_task_status "Cleaning up old layers..." 90 ""
 guard_path "$PERSIST_PATH" "PERSIST_PATH (cleanup)" || { error "Path guard failed before cleanup"; exit 1; }
 
@@ -3163,7 +3210,8 @@ if [ -f "$CONSOLIDATE_MARKER" ] && [ -d "$UPPER_DIR" ]; then
         break
     done < <(find "$UPPER_DIR" -newer "$CONSOLIDATE_MARKER" -type f -print0 2>/dev/null)
 fi
-rm -f "$CONSOLIDATE_MARKER"
+# Forgejo #442: the marker is removed AFTER the swap block below, which needs it
+# to tell the entries that changed during the bake from the ones the base holds.
 
 log "Finalizing stack and reclaiming the writable upper..."
 log "Note: Active agent terminals may log transient I/O errors during remount. This is expected and resolves automatically."
@@ -3183,7 +3231,13 @@ update_task_status "Finalizing stack..." 95 ""
 # ever touches it — so the remount's upper was never the directory we are
 # about to delete.
 _SWAPPED_UPPER=""
-if [ -z "$UPPER_CHANGED" ]; then
+_UPPER_KEEP_FAILED=0
+# Forgejo #442 (docs/specs/CONSOLIDATE_PARTIAL_UPPER_RECLAIM.md): the swap runs
+# whether or not something wrote during the bake. Writes during the bake used to
+# keep the WHOLE upper; now only the entries newer than the marker are put back
+# into the fresh upper (upper_keep_changed_entries), and everything the new base
+# already holds is reclaimed.
+if :; then
     # A mounted overlay pins its upperdir and makes the rename fail.  Release it
     # cleanly while the mount-operation lock prevents a concurrent launch, then
     # swap the now-detached directory aside before op_mount sees it again.
@@ -3219,7 +3273,28 @@ if [ -z "$UPPER_CHANGED" ]; then
         update_task_status "Consolidation complete (writable-layer reclaim deferred)." 100 ""
         exit 0
     fi
+    if [ -n "$UPPER_CHANGED" ]; then
+        # Something wrote during the bake. Put ONLY those entries (newer than
+        # the marker, with their SQLite families) into the fresh upper. The base
+        # just written holds everything else, so it is reclaimed with the old
+        # upper below. If the copy cannot be proven complete, undo the swap and
+        # keep the whole old upper — the pre-#442 behaviour, never a loss.
+        if upper_keep_changed_entries "$_SWAPPED_UPPER" "$UPPER_DIR" "$CONSOLIDATE_MARKER"; then
+            log "Writes during the merge: kept $KEEP_COUNT changed file(s) ($KEEP_BYTES bytes, e.g. $KEEP_EXAMPLE) in the writable layer; reclaiming $RECLAIM_COUNT file(s) ($RECLAIM_BYTES bytes) now held by $FINAL_NAME."
+            lifecycle_log "info" "consolidate_layers" "consolidate_upper_partial_reclaim" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"final\":\"$FINAL_NAME\",\"kept_count\":$KEEP_COUNT,\"kept_bytes\":$KEEP_BYTES,\"reclaimed_count\":$RECLAIM_COUNT,\"reclaimed_bytes\":$RECLAIM_BYTES,\"example\":\"$KEEP_EXAMPLE\"}" 2>/dev/null || true
+        else
+            _UPPER_KEEP_RC=$?
+            log "Could not copy the entries written during the merge into the fresh writable layer (rc=$_UPPER_KEEP_RC) — keeping the whole old layer instead."
+            lifecycle_log "warn" "consolidate_layers" "consolidate_upper_keep_failed" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"rc\":$_UPPER_KEEP_RC,\"example\":\"$UPPER_CHANGED\"}" 2>/dev/null || true
+            restore_swapped_dir "$UPPER_DIR" "$_SWAPPED_UPPER" || log "WARNING: could not restore the upper after a failed keep — data is in $_SWAPPED_UPPER"
+            _SWAPPED_UPPER=""
+            _UPPER_KEEP_FAILED=1
+        fi
+    fi
 fi
+rm -f "$CONSOLIDATE_MARKER"
 
 # Refresh mount (mount_stack.sh handles its own umount-then-mount cycle — the
 # brief umount window inside it is the only unmounted gap).
@@ -3262,7 +3337,9 @@ if [ -n "$_SWAPPED_UPPER" ]; then
         disown 2>/dev/null || true
     fi
 elif [ -n "$UPPER_CHANGED" ] && [ -d "$UPPER_DIR" ]; then
-    log "Writes detected in upper layer during bake (e.g. $UPPER_CHANGED). Preserving upper to avoid data loss — next commit will delta them onto the consolidated base."
+    # Only reached when upper_keep_changed_entries failed (#442) and the swap
+    # was undone: the whole upper stays, the next commit deltas it.
+    log "Writes detected in upper layer during bake (e.g. $UPPER_CHANGED) and the changed entries could not be kept on their own. Preserving upper to avoid data loss — next commit will delta them onto the consolidated base."
     sync
     FINAL_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
     lifecycle_log "info" "consolidate_layers" "bash_consolidate_ok_refresh_deferred" \

@@ -54,6 +54,14 @@ fi
 # Override via MKSQUASHFS_ARGS env var.
 _AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend"
 
+# _awl_last_percent <file> — print the last "NN%" that mksquashfs wrote to the
+# progress file (0-100), or nothing. mksquashfs redraws its bar with carriage
+# returns, so split on them first. Forgejo #454.
+_awl_last_percent() {
+    [ -f "${1:-}" ] || return 0
+    tail -c 2000 "$1" 2>/dev/null | tr '\r' '\n' | grep -Eo '[0-9]{1,3}%' | tail -n 1 | tr -d '%'
+}
+
 # _awl_resolve_source <path> — print the real directory a symlinked bake source
 # names. Fail (1, nothing printed) when it does not resolve to a directory.
 _awl_resolve_source() {
@@ -206,8 +214,44 @@ atomic_write_layer() {
             mksq_args="$(_batch_mksquashfs_args "$mksq_args")"
         fi
 
-        # shellcheck disable=SC2086
-        if ! $_batch_pfx mksquashfs "$upper_dir" "$tmp_path" $mksq_args > /dev/null 2>&1; then
+        # Forgejo #454: a caller can ask for progress. mksquashfs then prints
+        # its percentage to a file (-force-progress) and a watcher passes the
+        # last number to the hook function every 5 seconds. A failure of the
+        # watcher never fails the bake.
+        local _awl_prog_file="" _awl_watch_pid=""
+        if [ -n "${AICLI_BAKE_PROGRESS_HOOK:-}" ] && declare -f "$AICLI_BAKE_PROGRESS_HOOK" >/dev/null 2>&1; then
+            _awl_prog_file="${tmp_path}.progress"
+            : > "$_awl_prog_file" 2>/dev/null || _awl_prog_file=""
+        fi
+        if [ -n "$_awl_prog_file" ]; then
+            mksq_args="-force-progress $mksq_args"   # first: a trailing "-e" list would read it as a path
+            (
+                while :; do
+                    sleep "${AICLI_BAKE_PROGRESS_INTERVAL:-5}"
+                    _awl_pct="$(_awl_last_percent "$_awl_prog_file")"
+                    [ -n "$_awl_pct" ] && "$AICLI_BAKE_PROGRESS_HOOK" "$_awl_pct" 2>/dev/null
+                done
+            ) > /dev/null 2>&1 &
+            _awl_watch_pid=$!
+        fi
+        local _awl_mksq_rc=0
+        if [ -n "$_awl_prog_file" ]; then
+            # shellcheck disable=SC2086
+            $_batch_pfx mksquashfs "$upper_dir" "$tmp_path" $mksq_args > "$_awl_prog_file" 2>&1 || _awl_mksq_rc=$?
+        else
+            # shellcheck disable=SC2086
+            $_batch_pfx mksquashfs "$upper_dir" "$tmp_path" $mksq_args > /dev/null 2>&1 || _awl_mksq_rc=$?
+        fi
+        if [ -n "$_awl_watch_pid" ]; then
+            kill "$_awl_watch_pid" 2>/dev/null || true
+            wait "$_awl_watch_pid" 2>/dev/null || true
+        fi
+        if [ -n "$_awl_prog_file" ]; then
+            _awl_pct="$(_awl_last_percent "$_awl_prog_file")"
+            [ -n "$_awl_pct" ] && "$AICLI_BAKE_PROGRESS_HOOK" "$_awl_pct" 2>/dev/null
+            rm -f "$_awl_prog_file" 2>/dev/null || true
+        fi
+        if [ "$_awl_mksq_rc" -ne 0 ]; then
             echo "[atomic_write_layer] ERROR: mksquashfs failed" >&2
             exit 1
         fi

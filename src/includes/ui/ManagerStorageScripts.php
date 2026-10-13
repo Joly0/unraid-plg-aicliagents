@@ -234,7 +234,10 @@ function renderHomeStats(homes) {
     } else {
         $.each(homes, function(u, h) {
             totalPhysical += h.physical_mb;
-            const canConsolidate = h.layers >= 2;
+            // HOME_CARD_BUTTONS.md: Consolidate also saves the unsaved changes, so it has work
+            // to do with one layer plus unsaved changes. Repair shows only for a home that is not mounted.
+            const canConsolidate = h.layers >= 2 || (h.layers >= 1 && Number(h.dirty_mb || 0) > 0);
+            const showRepair = !h.mounted;
             const job = homeJobLabel(h.job);
             const jobRemaining = homeJobRemaining(job, h.dirty_mb);
             const hasUpperChanges = Number(h.dirty_mb || 0) > 0;
@@ -277,8 +280,8 @@ function renderHomeStats(homes) {
                 '</div>' +
                 '<div class="se-actions">' +
                     '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'persistEntity(\'home\', \'' + u + '\'); return false;') + '" title="Persist to storage' + lockTitle + '"><i class="fa fa-save"></i></a>' +
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate && !job ? 'consolidateStorage(\'home\', \'' + u + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate Layers' + lockTitle : 'Requires 2+ layers') + '"><i class="fa fa-compress"></i></a>' +
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'repairStorage(\'home\', \'' + u + '\'); return false;') + '" title="Repair Mount' + lockTitle + '"><i class="fa fa-wrench"></i></a>' +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate && !job ? 'consolidateStorage(\'home\', \'' + u + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate: save unsaved changes and merge all layers into one' + lockTitle : 'Nothing to merge: one layer and no unsaved changes') + '"><i class="fa fa-compress"></i></a>' +
+                    (showRepair ? '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'repairStorage(\'home\', \'' + u + '\'); return false;') + '" title="Repair mount: this home is not mounted' + lockTitle + '"><i class="fa fa-wrench"></i></a>' : '') +
                     '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'deleteHomeStorage(\'' + u + '\'); return false;') + '" title="Delete home data (permanent)' + lockTitle + '" style="color:#c0392b;"><i class="fa fa-trash-o"></i></a>' +
                 '</div>' +
                 '</div>';
@@ -392,8 +395,14 @@ function consolidateStorage(type, id) {
     // On queued: close the dialog at once; the activity-tray pill is the progress source
     // of truth. A brief non-blocking toast confirms the hand-off. On any non-queued
     // response keep the error path.
+    // CONSOLIDATE_CONTINUE_OPTION.md: the dialog for a home with open workspaces has a box
+    // "Send Continue to each workspace after it reopens" (ticked). Unticked: the workspaces
+    // reopen with their conversation resumed but get no Continue, so they use no tokens.
+    var continueAfter = true;
     function runConsolidate() {
-        aicliAjax('consolidate_storage', { type: type, id: id }, function(r) {
+        var args = { type: type, id: id };
+        if (!continueAfter) args.continue_after = '0';
+        aicliAjax('consolidate_storage', args, function(r) {
             if (r && r.status === 'queued') {
                 // Hand off to the activity tray immediately — no long spin.
                 swal({
@@ -416,7 +425,7 @@ function consolidateStorage(type, id) {
     }
 
     function doConsolidate() {
-        swal({ title: 'Consolidate ' + type + ' layers?', text: 'Merge SquashFS deltas into a single base volume. This saves memory.', type: 'warning', showCancelButton: true, showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+        swal({ title: 'Consolidate ' + type + ' layers?', text: (type === 'home' ? 'Save your unsaved changes and merge all saved layers into one layer. This saves memory.' : 'Merge SquashFS deltas into a single base volume. This saves memory.'), type: 'warning', showCancelButton: true, showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
             if (!confirmed) return;
             runConsolidate();
         });
@@ -506,6 +515,11 @@ function consolidateStorage(type, id) {
                     rowsHtml +
                 '</div>' +
                 sharedPathHtml +
+                '<label style="display:flex; align-items:flex-start; gap:8px; margin-top:12px; padding:6px 8px; text-align:left; cursor:pointer; border-radius:4px; background:var(--mild-background-color,rgba(0,0,0,0.04));">' +
+                    '<input type="checkbox" id="aicli-consol-continue" data-testid="consolidate-continue-box" checked style="margin-top:3px;">' +
+                    '<span style="font-size:11px; line-height:1.4; color:var(--text-color,#ccc);"><strong>Send Continue to each workspace after it reopens</strong>' +
+                    '<br><span style="opacity:0.7;">Untick to reopen them without a message. They use no tokens until you tell them to go on.</span></span>' +
+                '</label>' +
             '</div>';
 
         // R1.2: calm swal — no "warning" type icon. html:true, closeOnConfirm:false keeps
@@ -524,6 +538,8 @@ function consolidateStorage(type, id) {
             closeOnConfirm: false
         }, function(confirmed) {
             if (!confirmed) return;
+            var box = document.getElementById('aicli-consol-continue');
+            continueAfter = !box || box.checked;
             runConsolidate();
         });
     });
@@ -1053,13 +1069,19 @@ function deleteHomeStorage(id) {
 
     // Plain-language descriptions per state
     var STATE_LABELS = {
-        legacy_unmanaged : 'Unmanaged layers found in a sibling directory',
-        path_drift       : 'Layer path has drifted from the recorded manifest path',
-        partial_loss     : 'Some expected layers are missing from the active path',
-        total_loss       : 'All expected layers are missing — drive may be disconnected',
-        corrupt_layers   : 'Layer integrity check failed — sha256 mismatch detected',
-        host_mismatch    : 'Manifest was written on a different host (USB may have moved)',
+        legacy_unmanaged : 'Saved layers were found in another folder that the plugin does not manage',
+        path_drift       : 'The plugin saved these layers in one folder, but the storage setting now points to another folder, so it cannot find them',
+        partial_loss     : 'Some saved layers are missing from the storage folder',
+        total_loss       : 'All saved layers are missing. The drive may be disconnected',
+        corrupt_layers   : 'A saved layer failed its integrity check (the checksum does not match)',
+        host_mismatch    : 'The saved layers were written on a different server (the USB flash drive may have moved)',
     };
+
+    // What the card is about, in words a person knows. The id stays in quotes.
+    var TYPE_LABELS = { home: 'Home storage', agent: 'Agent storage' };
+    function entityLabel(halt) {
+        return (TYPE_LABELS[halt.type] || halt.type) + ' "' + halt.id + '"';
+    }
 
     function stateLabel(state) {
         return STATE_LABELS[state] || state;
@@ -1212,7 +1234,7 @@ function deleteHomeStorage(id) {
                 '<div class="aicli-halt-card" data-entity="' + halt.type + '/' + halt.id + '">' +
                     '<div class="aicli-halt-card-head">' +
                         '<div>' +
-                            '<div class="aicli-halt-entity">' + halt.type + '/' + halt.id + '</div>' +
+                            '<div class="aicli-halt-entity">' + entityLabel(halt) + '</div>' +
                             '<div class="aicli-halt-state">' + stateLabel(halt.state) + '</div>' +
                             (halt.halted_at ? '<div class="aicli-halt-when">Halted at: ' + halt.halted_at + '</div>' : '') +
                         '</div>' +
@@ -1224,8 +1246,8 @@ function deleteHomeStorage(id) {
 
         return '<div id="' + OVERLAY_ID + '" class="unapi">' +
             '<div class="aicli-halt-header">' +
-                '<div class="aicli-halt-title"><i class="fa fa-exclamation-circle" style="margin-right:8px;"></i>Storage Attention Needed</div>' +
-                '<div class="aicli-halt-subtitle">Boot integrity check found something worth your attention. The plugin won\'t overwrite your data without explicit consent.</div>' +
+                '<div class="aicli-halt-title"><i class="fa fa-exclamation-circle" style="margin-right:8px;"></i>AI CLI Agents: Storage Attention Needed</div>' +
+                '<div class="aicli-halt-subtitle">The AI CLI Agents plugin checked its saved storage at start-up and found a problem. Your data has not been changed. The plugin will not overwrite it without your consent.</div>' +
                 '<div class="aicli-halt-note">Tip: you can Dismiss to deal with this later, or click Retry after fixing the underlying issue.</div>' +
             '</div>' +
             // id: every card lookup below uses #aicli-halt-cards. Without it,
