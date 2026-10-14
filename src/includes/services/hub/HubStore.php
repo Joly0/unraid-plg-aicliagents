@@ -147,6 +147,9 @@ class HubStore {
             }
         }
 
+        // Switched off as a whole: kept in the store with its targets, but never projected.
+        if (!empty($def['disabled'])) $out['disabled'] = true;
+
         return empty($errors) ? $out : null;
     }
 
@@ -186,6 +189,15 @@ class HubStore {
         $server = self::getServer($name);
         if ($server === null) { $errors[] = "no such server '$name'"; return false; }
         $server['enabledFor'] = $agentIds;
+        return self::saveServer($name, $server, $errors);
+    }
+
+    /** Switch a server off (or back on) for every agent without touching its targets. */
+    public static function setServerDisabled(string $name, bool $disabled, array &$errors = []): bool {
+        $errors = [];
+        $server = self::getServer($name);
+        if ($server === null) { $errors[] = "no such server '$name'"; return false; }
+        if ($disabled) $server['disabled'] = true; else unset($server['disabled']);
         return self::saveServer($name, $server, $errors);
     }
 
