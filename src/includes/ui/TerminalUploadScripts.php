@@ -298,11 +298,20 @@
     // transport failure (timeout, or a request that never reached the
     // server) is flagged so the chunk loop can retry it once.
     function postUpload(action, data, timeoutMs) {
+        // #515: send multipart form data, not a URL-encoded form. URL encoding
+        // turns each '+' and '/' of the base64 text into 3 bytes, about 6 % more
+        // for a binary file, so a full-size chunk passed post_max_size. PHP then
+        // dropped the whole form, csrf_token included, and Unraid answered with
+        // an HTML error page. Multipart carries the fields as they are.
+        var body = new FormData();
+        Object.keys(data).forEach(function(k) { body.append(k, String(data[k])); });
         return new Promise(function(resolve, reject) {
             $.ajax({
                 url: '/plugins/unraid-aicliagents/AICliAjax.php?action=' + action + '&csrf_token=' + encodeURIComponent(window.csrf_token),
                 method: 'POST',
-                data: data,
+                data: body,
+                processData: false,
+                contentType: false,
                 dataType: 'json',
                 timeout: timeoutMs || 60000,
                 success: function(res) { resolve(res); },
