@@ -870,6 +870,8 @@ class StorageMountService {
 
     /**
      * Checks if a generic path is mounted.
+     *
+     * @phpstan-impure Live /proc/mounts probe — an umount between two calls changes it.
      */
     public static function isMounted($path) {
         if (empty($path)) return false;
