@@ -592,3 +592,7 @@ Available via Community Applications. Search for "AI CLI Agents".
 ## Support
 
 [Forum thread](https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/)
+
+## License
+
+MIT — see LICENSE. Third-party notices: THIRD_PARTY_NOTICES.md.
