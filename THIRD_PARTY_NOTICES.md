@@ -3,8 +3,8 @@
 The plugin code is licensed under the MIT License (see `LICENSE`). The plugin
 also ships the third-party software listed below. Each item stays under its own
 license. This file names the license of each item. The full license text and the
-copyright line of each npm package are in the `LICENSE` file inside that package's
-npm archive (the package name and version below identify it).
+copyright line of every item ship with the plugin in `src/THIRD_PARTY_LICENSES.txt`
+(generated with license-checker-rseidelsohn from the installed packages).
 
 ## 1. Web interface (bundled into `src/assets/ui`)
 
@@ -23,7 +23,7 @@ Notes:
 
 - `dompurify` is offered under "MPL-2.0 OR Apache-2.0". This project uses it under
   the Apache-2.0 option. No MPL-covered file is modified or copied.
-- `khroma` has no license field in the lock file. Its upstream repository
+- `khroma` has no license field in the lock file. The license file in its package
   declares the MIT License.
 - `robust-predicates` is in the public domain (Unlicense).
 
