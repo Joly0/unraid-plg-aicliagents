@@ -2955,13 +2955,17 @@ if [ -n "$ORPHAN_N_EXCLUDES" ]; then
 fi
 
 FINAL_NAME=""
+# #490: atomic_write_layer writes the mksquashfs failure reason here, so the
+# failure line below can name it (its stderr is lost inside $(...)).
+export AICLI_AWL_REASON_FILE="$(mktemp "${TMPDIR:-/tmp}/aicli-awl-reason.XXXXXX" 2>/dev/null || true)"
+_awl_reason_text() { [ -n "${AICLI_AWL_REASON_FILE:-}" ] && [ -s "$AICLI_AWL_REASON_FILE" ] && head -c2200 "$AICLI_AWL_REASON_FILE" | tr '\n' ' '; rm -f "${AICLI_AWL_REASON_FILE:-}" 2>/dev/null; return 0; }
 if [ "$SQLITE_DB_COUNT" -gt 0 ] && [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ]; then
     log "Consolidating via no-mount pseudo-file merge ($SQLITE_DB_COUNT SQLite backup(s) shadow live DBs)..."
     _consol_phase "writing"
     update_task_status "Baking consolidated volume..." 40 ""
     # shellcheck disable=SC2086 — intentional word-splitting on the DB path list
     if ! FINAL_NAME=$(bake_via_pseudofile_merge "$TYPE" "$ID" "$PERSIST_PATH" "$_CONSOL_VIEW" "$SQLITE_STAGE" "consolidated" $SQLITE_DBS); then
-        error "No-mount SQLite consolidation bake failed."
+        error "No-mount SQLite consolidation bake failed. $(_awl_reason_text)"
         update_task_status "Failed" 0 "Bake failed"
         rm -rf "$SQLITE_STAGE" 2>/dev/null
         rm -f "$CONSOLIDATE_MARKER"
@@ -2975,7 +2979,7 @@ else
     _consol_phase "writing"
     update_task_status "Baking consolidated volume..." 40 ""
     if ! FINAL_NAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$_CONSOL_VIEW" "consolidated"); then
-        error "Atomic consolidation bake failed."
+        error "Atomic consolidation bake failed. $(_awl_reason_text)"
         update_task_status "Failed" 0 "Bake failed"
         rm -f "$CONSOLIDATE_MARKER"
         lifecycle_log "error" "consolidate_layers" "bash_consolidate_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"atomic_write_layer_failed\"}" 2>/dev/null || true
@@ -2990,6 +2994,7 @@ update_task_status "Finalizing volume..." 80 ""
 # Sanity: check FAT32 size limit on the final file. #495: only on a vfat persist
 # folder (the same rule as the _fat32_cap_check preflight). On a ZFS or btrfs
 # boot disk a merged layer over 3.9 GB is valid and was thrown away.
+rm -f "${AICLI_AWL_REASON_FILE:-}" 2>/dev/null
 SQSH_SIZE=$(stat -c%s "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
 MAX_SIZE=$((3900 * 1024 * 1024)) # 3.9GB
 _CONSOL_PERSIST_FST="${AICLI_ITEST_PERSIST_FSTYPE:-$(findmnt --noheadings --output FSTYPE --target "$PERSIST_PATH" 2>/dev/null || echo '')}"

@@ -551,14 +551,14 @@ FUNCOEF
     # node_modules/.bin/ into PATH so the user can run any agent ad-hoc.
     if [ -n "$frozen_binary" ]; then
         AGENT_BIN_DIR=$(dirname "$frozen_binary")
-        SESSION_PATH="$AGENT_BIN_DIR:$PATH"
+        SESSION_PATH="$HOME_DIR/.local/bin:$AGENT_BIN_DIR:$PATH"
     else
         AGENT_PATH_EXTRA=""
         for d in /usr/local/emhttp/plugins/unraid-aicliagents/agents/*/bin \
                  /usr/local/emhttp/plugins/unraid-aicliagents/agents/*/node_modules/.bin; do
             [ -d "$d" ] && AGENT_PATH_EXTRA="$AGENT_PATH_EXTRA:$d"
         done
-        SESSION_PATH="${AGENT_PATH_EXTRA:+${AGENT_PATH_EXTRA#:}:}$PATH"
+        SESSION_PATH="$HOME_DIR/.local/bin:${AGENT_PATH_EXTRA:+${AGENT_PATH_EXTRA#:}:}$PATH"
     fi
     printf 'export PATH=%q\n' "$SESSION_PATH" >> "$RUN_SCRIPT"
     # GitHub #12: a Bash LOGIN shell started inside this session (an agent's own
@@ -1747,40 +1747,6 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     sleep 5
     exit 1
 fi
-# R-B1: headless ensure-session mode — the detached session now exists (verified
-# by the has-session check above) with the agent running inside it, and all four
-# tmux config tiers have been applied. Return success WITHOUT attaching; the
-# session lives on independent of any browser. A later interactive invocation
-# (ttyd on browser-connect) re-enters this script, finds the session already
-# present (the new-session block is skipped), re-applies options idempotently,
-# and falls through to the attach below.
-if [ "$AICLI_ENSURE_ONLY" -eq 1 ]; then
-    log_aicli "INFO" 2 "ensure-session: detached session $SESSION is live — returning without attach."
-    perf_log ensure.session.done
-    exit 0
-fi
-
-# Bound the number of simultaneously attached clients, keeping the NEWEST.
-#
-# This replaces `attach-session -d` (detach-others). -d was introduced for the
-# reconnect leak (2026-06-06): ttyd's web client reconnects on ANY websocket
-# drop — background-tab throttling, proxy idle timeout, a network blip — and
-# each reconnect attaches a NEW client while the previous one is NOT reaped
-# (runuser/setsid puts each attach in its own session, so ttyd can't SIGHUP it
-# on disconnect). Clients accumulated without bound; tmux mirrors the agent TUI
-# to every one of them on every redraw, so CPU compounded (7 clients on one
-# session, load avg ~5).
-#
-# But -d evicts EVERY other client, which is fine for one browser and broken
-# for two. Opening the same workspace on a phone while a desktop tab is open
-# put them in an eviction loop: the phone's attach evicted the desktop, the
-# desktop's terminal auto-reconnected and evicted the phone, and so on without
-# end — each side seeing a permanent reconnect churn.
-#
-# A cap fixes both. Leaked clients are ALWAYS older than a live reconnect, so
-# pruning oldest-first removes exactly the stale ones while letting genuine
-# concurrent viewers coexist. Set AICLI_MAX_TMUX_CLIENTS=1 to restore the old
-# evict-everyone behaviour.
 # #219: detach any tmux client whose backing ttyd is DEAD, so `window-size
 # latest` cannot size the window to a deploy leftover (the terminal renders
 # shrunk with xterm's background dots). A deploy SIGTERMs the old ttyd but its
@@ -1808,6 +1774,43 @@ detach_dead_ttyd_clients() {
     return 0
 }
 
+# R-B1: headless ensure-session mode — the detached session now exists (verified
+# by the has-session check above) with the agent running inside it, and all four
+# tmux config tiers have been applied. Return success WITHOUT attaching; the
+# session lives on independent of any browser. A later interactive invocation
+# (ttyd on browser-connect) re-enters this script, finds the session already
+# present (the new-session block is skipped), re-applies options idempotently,
+# and falls through to the attach below.
+if [ "$AICLI_ENSURE_ONLY" -eq 1 ]; then
+    log_aicli "INFO" 2 "ensure-session: detached session $SESSION is live — returning without attach."
+    # Forgejo #521: clean clients of dead ttyd processes on this path too.
+    # Safe: it detaches only clients with no live ttyd in their ancestry.
+    detach_dead_ttyd_clients "$SESSION"
+    perf_log ensure.session.done
+    exit 0
+fi
+
+# Bound the number of simultaneously attached clients, keeping the NEWEST.
+#
+# This replaces `attach-session -d` (detach-others). -d was introduced for the
+# reconnect leak (2026-06-06): ttyd's web client reconnects on ANY websocket
+# drop — background-tab throttling, proxy idle timeout, a network blip — and
+# each reconnect attaches a NEW client while the previous one is NOT reaped
+# (runuser/setsid puts each attach in its own session, so ttyd can't SIGHUP it
+# on disconnect). Clients accumulated without bound; tmux mirrors the agent TUI
+# to every one of them on every redraw, so CPU compounded (7 clients on one
+# session, load avg ~5).
+#
+# But -d evicts EVERY other client, which is fine for one browser and broken
+# for two. Opening the same workspace on a phone while a desktop tab is open
+# put them in an eviction loop: the phone's attach evicted the desktop, the
+# desktop's terminal auto-reconnected and evicted the phone, and so on without
+# end — each side seeing a permanent reconnect churn.
+#
+# A cap fixes both. Leaked clients are ALWAYS older than a live reconnect, so
+# pruning oldest-first removes exactly the stale ones while letting genuine
+# concurrent viewers coexist. Set AICLI_MAX_TMUX_CLIENTS=1 to restore the old
+# evict-everyone behaviour.
 prune_excess_tmux_clients() {
     local session="$1" limit="${2:-4}" keep list total drop client_tty
     # We are about to attach as one more client, so at most limit-1 may remain.

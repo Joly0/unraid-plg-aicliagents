@@ -55,6 +55,24 @@ class TerminalService {
     /** TERMINAL_BACKGROUND_WARM.md: the origin of a bridge-only (re)attach. */
     public const ORIGIN_BRIDGE_WARM = 'bridge_warm';
 
+    /** Forgejo #521: the longest the headless ensure-session step may run, in seconds. */
+    public const ENSURE_TIMEOUT_SECONDS = 60;
+
+    /** Forgejo #521: seconds between the stop signal and the kill signal. */
+    public const ENSURE_KILL_AFTER_SECONDS = 5;
+
+    /** Wrap the ensure-session command so it can never block the start request forever. */
+    public static function wrapEnsureTimeout(string $cmd): string
+    {
+        return 'timeout -k ' . self::ENSURE_KILL_AFTER_SECONDS . ' ' . self::ENSURE_TIMEOUT_SECONDS . ' ' . $cmd;
+    }
+
+    /** True when `timeout` ended the command: 124 = stop signal, 137 = kill signal. */
+    public static function isEnsureTimeout(int $rc): bool
+    {
+        return $rc === 124 || $rc === 137;
+    }
+
     /** What a person does after any failed start (ACTIVITY_TRAY_PLAIN_NOTICES.md R5). */
     public const START_RECOVERY = 'Open the workspace and press Restart, or close and reopen it.';
 
@@ -107,6 +125,7 @@ class TerminalService {
             case 'home_storage':        return 'The home storage could not be mounted.';
             case 'terminal_no_answer':  return 'The terminal server did not answer in 2 seconds.';
             case 'terminal_no_launch':  return 'The terminal server could not be started.';
+            case 'ensure_timeout':      return "$agentName did not start in time.";
         }
         return "$agentName did not start.";
     }
@@ -480,10 +499,15 @@ class TerminalService {
             LogService::log("Bridge warm-up for $id: tmux session is live — launching the terminal bridge only.", LogService::LOG_INFO, "TerminalService");
         } else {
         LogService::log("Ensuring detached agent session (headless): $ensureCmd", LogService::LOG_DEBUG, "TerminalService");
-        exec("$ensureCmd > " . escapeshellarg($ensureLog) . " 2>&1", $ensureOut, $ensureRc);
+        exec(self::wrapEnsureTimeout($ensureCmd) . " > " . escapeshellarg($ensureLog) . " 2>&1", $ensureOut, $ensureRc);
         }
         if ($origin === self::ORIGIN_BRIDGE_WARM) {
             // No ensure-session ran; nothing to report.
+        } elseif (self::isEnsureTimeout((int)$ensureRc)) {
+            // Forgejo #521: a blocked ensure-session must end the start with a visible error.
+            LogService::log("ensure-session timed out (rc=$ensureRc) for $id after " . self::ENSURE_TIMEOUT_SECONDS . "s. Start aborted.", LogService::LOG_ERROR, "TerminalService");
+            self::recordStartFailure($actId, $agentName, self::startFailureSentence('ensure_timeout', $agentName), self::START_RECOVERY, $startMeta);
+            return;
         } elseif ($ensureRc !== 0) {
             $tail = file_exists($ensureLog) ? trim((string)shell_exec("tail -n 5 " . escapeshellarg($ensureLog))) : '';
             LogService::log("ensure-session returned rc=$ensureRc for $id (continuing to ttyd; attach will retry). tail: $tail", LogService::LOG_WARN, "TerminalService");

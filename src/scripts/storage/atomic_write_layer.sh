@@ -66,6 +66,16 @@ _awl_last_percent() {
         | grep -Eo '[0-9]+/[0-9]+ +[0-9]{1,3}%' | tail -n 1 | grep -Eo '[0-9]{1,3}%$' | tr -d '%'
 }
 
+# #490: the last lines of a mksquashfs output file, without the progress bar.
+# Carriage returns become newlines, bar lines are dropped, the result is at most
+# 2000 bytes on one line (newlines shown as " | ").
+_awl_output_tail() {
+    [ -n "${1:-}" ] && [ -f "$1" ] || return 0
+    tr '\r' '\n' < "$1" 2>/dev/null \
+        | grep -Ev '^[[:space:]]*(\[[^]]*\][[:space:]]*)?[0-9]+/[0-9]+[[:space:]]+[0-9]+%[[:space:]]*$|^[[:space:]]*$' \
+        | tail -n 12 | tr '\n' '|' | sed 's/|/ | /g' | tail -c2000
+}
+
 # _awl_force_progress_flag — print "-force-progress" when this mksquashfs
 # accepts it, else nothing. #490 (2026-10-14): the option exists from
 # squashfs-tools 4.6 only. Unraid ships 4.5, which prints its usage and exits 1
@@ -264,14 +274,14 @@ atomic_write_layer() {
             ) > /dev/null 2>&1 &
             _awl_watch_pid=$!
         fi
-        local _awl_mksq_rc=0
-        if [ -n "$_awl_prog_file" ]; then
-            # shellcheck disable=SC2086
-            $_batch_pfx mksquashfs "$upper_dir" "$tmp_path" $mksq_args > "$_awl_prog_file" 2>&1 || _awl_mksq_rc=$?
-        else
-            # shellcheck disable=SC2086
-            $_batch_pfx mksquashfs "$upper_dir" "$tmp_path" $mksq_args > /dev/null 2>&1 || _awl_mksq_rc=$?
+        local _awl_mksq_rc=0 _awl_out_file="$_awl_prog_file" _awl_reason=""
+        if [ -z "$_awl_out_file" ]; then
+            # #490: no hook. Keep the output in a temp file so a failure can name its reason.
+            _awl_out_file="${tmp_path}.out"
+            : > "$_awl_out_file" 2>/dev/null || _awl_out_file=/dev/null
         fi
+        # shellcheck disable=SC2086
+        $_batch_pfx mksquashfs "$upper_dir" "$tmp_path" $mksq_args > "$_awl_out_file" 2>&1 || _awl_mksq_rc=$?
         if [ -n "$_awl_watch_pid" ]; then
             kill "$_awl_watch_pid" 2>/dev/null || true
             wait "$_awl_watch_pid" 2>/dev/null || true
@@ -279,10 +289,18 @@ atomic_write_layer() {
         if [ -n "$_awl_prog_file" ]; then
             _awl_pct="$(_awl_last_percent "$_awl_prog_file")"
             [ -n "$_awl_pct" ] && "$AICLI_BAKE_PROGRESS_HOOK" "$_awl_pct" 2>/dev/null
-            rm -f "$_awl_prog_file" 2>/dev/null || true
         fi
         if [ "$_awl_mksq_rc" -ne 0 ]; then
-            echo "[atomic_write_layer] ERROR: mksquashfs failed" >&2
+            # #490: keep mksquashfs's own message. Read it before the temp file goes.
+            _awl_reason="$(_awl_output_tail "$_awl_out_file" || true)" || _awl_reason=""
+        fi
+        if [ -n "$_awl_prog_file" ]; then rm -f "$_awl_prog_file" 2>/dev/null || true; fi
+        if [ "$_awl_out_file" != "/dev/null" ]; then rm -f "$_awl_out_file" 2>/dev/null || true; fi
+        if [ "$_awl_mksq_rc" -ne 0 ]; then
+            echo "[atomic_write_layer] ERROR: mksquashfs failed (exit $_awl_mksq_rc): ${_awl_reason:-no output}" >&2
+            if [ -n "${AICLI_AWL_REASON_FILE:-}" ]; then
+                printf 'mksquashfs failed (exit %s): %s\n' "$_awl_mksq_rc" "${_awl_reason:-no output}" > "$AICLI_AWL_REASON_FILE" 2>/dev/null || true
+            fi
             exit 1
         fi
 
