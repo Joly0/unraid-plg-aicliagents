@@ -297,21 +297,25 @@
     // R5: HTTP status + first 200 chars of a non-JSON body; a definite
     // transport failure (timeout, or a request that never reached the
     // server) is flagged so the chunk loop can retry it once.
+    // #515: URL-safe base64 ('-' '_', no '=' padding). In a URL-encoded form,
+    // standard base64 grows each '+' and '/' to 3 bytes: about 6 % for a binary
+    // file, so a full-size chunk passed post_max_size, PHP dropped the whole
+    // form (csrf_token too) and Unraid answered with an HTML page. '-' and '_'
+    // are sent as they are. The server turns the text back (enc=b64url).
+    // Multipart is no way out: it hangs on Unraid's nginx (D-405).
+    function toBase64Url(b64) {
+        return String(b64).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
     function postUpload(action, data, timeoutMs) {
-        // #515: send multipart form data, not a URL-encoded form. URL encoding
-        // turns each '+' and '/' of the base64 text into 3 bytes, about 6 % more
-        // for a binary file, so a full-size chunk passed post_max_size. PHP then
-        // dropped the whole form, csrf_token included, and Unraid answered with
-        // an HTML error page. Multipart carries the fields as they are.
-        var body = new FormData();
-        Object.keys(data).forEach(function(k) { body.append(k, String(data[k])); });
+        if (typeof data.filedata === 'string') {
+            data = Object.assign({}, data, { filedata: toBase64Url(data.filedata), enc: 'b64url' });
+        }
         return new Promise(function(resolve, reject) {
             $.ajax({
                 url: '/plugins/unraid-aicliagents/AICliAjax.php?action=' + action + '&csrf_token=' + encodeURIComponent(window.csrf_token),
                 method: 'POST',
-                data: body,
-                processData: false,
-                contentType: false,
+                data: data,
                 dataType: 'json',
                 timeout: timeoutMs || 60000,
                 success: function(res) { resolve(res); },

@@ -95,6 +95,22 @@ if (isset($_GET['action'])) {
         }
     }
 
+    // #515: the browser sends upload data as URL-safe base64 (enc=b64url).
+    // Standard base64 in a URL-encoded form grows each '+' and '/' to 3 bytes,
+    // so a full chunk of a binary file passed post_max_size, PHP dropped the
+    // form and Unraid answered with HTML. (Multipart is no way out: it hangs on
+    // Unraid's nginx, D-405.) Turn it back into standard base64 here, once,
+    // for the handlers' strict base64_decode. A request without enc is left alone.
+    if (in_array($action, ['save_file', 'save_file_chunk', 'notebook_asset_upload', 'notebook_import'], true)
+        && ($_POST['enc'] ?? '') === 'b64url') {
+        foreach (['filedata', 'data'] as $b64Key) {
+            if (isset($_POST[$b64Key]) && is_string($_POST[$b64Key])) {
+                $_POST[$b64Key] = \AICliAgents\Handlers\UtilityHandler::fromBase64Url($_POST[$b64Key]);
+                $_REQUEST[$b64Key] = $_POST[$b64Key];
+            }
+        }
+    }
+
     // Validate session ID
     $rawId = $_GET['id'] ?? 'default';
     $id = ValidationService::validateId($rawId) ?: 'default';

@@ -767,6 +767,19 @@ class UtilityHandler {
     }
 
     /**
+     * #515: URL-safe base64 ('-' '_', no '=' padding, as the browser sends
+     * upload data with enc=b64url) back to standard padded base64, for the
+     * strict base64_decode of the upload handlers. URL encoding leaves '-' and
+     * '_' as they are, so the form is no larger than the base64 text that R3
+     * sizes the chunk for.
+     */
+    public static function fromBase64Url(string $s): string {
+        $s = strtr($s, '-_', '+/');
+        $pad = strlen($s) % 4;
+        return $pad === 0 ? $s : $s . str_repeat('=', 4 - $pad);
+    }
+
+    /**
      * docs/specs/WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3 — the client asks this
      * once per overlay open to size its chunks. `chunk_bytes` is the biggest
      * RAW (pre-base64) chunk that still fits the server's `post_max_size`
