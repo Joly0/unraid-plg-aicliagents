@@ -1169,6 +1169,27 @@ class HubProjector {
     }
 
     /**
+     * Why a projector write failed, in plain words, for the log line (#514).
+     * The line used to say "unparseable files are never clobbered" for every
+     * failure. On prod02 the real cause was a broken link: the Antigravity
+     * skills folder pointed one folder too high, so no skill file could be made.
+     * Walks up from $abs to the first part that exists and names a broken link
+     * on the way, or a folder that is not writable.
+     */
+    public static function writeFailReason(string $abs): string {
+        $path = rtrim($abs, '/');
+        while ($path !== '' && $path !== '/' && $path !== '.') {
+            if (is_link($path) && !file_exists($path)) {
+                return "$path is a broken link to '" . (string)@readlink($path) . "'; fix or remove the link";
+            }
+            if (file_exists($path)) break;
+            $path = dirname($path);
+        }
+        if (is_dir($path) && !is_writable($path)) return "$path is not writable";
+        return 'the existing file could not be read safely (unparseable files are never clobbered)';
+    }
+
+    /**
      * Reconcile one vendor file against a precomputed desired managed-key map
      * (the caller derives it — from enabled MCP servers or from the instruction
      * doc + target set). Mutates $state's entry for the file. With $write=false
@@ -1251,7 +1272,7 @@ class HubProjector {
                 foreach (array_merge(array_keys($set), $remove) as $key) {
                     $drift[] = self::driftRec($file, $key, $agentId, 'write_failed', $current[$key] ?? null, $desired[$key] ?? null);
                 }
-                LogService::log("hub project: write refused/failed for $file (unparseable files are never clobbered)", LogService::LOG_WARN, 'HubProjector');
+                LogService::log("hub project: could not write $file: " . self::writeFailReason($abs), LogService::LOG_WARN, 'HubProjector');
             }
         }
 
