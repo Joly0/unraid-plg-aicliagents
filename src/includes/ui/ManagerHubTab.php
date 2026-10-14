@@ -306,14 +306,14 @@
                         <div id="hub-auth-bearer" style="display:none; margin-top:6px;">
                             <div style="display:flex; gap:6px; align-items:center;">
                                 <code style="font-size:11px; opacity:0.7; white-space:nowrap;">Authorization: Bearer</code>
-                                <input type="password" id="hub-f-bearer" autocomplete="new-password" style="flex:1; max-width:360px; font-family:monospace; font-size:11px;">
+                                <input type="password" data-aicli-eye id="hub-f-bearer" autocomplete="new-password" style="flex:1; max-width:360px; font-family:monospace; font-size:11px;">
                             </div>
                             <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Type only the secret key in braces, for example <code>{MY_TOKEN}</code>. "Bearer " is added for you. The token itself lives under Secrets, and the hub resolves it when it applies the server to agents.</p>
                         </div>
                         <div id="hub-auth-header" style="display:none; margin-top:6px;">
                             <div style="display:flex; gap:6px; align-items:center;">
                                 <input type="text" id="hub-f-auth-name" placeholder="X-API-Key" style="width:180px; font-family:monospace; font-size:11px;">
-                                <input type="password" id="hub-f-auth-val" autocomplete="new-password" style="flex:1; max-width:320px; font-family:monospace; font-size:11px;">
+                                <input type="password" data-aicli-eye id="hub-f-auth-val" autocomplete="new-password" style="flex:1; max-width:320px; font-family:monospace; font-size:11px;">
                             </div>
                             <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">For servers whose docs name another header, such as <code>X-API-Key</code>, or <code>Authorization</code> with Basic credentials. A header that carries a credential must use a <code>{SECRET_KEY}</code> value; the hub refuses typed secrets.</p>
                         </div>
