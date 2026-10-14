@@ -1031,6 +1031,59 @@
         }
     }
 
+    // VOICE_INPUT.md "WAV upload" (2026-10-15): a self-hosted engine can refuse
+    // the compressed clip a browser records (speaches 0.8.3 answered HTTP 400
+    // to WebM/Opus, OGG and MP4/AAC, and read WAV, FLAC and MP3). Each piece is
+    // decoded here and sent as 16 kHz mono 16-bit WAV, which every engine
+    // reads. An 8 s piece is about 256 KB. When this browser cannot decode the
+    // piece, the original clip goes as before.
+    var STT_WAV_RATE = 16000;
+
+    /** 16-bit PCM WAV bytes for mono float samples (-1..1). */
+    function encodeWav16(samples, rate) {
+        var buf = new ArrayBuffer(44 + samples.length * 2);
+        var v = new DataView(buf);
+        var str = function (off, s) { for (var i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+        str(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); str(8, 'WAVE');
+        str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+        v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+        str(36, 'data'); v.setUint32(40, samples.length * 2, true);
+        for (var i = 0, off = 44; i < samples.length; i++, off += 2) {
+            var s = Math.max(-1, Math.min(1, samples[i]));
+            v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        }
+        return buf;
+    }
+
+    /** Resolves {blob, mime}: the piece as 16 kHz mono WAV, or the original
+     *  piece when this browser cannot decode it. Never rejects. */
+    function toWavPiece(blob, mimeType) {
+        var original = { blob: blob, mime: mimeType };
+        return new Promise(function (resolve) {
+            try {
+                var Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+                if (!Ctx || !blob || typeof blob.arrayBuffer !== 'function') { resolve(original); return; }
+                blob.arrayBuffer().then(function (bytes) {
+                    // decodeAudioData resamples to the context's own rate.
+                    var ctx = new Ctx(1, 1, STT_WAV_RATE);
+                    var ok = function (audio) {
+                        try {
+                            var n = audio.length, ch = audio.numberOfChannels, mono = new Float32Array(n);
+                            for (var c = 0; c < ch; c++) {
+                                var d = audio.getChannelData(c);
+                                for (var i = 0; i < n; i++) mono[i] += d[i] / ch;
+                            }
+                            if (!n) { resolve(original); return; }
+                            resolve({ blob: new Blob([encodeWav16(mono, audio.sampleRate)], { type: 'audio/wav' }), mime: 'audio/wav' });
+                        } catch (e) { resolve(original); }
+                    };
+                    var p = ctx.decodeAudioData(bytes, ok, function () { resolve(original); });
+                    if (p && typeof p.catch === 'function') p.catch(function () { resolve(original); });
+                }, function () { resolve(original); });
+            } catch (e) { resolve(original); }
+        });
+    }
+
     /**
      * Transcribes one piece and, when it is the LAST piece (a stop was
      * requested), reports the flush text through the normal idle event;
@@ -1044,6 +1097,7 @@
             if (gen !== inputGeneration) { resolve(); return; }
             if (isFinal) setInputState('transcribing', { seconds: inputSeconds });
             var reader = new FileReader();
+            var sendMime = mimeType;
             var onDone = function (text, error) {
                 if (gen !== inputGeneration) { resolve(); return; }
                 if (isFinal) {
@@ -1064,7 +1118,7 @@
                 var comma = dataUrl.indexOf(',');
                 var b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
                 var body = 'filedata=' + encodeURIComponent(b64) +
-                    '&mime=' + encodeURIComponent(mimeType || '') +
+                    '&mime=' + encodeURIComponent(sendMime || '') +
                     '&seconds=' + encodeURIComponent(String(pieceSeconds)) +
                     '&workspaceId=' + encodeURIComponent(inputOpts.workspaceId || '') +
                     '&csrf_token=' + encodeURIComponent(inputCsrf());
@@ -1083,7 +1137,11 @@
                 });
             };
             reader.onerror = function () { onDone('', 'The transcription server did not answer.'); };
-            reader.readAsDataURL(blob);
+            toWavPiece(blob, mimeType).then(function (piece) {
+                if (gen !== inputGeneration) { resolve(); return; }
+                sendMime = piece.mime;
+                reader.readAsDataURL(piece.blob);
+            });
         });
     }
 
