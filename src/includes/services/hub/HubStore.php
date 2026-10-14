@@ -31,6 +31,18 @@ class HubStore {
     const SCHEMA = 1;
     const NAME_RE = '/^[a-zA-Z0-9_-]{1,64}$/';
     const ENV_KEY_RE = '/^[A-Za-z_][A-Za-z0-9_]{0,127}$/';
+    /** HTTP header field-name (RFC 9110 token), capped at 128 chars. */
+    const HEADER_KEY_RE = "/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/";
+    /** Headers the MCP client manages itself; a user value would break the transport. */
+    const RESERVED_HEADERS = ['accept', 'content-length', 'content-type', 'host',
+                              'mcp-protocol-version', 'mcp-session-id', 'last-event-id'];
+    /**
+     * Header names that carry a credential. The value of such a header must be made of
+     * vault {KEY} placeholders (see headerSecretProblem()); a raw secret is refused.
+     */
+    const SENSITIVE_HEADER_RE = '/^(authorization|proxy-authorization|cookie)$|token|secret|passw|credential|api[-_]?key|(^|-)key$|auth/i';
+    /** One vault placeholder, the same shape HubProjector::resolvePlaceholders() resolves. */
+    const PLACEHOLDER_RE = '/\{[A-Z][A-Z0-9_]{1,127}\}/';
     const TRANSPORTS = ['stdio', 'http', 'sse'];
     const AGENT_ID_RE = '/^[a-z0-9][a-z0-9-]{0,63}$/i';
     /** Size cap for the canonical instruction doc (H-02). */
@@ -92,8 +104,8 @@ class HubStore {
 
     /**
      * Validate + normalize a canonical server definition. Returns the normalized
-     * def, or null with $errors populated. NEVER log env values.
-     * @param array $def {command|url, args[], env{}, transport, enabledFor[]}
+     * def, or null with $errors populated. NEVER log env or header values.
+     * @param array $def {command|url, args[], env{}, headers{}, transport, enabledFor[]}
      */
     public static function normalizeServer(array $def, array &$errors = []): ?array {
         $errors = [];
@@ -121,6 +133,27 @@ class HubStore {
             $url = trim((string)($def['url'] ?? ''));
             if ($url === '' || !preg_match('#^https?://#i', $url)) $errors[] = 'a http(s) url is required for http/sse transport';
             $out['url'] = $url;
+            $headers = $def['headers'] ?? [];
+            if (!is_array($headers)) { $errors[] = 'headers must be a map'; $headers = []; }
+            $cleanHeaders = [];
+            $seen = [];
+            foreach ($headers as $k => $v) {
+                $k = (string)$k;
+                if (!preg_match(self::HEADER_KEY_RE, $k)) { $errors[] = "invalid header name '$k'"; continue; }
+                if (isset($seen[strtolower($k)])) { $errors[] = "header '$k' is set twice (names are not case-sensitive)"; continue; }
+                $seen[strtolower($k)] = true;
+                if (in_array(strtolower($k), self::RESERVED_HEADERS, true)) { $errors[] = "header '$k' is set by the MCP client and cannot be overridden"; continue; }
+                $v = (string)$v;
+                if (preg_match('/[\x00-\x08\x0A-\x1F\x7F]/', $v)) { $errors[] = "header '$k' value contains control characters"; continue; }
+                $problem = self::headerSecretProblem($k, $v);
+                if ($problem !== null) { $errors[] = $problem; continue; }
+                $cleanHeaders[$k] = $v;
+            }
+            ksort($cleanHeaders);
+            if (!empty($cleanHeaders)) $out['headers'] = $cleanHeaders;
+            // UI hint only (which header the editor shows as "Authentication"); projectors ignore it.
+            $authHeader = (string)($def['authHeader'] ?? '');
+            if ($authHeader !== '' && isset($cleanHeaders[$authHeader])) $out['authHeader'] = $authHeader;
         }
 
         $enabledFor = $def['enabledFor'] ?? [];
@@ -153,6 +186,23 @@ class HubStore {
         return empty($errors) ? $out : null;
     }
 
+    /**
+     * A credential header must not hold a raw secret: mcp.json is plain text, and the Hub git
+     * backup commits it. The value must be vault placeholders only, after an optional scheme
+     * word, for example `Bearer {GITHUB_TOKEN}`. Returns an error text, or null when the
+     * header is fine. Never includes the value in the text.
+     */
+    public static function headerSecretProblem(string $name, string $value): ?string {
+        if (!preg_match(self::SENSITIVE_HEADER_RE, $name)) return null;
+        if ($value === '') return null; // an empty value holds no secret
+        $rest = preg_replace('/^(Bearer|Basic|Token)\s+/i', '', $value);
+        $rest = (string)preg_replace(self::PLACEHOLDER_RE, '', (string)$rest);
+        if (trim($rest) === '' && preg_match(self::PLACEHOLDER_RE, $value)) return null;
+        return "header '$name' looks like a credential and must not hold a raw secret. "
+             . "Store the secret under Secrets, then write its key here in braces, for example "
+             . ((strcasecmp($name, 'Authorization') === 0) ? "'Bearer {MY_TOKEN}'" : "'{MY_TOKEN}'") . '.';
+    }
+
     /** Create or replace one server. $def is validated/normalized. */
     public static function saveServer(string $name, array $def, array &$errors = []): bool {
         $errors = [];
@@ -163,7 +213,7 @@ class HubStore {
         $mcp['servers'][$name] = $norm;
         $ok = self::saveMcp($mcp);
         if ($ok) {
-            LogService::log("saved MCP server '$name' (transport={$norm['transport']}, env keys=" . count($norm['env'] ?? []) . ', targets=' . count($norm['enabledFor']) . ')', LogService::LOG_INFO, 'HubStore');
+            LogService::log("saved MCP server '$name' (transport={$norm['transport']}, env keys=" . count($norm['env'] ?? []) . ', header keys=' . count($norm['headers'] ?? []) . ', targets=' . count($norm['enabledFor']) . ')', LogService::LOG_INFO, 'HubStore');
             // H-04 (#1365): debounced auto-commit AFTER the successful write — name only, never values.
             GitHomeService::commitIfEnabled("hub: mcp server '$name' saved");
         }

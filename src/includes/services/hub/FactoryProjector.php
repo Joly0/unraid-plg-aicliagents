@@ -23,6 +23,6 @@ class FactoryProjector extends JsonMcpProjector {
     protected function vendorValue(array $def): array {
         $transport = $def['transport'] ?? 'stdio';
         if ($transport === 'stdio') return $this->stdioShape($def); // {command,args?,env?} — no type
-        return ['type' => ($transport === 'http' ? 'http' : 'sse'), 'url' => (string)($def['url'] ?? '')];
+        return self::withHeaders(['type' => ($transport === 'http' ? 'http' : 'sse'), 'url' => (string)($def['url'] ?? '')], $def);
     }
 }

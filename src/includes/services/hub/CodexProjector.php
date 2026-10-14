@@ -28,8 +28,11 @@ class CodexProjector extends VendorProjector {
 
     public function desired(array $servers): array {
         if (empty($servers)) return [];
-        return [self::FENCE_KEY => self::FENCE_OPEN . "\n" . Transpiler::toCodexToml($servers) . "\n" . self::FENCE_CLOSE];
+        return [self::FENCE_KEY => self::FENCE_OPEN . "\n" . Transpiler::toCodexToml($servers, $this->headersKey()) . "\n" . self::FENCE_CLOSE];
     }
+
+    /** TOML sub-table that carries a remote server's custom HTTP headers. */
+    protected function headersKey(): string { return 'http_headers'; }
 
     public function current(string $file, array $keys): array {
         if (!in_array(self::FENCE_KEY, $keys, true) || !is_file($file)) return [];

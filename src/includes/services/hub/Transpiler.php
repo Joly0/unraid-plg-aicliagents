@@ -20,9 +20,11 @@ class Transpiler {
     /**
      * Canonical servers → Codex CLI TOML ([mcp_servers.<id>] tables).
      * @param array<string,array> $servers name => normalized canonical def
-     *        (env placeholders already resolved by the caller).
+     *        (env/header placeholders already resolved by the caller).
+     * @param string $headersKey sub-table name for custom HTTP headers: Codex reads
+     *        `http_headers`, Grok Build reads `headers`.
      */
-    public static function toCodexToml(array $servers): string {
+    public static function toCodexToml(array $servers, string $headersKey = 'http_headers'): string {
         ksort($servers);
         $blocks = [];
         foreach ($servers as $name => $def) {
@@ -50,6 +52,15 @@ class Transpiler {
             } else {
                 $lines[] = 'url = ' . self::tomlString((string)($def['url'] ?? ''));
                 if ($ta !== '') $lines[] = 'default_tools_approval_mode = ' . self::tomlString($ta);
+                $headers = $def['headers'] ?? [];
+                if (!empty($headers)) {
+                    ksort($headers);
+                    $lines[] = '';
+                    $lines[] = '[mcp_servers.' . $name . '.' . $headersKey . ']';
+                    foreach ($headers as $k => $v) {
+                        $lines[] = self::tomlKey((string)$k) . ' = ' . self::tomlString((string)$v);
+                    }
+                }
             }
             $blocks[] = implode("\n", $lines);
         }
@@ -60,7 +71,7 @@ class Transpiler {
      * Canonical servers → Goose config.yaml `extensions:` map entries.
      * Emitted at $indent spaces (children of the extensions: key — default 2).
      * Goose stdio key is `cmd` (not `command`); env map key is `envs`;
-     * remote transports use `uri` with type sse / streamable_http.
+     * remote transports use `uri` with type sse / streamable_http, plus `headers`.
      * @param array<string,array> $servers name => normalized canonical def.
      */
     public static function toGooseYaml(array $servers, int $indent = 2): string {
@@ -89,6 +100,15 @@ class Transpiler {
                     ksort($env);
                     $out[] = $i2 . 'envs:';
                     foreach ($env as $k => $v) {
+                        $out[] = $i3 . self::yamlKey((string)$k) . ': ' . self::yamlScalar((string)$v);
+                    }
+                }
+            } else {
+                $headers = $def['headers'] ?? [];
+                if (!empty($headers)) {
+                    ksort($headers);
+                    $out[] = $i2 . 'headers:';
+                    foreach ($headers as $k => $v) {
                         $out[] = $i3 . self::yamlKey((string)$k) . ': ' . self::yamlScalar((string)$v);
                     }
                 }

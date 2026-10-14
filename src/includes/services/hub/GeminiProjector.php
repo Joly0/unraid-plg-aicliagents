@@ -22,7 +22,7 @@ class GeminiProjector extends JsonMcpProjector {
     protected function vendorValue(array $def): array {
         $transport = $def['transport'] ?? 'stdio';
         if ($transport === 'stdio') return $this->stdioShape($def);
-        if ($transport === 'http')  return ['httpUrl' => (string)($def['url'] ?? '')];
-        return ['url' => (string)($def['url'] ?? '')]; // sse
+        if ($transport === 'http')  return self::withHeaders(['httpUrl' => (string)($def['url'] ?? '')], $def);
+        return self::withHeaders(['url' => (string)($def['url'] ?? '')], $def); // sse
     }
 }

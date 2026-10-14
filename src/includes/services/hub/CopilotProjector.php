@@ -24,6 +24,6 @@ class CopilotProjector extends JsonMcpProjector {
         if ($transport === 'stdio') {
             return ['type' => 'local'] + $this->stdioShape($def) + ['tools' => ['*']];
         }
-        return ['type' => $transport, 'url' => (string)($def['url'] ?? ''), 'tools' => ['*']];
+        return self::withHeaders(['type' => $transport, 'url' => (string)($def['url'] ?? ''), 'tools' => ['*']], $def);
     }
 }

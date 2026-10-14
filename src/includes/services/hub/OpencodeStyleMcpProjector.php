@@ -27,7 +27,7 @@ abstract class OpencodeStyleMcpProjector extends JsonMcpProjector {
     protected function vendorValue(array $def): array {
         $transport = $def['transport'] ?? 'stdio';
         if ($transport !== 'stdio') {
-            return ['type' => 'remote', 'url' => (string)($def['url'] ?? '')];
+            return self::withHeaders(['type' => 'remote', 'url' => (string)($def['url'] ?? '')], $def);
         }
         // stdio: command is the binary + args, merged into a single array.
         $command = array_merge(

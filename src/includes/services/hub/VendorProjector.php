@@ -75,6 +75,19 @@ abstract class VendorProjector {
         return sha1(json_encode(self::canonicalize($v), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
     }
 
+    /**
+     * Add a remote def's custom HTTP headers to a vendor entry under $key, sorted
+     * for a stable hash. A def without headers returns $entry unchanged, so
+     * existing projections (and their drift baselines) are not disturbed.
+     */
+    protected static function withHeaders(array $entry, array $def, string $key = 'headers'): array {
+        $headers = $def['headers'] ?? [];
+        if (!is_array($headers) || empty($headers)) return $entry;
+        ksort($headers);
+        $entry[$key] = array_map('strval', $headers);
+        return $entry;
+    }
+
     /** Recursively convert stdClass→array and ksort maps for stable hashing. */
     public static function canonicalize($v) {
         if ($v instanceof \stdClass) $v = (array)$v;

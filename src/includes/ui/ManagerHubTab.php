@@ -281,6 +281,54 @@
                         <input type="text" id="hub-f-url" placeholder="https://example.com/mcp" style="width:100%; max-width:520px;">
                     </label>
                     <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">The full web address of the remote MCP server, including https://.</p>
+                    <div style="margin-top:8px;">
+                        <span style="font-size:11px;">Authentication</span>
+                        <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">How the server checks who you are. Most servers (Home Assistant, GitHub, ...) use a bearer token. Choose None if the server needs no login. A token is never stored as typed text: store it under Secrets and use its key in braces.</p>
+                        <style>
+                            /* Segmented control (av2-seg base) sized to its content, with an even
+                               1px frame and a neutral fill for the chosen option instead of the
+                               orange frame + bottom bar used on the agent cards. */
+                            #hub-editor .hub-auth-seg { width: auto; max-width: none; grid-auto-columns: auto; }
+                            #hub-editor .hub-auth-seg label { padding: 5px 14px; box-shadow: inset 0 0 0 1px transparent; }
+                            #hub-editor .hub-auth-seg input:checked + label {
+                                background: rgba(127,127,127,0.22);
+                                box-shadow: inset 0 0 0 1px rgba(127,127,127,0.55);
+                            }
+                        </style>
+                        <div class="av2-seg hub-auth-seg" role="radiogroup" aria-label="Authentication">
+                            <input type="radio" id="hub-auth-none" name="hub-auth-mode" value="none" onchange="hubAuthModeChanged()">
+                            <label for="hub-auth-none">None</label>
+                            <input type="radio" id="hub-auth-bearer-opt" name="hub-auth-mode" value="bearer" onchange="hubAuthModeChanged()">
+                            <label for="hub-auth-bearer-opt">Bearer token</label>
+                            <input type="radio" id="hub-auth-header-opt" name="hub-auth-mode" value="header" onchange="hubAuthModeChanged()">
+                            <label for="hub-auth-header-opt">Custom header</label>
+                        </div>
+                        <div id="hub-auth-bearer" style="display:none; margin-top:6px;">
+                            <div style="display:flex; gap:6px; align-items:center;">
+                                <code style="font-size:11px; opacity:0.7; white-space:nowrap;">Authorization: Bearer</code>
+                                <input type="password" id="hub-f-bearer" autocomplete="new-password" style="flex:1; max-width:360px; font-family:monospace; font-size:11px;">
+                            </div>
+                            <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Type only the secret key in braces, for example <code>{MY_TOKEN}</code>. "Bearer " is added for you. The token itself lives under Secrets, and the hub resolves it when it applies the server to agents.</p>
+                        </div>
+                        <div id="hub-auth-header" style="display:none; margin-top:6px;">
+                            <div style="display:flex; gap:6px; align-items:center;">
+                                <input type="text" id="hub-f-auth-name" placeholder="X-API-Key" style="width:180px; font-family:monospace; font-size:11px;">
+                                <input type="password" id="hub-f-auth-val" autocomplete="new-password" style="flex:1; max-width:320px; font-family:monospace; font-size:11px;">
+                            </div>
+                            <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">For servers whose docs name another header, such as <code>X-API-Key</code>, or <code>Authorization</code> with Basic credentials. A header that carries a credential must use a <code>{SECRET_KEY}</code> value; the hub refuses typed secrets.</p>
+                        </div>
+                    </div>
+                    <div style="margin-top:8px;">
+                        <span style="font-size:11px;">Additional headers <span style="opacity:0.5;">(optional)</span></span>
+                        <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Only if the server's docs ask for extra headers, such as a tenant or workspace id. The login token belongs under Authentication above.</p>
+                        <div id="hub-header-rows" style="display:flex; flex-direction:column; gap:4px; margin-top:4px;"></div>
+                        <button type="button" class="aicli-btn-slim" style="margin-top:4px;" onclick="hubAddHeaderRow('', false)"><i class="fa fa-plus"></i> Add header</button>
+                    </div>
+                    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                        <button type="button" class="aicli-btn-slim" id="hub-test-btn" onclick="hubTestServer()"><i class="fa fa-plug"></i> Test connection</button>
+                        <span id="hub-test-result" style="font-size:11px;"></span>
+                    </div>
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Connects from this Unraid server to the address above, with the values above, and does not save them. Redirects are not followed. The result shows the HTTP status and a short reason, never the reply of the server.</p>
                 </div>
                 <div style="margin-top:12px;">
                     <span style="font-size:11px;">Enable for agents</span>

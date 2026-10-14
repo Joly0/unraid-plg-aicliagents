@@ -6,4 +6,6 @@ class GrokProjector extends CodexProjector {
     public function agentId(): string { return 'grok-build'; }
     public function relPath(): string { return '.grok/config.toml'; }
     public function label(): string   { return 'Grok Build'; }
+    /** Grok Build reads `headers`, not Codex's `http_headers`. */
+    protected function headersKey(): string { return 'headers'; }
 }
