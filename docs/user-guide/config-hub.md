@@ -69,7 +69,7 @@ Notes on the table:
    - **stdio (local command)**: a program that runs on the Unraid server.
    - **http (streamable HTTP)** or **sse (server-sent events)**: a web address of a remote server.
 4. For stdio, type the **Command** (the full path of the program). Type the **Arguments**, one on each line.
-5. For http or sse, type the **URL**, including `https://`.
+5. For http or sse, type the **URL**, including `https://`. Then choose **Authentication** if the server needs a login (see "Log in to a remote server" below).
 6. For a stdio server, add **Environment variables** if the program needs them. Press **Add variable** for each one.
 7. Under **Enable for agents**, tick each agent that should receive this server.
 8. Press **Save Server**.
@@ -81,6 +81,47 @@ At this point nothing has changed in any agent file. The server is only stored.
 An environment variable can hold the text `{SECRET_KEY}`. At **Apply to agents**, the Config Hub replaces it with the value of that key from your secrets (see [Agent Store](agent-store.md)). The Config Hub keeps the placeholder in its own copy. After you save, the values of environment variables show masked.
 
 To change a server, press the pencil icon. To remove one, press the trash icon. A removed server leaves the agent files at the next **Apply to agents**.
+
+### Log in to a remote server
+
+A remote server (http or sse) often wants a login. The editor has an **Authentication** choice and a list of **Additional headers**. A header is a named line that the agent sends with each request to the server.
+
+1. Store the secret first. In the Agent Store, open the **Envs** panel of any agent, press **Add secret**, and give the secret a name in capital letters, for example `MY_TOKEN` (see [Agent Store](agent-store.md)). The plugin keeps each secret once, by its name.
+2. In the editor, choose **Bearer token** and type the key in braces: `{MY_TOKEN}`. The Config Hub adds `Bearer ` in front for you.
+3. Choose **Custom header** when the server wants another header, for example `X-API-Key`. Type the header name and the value `{MY_KEY}`.
+4. Under **Additional headers**, press **Add header** for a header that is not a login, for example a tenant number. This kind of value can be plain text.
+5. Press **Save Server**.
+
+The Config Hub never stores a typed token. A header that carries a login must hold a key in braces. If you type the token itself, the editor and the Config Hub refuse it and tell you to store the secret first. The reason is that the shared copy is a plain file, and the history backup would copy it. At **Apply to agents**, the Config Hub puts the real value into the file of each agent, in the form that the agent reads. The shared copy and the history keep only the key in braces.
+
+If a key in braces is not in your secrets, the editor warns you after you save. The agent would receive the text `{MY_TOKEN}` and the server would reject it.
+
+After you save, the values of headers show masked. Leave a masked value as it is to keep it.
+
+### Test the connection
+
+Press **Test connection** in the editor to check a remote server before you apply it.
+
+1. Fill in the **URL** and the **Authentication**. You do not need to save first.
+2. Press **Test connection**.
+
+Expect: a green line such as "Connected (HTTP 200), 2 tools." or a red line with the HTTP status and a short reason, for example "HTTP 401: the server rejected the request as unauthenticated."
+
+Facts about the test:
+
+- The Unraid server makes the request, not your browser. It can reach any address that the Unraid server can reach, including your local network. Only a signed-in administrator can start it.
+- The test uses only http and https. It does not follow a redirect. It stops after 5 seconds to connect, 10 seconds for each request and 1 MB of reply.
+- The result shows the status code and a fixed reason. It never shows the text that the remote server sent.
+- The test does not save anything.
+
+### Switch a server off and on
+
+Each server row has a button that reads **On** or **Off**.
+
+1. Press **On** to switch the server off for all agents. The button then reads **Off**. The row is dimmed and shows the badge **off**.
+2. Press **Off** to switch the server on again.
+
+The Config Hub keeps your choice of agents when a server is off. A switched-off server leaves the agent files at the next **Apply to agents**. When you switch it on and apply again, it returns to the same agents. Editing the server does not change the switch.
 
 ### Apply to agents
 
@@ -287,3 +328,11 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 - [Plugin management tools for agents](agent-tools.md): the tools that the guidance mentions when **Plugin management tools** is on.
 - [Voice](voice.md) and [The Notebook](notebook.md): the two features that add a paragraph to the guidance.
 - [Settings reference](settings-reference.md): every setting on every tab.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-15** — A remote server can carry headers and a login (bearer token or custom header), and the editor has a **Test connection** button. A login must be a key in braces from the secrets. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #525. Idea from a pull request by Joly0.
+- **2026-10-15** — A server has an **On** and **Off** switch that keeps the choice of agents. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #524. Idea from a pull request by Joly0.
+
+</details>

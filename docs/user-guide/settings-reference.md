@@ -279,6 +279,10 @@ See [Config Hub](config-hub.md). The hub keeps one copy of your MCP servers, glo
 | Card and control | What it does | Default | At once |
 | :-- | :-- | :-- | :-- |
 | **MCP Servers**: **Add Server** | Opens the editor for one MCP server. Fields: **Name** (letters, digits, underscore, dash; up to 64), **Transport** (stdio, http or sse), **Command**, **Arguments (one per line)**, **Environment variables** (values are masked after saving; {SECRET_KEY} placeholders resolve from the secrets vault when applied), **URL** for http and sse, and **Enable for agents** (one tick per installed agent). | No servers | **Save Server** stores the definition. Nothing is written to an agent yet. |
+| **MCP Servers** editor: **Authentication** (remote servers) | Chooses how the server checks who you are: **None**, **Bearer token** or **Custom header**. For a bearer token, type the secret key in braces, for example {MY_TOKEN}; the hub adds "Bearer ". For a custom header, type the header name and a value in braces. The hub refuses a typed token. Saved values show masked. | None | **Save Server** stores the key in braces only. **Apply to agents** writes the real value into each agent file. |
+| **MCP Servers** editor: **Additional headers**, **Add header** (remote servers) | Extra request headers, such as a tenant number. A name that looks like a login (for example Authorization, X-API-Key, a name with token or secret) must hold a key in braces. Other values can be plain text. | No headers | **Save Server** stores them. **Apply to agents** writes them in the format of each agent. |
+| **MCP Servers** editor: **Test connection** (remote servers) | The Unraid server connects to the URL with the values in the form and reports the HTTP status, a short fixed reason and the number of tools. It uses http or https only, follows no redirect and never shows the reply of the remote server. Nothing is saved. | Not applicable | Runs when you press it. |
+| **MCP Servers**: **On** / **Off** button on a server row | Switches the server off for every agent, or on again. The agent ticks stay. A switched-off server shows the badge **off** and leaves the agent files at the next **Apply to agents**. | On | Saves at once. Nothing is written to an agent yet. |
 | **MCP Servers**: **Apply to agents** | Writes each server into the config file of each ticked agent. | Not applicable | Writes the files. A running agent reads its servers when it starts. |
 | **Config drift detected** (appears when needed) | A vendor file was edited outside the hub. Per key, choose **Adopt** (take the edit into the hub), **Overwrite** (put the hub value back) or **Release** (stop managing the key). The hub never overwrites a drifted key by itself. | Not applicable | **Overwrite** asks you to confirm. |
 | **Global Instructions**: text box and **Project to agents** ticks | Holds one instruction document that the hub writes into each ticked agent's instruction file, inside a marked block. Text outside the block is never touched. | Empty. No agent is ticked | **Apply to agents** writes the block. |
@@ -404,6 +408,8 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-15** — Config Hub: the server editor has **Authentication**, **Additional headers** and **Test connection** for remote servers. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #525.
+- **2026-10-15** — Config Hub: a server row has an **On** / **Off** button. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #524.
 - **2026-10-14** — New setting **Work folder for storage jobs** (the stored key `consolidate_stage_path`) and the home card button **Convert to plain folders**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #496.
 
 </details>
