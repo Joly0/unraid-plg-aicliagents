@@ -924,6 +924,29 @@ _reconcile_log_dedup() {
     _RECON_LOG_STATE[$key]="${state}|${now}|0"
 }
 
+# _pending_release_tick — #512: run pending_release_sweep (common.sh) when its
+# RAM list has items, or every AICLI_PENDING_SWEEP_EVERY_S (300) seconds over the
+# persistence folders, where a parked .pending-delete.* layer survives a reboot.
+_pending_release_tick() {
+    local list="${AICLI_PENDING_RELEASE_LIST:-/tmp/unraid-aicliagents/.pending_release}"
+    local stamp="${AICLI_PENDING_SWEEP_STAMP:-/tmp/unraid-aicliagents/.pending_release_swept}"
+    local every="${AICLI_PENDING_SWEEP_EVERY_S:-300}" now last=0 id
+    local dirs=()
+    now="$(date +%s)"
+    [ -f "$stamp" ] && last="$(cat "$stamp" 2>/dev/null)"
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ ! -s "$list" ] && [ $((now - last)) -lt "$every" ]; then
+        return 0
+    fi
+    printf '%s\n' "$now" > "$stamp" 2>/dev/null || true
+    dirs+=("$(agent_persist_path 2>/dev/null || true)")
+    for id in $(_manifest_home_ids 2>/dev/null); do
+        dirs+=("$(home_persist_path "$id" 2>/dev/null || true)")
+    done
+    ( source "${AICLI_STORAGE_COMMON_SH:-${STORAGE_DIR}/common.sh}" >/dev/null 2>&1 \
+        && pending_release_sweep "${dirs[@]}" >/dev/null 2>&1 ) || true
+}
+
 _op_reconcile() {
     local mpath
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
@@ -1449,6 +1472,12 @@ _op_reconcile() {
             fi
         done < <(losetup -a 2>/dev/null || true)
     fi
+
+    # #512: finish what the no-lazy-unmount rule left: kept layer/scratch mounts
+    # get a real umount try, and parked .pending-delete.* layer files go once no
+    # loop reads them. Runs when the RAM list has items, and every 5 minutes to
+    # find parked files after a reboot (the RAM list is gone then).
+    _pending_release_tick
 
     # S-08 (#1353): reap terminal job-ledger entries (done 1 h, failed/deferred 24 h)
     # + orphaned retry pen entries.
@@ -4682,9 +4711,11 @@ _do_cleanup_phantoms() {
                 *[0-9]*) ;;
                 *) continue ;;
             esac
-            # Unmount if mounted, then remove
+            # Unmount if mounted, then remove. #512: a REAL umount only; a busy
+            # home stays, and so does its folder (rm -rf would go into the live
+            # mount). The next prune pass tries again.
             if mountpoint -q "$entry/home" 2>/dev/null; then
-                umount -l "$entry/home" 2>/dev/null || true
+                umount "$entry/home" 2>/dev/null || continue
             fi
             rm -rf "$entry" 2>/dev/null && fs_pruned=$((fs_pruned + 1))
         done

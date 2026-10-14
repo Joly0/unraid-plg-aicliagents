@@ -22,7 +22,11 @@ _reserve_unmount_squashfs_loops() {
     if [ -d "$base" ]; then
         local mnt
         for mnt in "$base"/*; do
-            mountpoint -q "$mnt" 2>/dev/null && umount -l "$mnt" 2>/dev/null
+            mountpoint -q "$mnt" 2>/dev/null || continue
+            # #512: a real umount first. The lazy detach is the last resort here
+            # only, because Unraid must still unmount the pool at shutdown.
+            umount "$mnt" 2>/dev/null || { sleep "${AICLI_UMOUNT_RETRY_S:-1}"; umount "$mnt" 2>/dev/null; } \
+                || umount -l "$mnt" 2>/dev/null
         done
     fi
     local loop

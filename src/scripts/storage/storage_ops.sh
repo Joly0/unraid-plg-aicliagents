@@ -540,7 +540,7 @@ for sqsh in "${FILES[@]}"; do
             # WP #1084: clean up any loop mounts we created earlier in this
             # loop so they don't leak when the layer mount fails mid-stack.
             for _lm in "${_NEW_LOOP_MOUNTS[@]}"; do
-                umount "$_lm" 2>/dev/null || umount -l "$_lm" 2>/dev/null || true
+                umount_or_keep "$_lm" "new layer mount" 2 || true   # #512: never lazy
             done
             exit 1
         fi
@@ -952,7 +952,7 @@ else
     # so they don't leak as orphans pointing at (potentially since-deleted)
     # sqsh files. Pre-existing loop mounts are left alone.
     for _lm in "${_NEW_LOOP_MOUNTS[@]}"; do
-        umount "$_lm" 2>/dev/null || umount -l "$_lm" 2>/dev/null || true
+        umount_or_keep "$_lm" "new layer mount" 2 || true   # #512: never lazy
     done
     lifecycle_log "error" "mount_stack" "mount_stack_failed_loops_cleaned" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"new_loops_cleaned\":${#_NEW_LOOP_MOUNTS[@]}}" 2>/dev/null || true
     exit 1
@@ -3143,14 +3143,17 @@ for old_layer in "${OLD_LAYERS[@]}"; do
     # remount this squashfs again. Left mounted, its deleted-backing-file loop
     # looks like the benign "deleted-but-open" case the supervisor's reaper
     # skips for a bake (Feature #1382) — but here it is a permanent orphan.
+    # #512: a REAL unmount only, and the file goes only when no loop still
+    # reads it. The old `umount || umount -l` then `rm -f` hid a held loop:
+    # the deleted layer kept its space on the flash until a reboot. A held
+    # layer is parked as .pending-delete.<name> for the idle sweep.
     _old_layer_mnt="/tmp/unraid-aicliagents/mnt/$(basename "$old_layer" .sqsh)"
-    if mountpoint -q "$_old_layer_mnt" 2>/dev/null; then
-        umount "$_old_layer_mnt" 2>/dev/null || umount -l "$_old_layer_mnt" 2>/dev/null || true
+    if layer_retire_file "$old_layer" "$_old_layer_mnt"; then
+        lifecycle_log "info" "consolidate_layers" "old_layer_removed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"file\":\"$(basename "$old_layer")\"}" 2>/dev/null || true
+    else
+        lifecycle_log "warn" "consolidate_layers" "old_layer_delete_pending" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"file\":\"$(basename "$old_layer")\"}" 2>/dev/null || true
     fi
-    rm -f "$old_layer"
-    rmdir "$_old_layer_mnt" 2>/dev/null || true
-    lifecycle_log "info" "consolidate_layers" "old_layer_removed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"file\":\"$(basename "$old_layer")\"}" 2>/dev/null || true
-    log "Removed old layer: $(basename "$old_layer")"
+    log "Retired old layer: $(basename "$old_layer")"
     # L3.5 (Follow-on 4): mid-delete — at least one old layer pruned, intent present,
     # others still on disk. (With >=2 old layers the kill lands here.)
     _itest_sigkill_window "mid_delete"
@@ -3895,7 +3898,7 @@ fi
 _GR_SCRATCH="/tmp/unraid-aicliagents/.graduate_src_${TYPE}_${_GR_LOCK_ID}_$$"
 mkdir -p "$_GR_SCRATCH" 2>/dev/null
 _gr_cleanup_scratch() {
-    mountpoint -q "$_GR_SCRATCH" 2>/dev/null && { umount "$_GR_SCRATCH" 2>/dev/null || umount -l "$_GR_SCRATCH" 2>/dev/null || true; }
+    umount_or_keep "$_GR_SCRATCH" "conversion scratch" 3 || return 0   # #512: never lazy; a kept mount keeps its dir
     rmdir "$_GR_SCRATCH" 2>/dev/null || true
 }
 if ! mount -o loop,ro "$_GR_SRC_LAYER" "$_GR_SCRATCH" 2>/dev/null; then
@@ -4023,7 +4026,7 @@ if [ "$_GR_TD" -eq 0 ]; then
     # Lift this entity's now-orphaned layer loop mounts.
     for _gr_lm in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
         [ -d "$_gr_lm" ] || continue
-        mountpoint -q "$_gr_lm" 2>/dev/null && { umount "$_gr_lm" 2>/dev/null || umount -l "$_gr_lm" 2>/dev/null || true; }
+        umount_or_keep "$_gr_lm" "layer mount" 3 || continue   # #512: never lazy; a kept mount keeps its dir
         rmdir "$_gr_lm" 2>/dev/null || true
     done
     [ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"

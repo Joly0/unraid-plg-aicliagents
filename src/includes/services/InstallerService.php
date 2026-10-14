@@ -454,8 +454,10 @@ class InstallerService {
 
         // 2. Unmount the stack: the stable name AND every side-by-side
         //    generation mounted under agents/.versions/<id>/ (Forgejo #441).
-        if (StorageMountService::isMounted($mnt)) {
-            exec("umount -l " . escapeshellarg($mnt));
+        // #512: a real unmount only. A busy agent mount stops the uninstall:
+        // deleting its layers would leave their space held until a reboot.
+        if (!StorageMountService::unmountReal($mnt)) {
+            return ['status' => 'error', 'message' => "The $agentId agent is still in use. Close its sessions, then try again."];
         }
         self::unmountAgentGenerations($agentId);
 
@@ -548,8 +550,9 @@ class InstallerService {
             $target = trim((string)$target);
             if ($target === '') continue;
             if (strncmp($target, "$versions/", strlen($versions) + 1) !== 0 && $target !== $versions) continue;
-            exec("umount " . escapeshellarg($target) . " 2>/dev/null", $ignored, $rc);
-            if ($rc !== 0) exec("umount -l " . escapeshellarg($target) . " 2>/dev/null");
+            // #512: a real unmount only; a busy generation stays mounted, and the
+            // isMounted() check below then keeps its folder.
+            StorageMountService::unmountReal($target);
         }
         if (is_dir($versions) && !StorageMountService::isMounted($versions)) {
             self::rmdirContents($versions);

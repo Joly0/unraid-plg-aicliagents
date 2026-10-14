@@ -361,11 +361,11 @@ atomic_write_layer() {
             # GH #9: lazy-FIRST detached the verify mount while `find` (above) or
             # a reader could still hold it, pinning the loop to the layer file for
             # as long as the holder lived — even after a consolidate deleted the
-            # file. Real umount first; lazy only as a logged last resort.
-            if declare -f _umount_real_or_detach_logged >/dev/null 2>&1; then
-                _umount_real_or_detach_logged "$scratch_mnt" "verify scratch" 5 || true
+            # file. #512: a real umount only; a busy mount stays for the idle sweep.
+            if declare -f umount_or_keep >/dev/null 2>&1; then
+                umount_or_keep "$scratch_mnt" "verify scratch" 5 || true
             else
-                umount "$scratch_mnt" 2>/dev/null || umount -l "$scratch_mnt" 2>/dev/null || true
+                umount "$scratch_mnt" 2>/dev/null || true
             fi
         else
             # Mount failed — squashfs is corrupt or empty-but-mountable depends on kernel.

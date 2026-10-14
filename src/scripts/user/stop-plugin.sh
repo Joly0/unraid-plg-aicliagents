@@ -228,11 +228,32 @@ fi
 # ── Step 8: Unmount all storage (top-down: overlays first, then loop mounts) ──
 status "Unmounting storage..."
 
+# #512: a REAL umount first, tried 3 times. Before #512 this step was `umount -l`
+# only: a lazy unmount returns success while the kernel still holds the mount,
+# so its loop keeps the layer file open and a deleted layer keeps its space on
+# the flash. The plugin stops at array stop, shutdown and uninstall, and there
+# Unraid must still be able to unmount the pools, so a mount that stays busy
+# after the real tries is lazy-detached as a LOGGED last resort (it frees itself
+# once the last holder exits). Paths that run while the server stays up never
+# lazy-unmount (common.sh umount_or_keep).
+_stop_umount() {
+    local mnt="$1" i
+    mountpoint -q "$mnt" 2>/dev/null || return 0
+    for i in 1 2 3; do
+        umount "$mnt" 2>/dev/null && return 0
+        sleep "${AICLI_UMOUNT_RETRY_S:-1}"
+    done
+    mountpoint -q "$mnt" 2>/dev/null || return 0
+    status "WARNING: $mnt still busy after 3 real unmounts; lazy-detaching so Unraid can stop (#512)"
+    umount -l "$mnt" 2>/dev/null
+    return 1
+}
+
 # 8a. Unmount home overlays
 WORK_BASE="/tmp/unraid-aicliagents/work"
 if [ -d "$WORK_BASE" ]; then
     for mnt in "$WORK_BASE"/*/home; do
-        mountpoint -q "$mnt" 2>/dev/null && umount -l "$mnt" 2>/dev/null
+        _stop_umount "$mnt"
     done
 fi
 
@@ -247,14 +268,14 @@ else
 fi
 if [ -d "$AGENT_BASE" ]; then
     for mnt in "$AGENT_BASE"/*; do
-        [ -d "$mnt" ] && mountpoint -q "$mnt" 2>/dev/null && umount -l "$mnt" 2>/dev/null
+        [ -d "$mnt" ] && _stop_umount "$mnt"
     done
 fi
 
 # 8c. Unmount individual SquashFS loop mounts (these hold /mnt/user open when home is on array)
 if [ -d "/tmp/unraid-aicliagents/mnt" ]; then
     for mnt in /tmp/unraid-aicliagents/mnt/*; do
-        mountpoint -q "$mnt" 2>/dev/null && umount -l "$mnt" 2>/dev/null
+        _stop_umount "$mnt"
     done
 fi
 
@@ -264,7 +285,7 @@ for loop in $(losetup -a 2>/dev/null | grep 'unraid-aicliagents' | cut -d: -f1);
 done
 
 # 8e. Unmount ZRAM
-mountpoint -q "$ZRAM_UPPER" 2>/dev/null && umount -l "$ZRAM_UPPER" 2>/dev/null
+_stop_umount "$ZRAM_UPPER"
 
 # Clean runtime files
 rm -f /tmp/unraid-aicliagents/.init_done

@@ -226,6 +226,8 @@ The plugin does not delete kept copies by itself. They use space in your storage
 
 Expect: the card shows **Uninstalled**, the page reloads, and the agent shows as available again.
 
+If a process still uses the agent, the plugin removes nothing and says "The <agent> agent is still in use. Close its sessions, then try again." Close the sessions of that agent, then press **Uninstall** again.
+
 > [!WARNING]
 > **Uninstall** ends the open workspaces of that agent. It removes every installed version of the agent, the writable layers of the agent, and the kept copies in your storage folder. A kept copy that you saved to another folder stays there, and the version list still shows it.
 

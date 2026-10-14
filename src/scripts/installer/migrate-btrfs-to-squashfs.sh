@@ -228,7 +228,7 @@ if [ -n "$MONO_IMG" ]; then
             mkdir -p "$RAW_AGENTS/$AGENT_ID"
             cp -a "$agent_src"/* "$RAW_AGENTS/$AGENT_ID/"
         done
-        umount -l "$MONO_MNT" || true
+        umount_or_keep "$MONO_MNT" "legacy agent image" 3 || true   # #512: never lazy
         # Move the monolithic image to migrated_legacy_data
         mkdir -p "$MIGRATED_DIR/agents"
         mv "$MONO_IMG" "$MIGRATED_DIR/agents/"
@@ -308,7 +308,7 @@ for home_img in "$PERSIST_PATH/persistence/home_"*.img "$PERSIST_PATH/home_"*.im
     if mount -o loop,ro "$home_img" "$MNT"; then
         mksquashfs "$MNT" "$HOME_PERSIST_PATH/home_${USER_NAME}_v1_vol1.sqsh" \
             -comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend >> "$LOG_FILE" 2>&1 || true
-        umount -l "$MNT" || true
+        umount_or_keep "$MNT" "legacy home image" 3 || true   # #512: never lazy
         mv "$home_img" "$MIGRATED_DIR/homes/"
     fi
 done

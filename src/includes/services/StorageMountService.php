@@ -667,10 +667,9 @@ class StorageMountService {
             @shell_exec("chown -R " . escapeshellarg($user) . " " . escapeshellarg($work));
         }
 
-        if (self::isMounted($mnt)) {
-            // nosemgrep: php.lang.security.exec-use.exec-use
-            @shell_exec("umount -l " . escapeshellarg($mnt));
-        }
+        // #512: a real unmount only. A busy home stays mounted; the next idle
+        // remount rebuilds it with the right owner.
+        self::unmountReal($mnt);
         return true;
     }
 
@@ -837,16 +836,36 @@ class StorageMountService {
     }
 
     /**
-     * Forcefully unmounts a path.
+     * Unmounts a path with a real unmount only (see unmountReal). False when the
+     * path is still busy and stays mounted.
      */
     public static function unmount($path) {
         if (empty($path)) return false;
-        $path = rtrim($path, '/');
-        if (!self::isMounted($path)) return true;
-        
         LogService::log("Unmounting $path...", LogService::LOG_DEBUG, "StorageMountService");
-        exec("umount -l " . escapeshellarg($path) . " 2>&1", $out, $res);
-        return ($res === 0);
+        return self::unmountReal((string)$path);
+    }
+
+    /**
+     * #512: a REAL umount only, tried $tries times, 0.5 s apart. Never
+     * `umount -l`: a lazy unmount returns success while the kernel still holds
+     * the mount, so its loop device keeps a deleted layer's space on the flash
+     * until a reboot. True when the path is no longer mounted; false when it is
+     * still busy, in which case it stays mounted and the caller must not delete
+     * anything under it.
+     */
+    public static function unmountReal(string $path, int $tries = 3): bool {
+        $path = rtrim($path, '/');
+        if ($path === '' || !self::isMounted($path)) return true;
+        $tries = max(1, $tries);
+        for ($i = 1; $i <= $tries; $i++) {
+            $out = [];
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            exec("umount " . escapeshellarg($path) . " 2>/dev/null", $out, $rc);
+            if ($rc === 0 || !self::isMounted($path)) return true;
+            if ($i < $tries) usleep(500000);
+        }
+        LogService::log("Kept busy mount $path: a real unmount failed $tries times (never lazy-unmounted, #512).", LogService::LOG_WARN, "StorageMountService");
+        return false;
     }
 
     /**

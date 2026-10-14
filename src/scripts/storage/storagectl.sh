@@ -6,7 +6,7 @@
 #
 # Verbs:
 #   mount        Assemble the overlay stack for an entity.
-#   unmount      Tear down the entity's merged overlay mount.    [--lazy]
+#   unmount      Tear down the entity's merged overlay mount. (--lazy is accepted and ignored: #512, never lazy)
 #   bake         Commit the upper layer to a durable delta squashfs.
 #   consolidate  Merge all layers into a single consolidated squashfs.
 #   wipe         Remove an entity's upper + layers + manifest entry. [--upper --layers --manifest]
@@ -453,14 +453,15 @@ do_unmount() {
         emit_json 0 "noop" ""        # unmount-when-unmounted is a clean no-op (I04)
         exit 0
     fi
-    if [ "$LAZY" -eq 1 ]; then
-        umount -l "$mnt" 2>/dev/null
-    else
-        umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null
+    # #512: a REAL umount only. --lazy is accepted for old callers and ignored:
+    # a lazy unmount hides a held mount, and its loop keeps the layer file open.
+    # A busy mount stays mounted and the verb answers "deferred" (exit 2).
+    if umount_or_keep "$mnt" "entity mount" 3; then
+        emit_json 0 "$(_outcome_for 0)" ""
+        exit 0
     fi
-    local ex=$?
-    emit_json "$ex" "$(_outcome_for "$ex")" ""
-    exit "$ex"
+    emit_json 2 "deferred" "mount_busy"
+    exit 2
 }
 
 # ---- stage / unstage (SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, 2026-09-15) ----
@@ -649,7 +650,7 @@ do_wipe() {
         emit_json 2 "deferred" "mount_busy"
         exit 2
     fi
-    mountpoint -q "$mnt" 2>/dev/null && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null; }
+    umount_or_keep "$mnt" "entity mount" 3 || { emit_json 2 "deferred" "mount_busy"; exit 2; }   # #512: never lazy; never wipe under a live mount
     # Feature #1382 / Bug #1379+#1381: BEFORE removing the .sqsh files, tear down
     # this entity's per-layer squashfs LOOP mounts. Each layer is loop-mounted at
     # /tmp/unraid-aicliagents/mnt/<type>_<id>_<layer> as the overlay's lowerdir;
@@ -661,7 +662,7 @@ do_wipe() {
     local _wl
     for _wl in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
         [ -d "$_wl" ] || continue
-        mountpoint -q "$_wl" 2>/dev/null && { umount "$_wl" 2>/dev/null || umount -l "$_wl" 2>/dev/null; }
+        umount_or_keep "$_wl" "layer mount" 3 || continue   # #512: never lazy; a kept mount keeps its dir
         rmdir "$_wl" 2>/dev/null || true
     done
     if [ "$WANT_UPPER" -eq 1 ]; then
@@ -670,7 +671,7 @@ do_wipe() {
     fi
     if [ "$WANT_LAYERS" -eq 1 ]; then
         shopt -s nullglob
-        local f; for f in "$PERSIST"/${TYPE}_${ID}_*.sqsh; do rm -f "$f" 2>/dev/null; done
+        local f; for f in "$PERSIST"/${TYPE}_${ID}_*.sqsh; do layer_retire_file "$f" || true; done   # #512: a held layer is parked, not hidden
         shopt -u nullglob
     fi
     if [ "$WANT_MANIFEST" -eq 1 ]; then
@@ -983,7 +984,7 @@ _pt_persist_noop() {
 
 _pt_wipe() {
     local mnt pdir; mnt="$(_mnt_point)"; pdir="$(_pt_dir)"
-    mountpoint -q "$mnt" 2>/dev/null && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null; }
+    umount_or_keep "$mnt" "entity mount" 3 || { emit_json 2 "deferred" "mount_busy"; exit 2; }   # #512: never lazy
     # 2026-09-24 (#318): a versioned agent keeps every version under
     # .versions/<id> and binds each at agents/.versions/<id>/<gen>. Removing
     # only the stable symlink (as before) left all of them on flash for good.
@@ -997,7 +998,7 @@ _pt_wipe() {
                 [ -d "$gdir" ] || continue
                 gdir="${gdir%/}"
                 case "$(basename -- "$gdir")" in .*) continue ;; esac
-                mountpoint -q "$gdir" 2>/dev/null && { umount "$gdir" 2>/dev/null || umount -l "$gdir" 2>/dev/null; }
+                umount_or_keep "$gdir" "version bind" 3 || continue   # #512: never lazy
                 rmdir "$gdir" 2>/dev/null || true
             done
             [ -L "$mnt" ] && case "$(readlink "$mnt")" in .versions/"$ID"/*) rm -f "$mnt" ;; esac
@@ -1028,7 +1029,7 @@ _passthrough_guard() {
 _pt_release() {
     local mnt; mnt="$(_mnt_point)"
     sync 2>/dev/null || true
-    mountpoint -q "$mnt" 2>/dev/null && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null; }
+    umount_or_keep "$mnt" "entity mount" 3 || { emit_json 2 "deferred" "mount_busy"; exit 2; }   # #512: never lazy
     emit_json 0 "ok" ""; exit 0
 }
 

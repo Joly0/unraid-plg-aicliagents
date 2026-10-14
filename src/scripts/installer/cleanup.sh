@@ -466,22 +466,39 @@ log_ok "Active processes terminated."
 # --- 5. Unmount Storage Stacks ---
 # D-295: Clear any existing loop mounts or OverlayFS stacks to prevent file locks during migration
 # D-400: Use findmnt for reliable mount point parsing (mount | awk is fragile with spaces/options)
+# #512: a REAL umount only, tried 3 times. Never `umount -l`: an upgrade runs
+# while the server stays up, and a lazily detached layer mount keeps its loop on
+# the layer file, so a later deleted layer keeps its space on the flash until a
+# reboot. A mount that stays busy is kept and named in the log; the new install
+# reuses it (mount_stack skips a layer that is already mounted).
+_cleanup_umount() {
+    local m="$1" i
+    for i in 1 2 3; do
+        umount "$m" > /dev/null 2>&1 && return 0
+        mountpoint -q "$m" 2>/dev/null || return 0
+        sleep "${AICLI_UMOUNT_RETRY_S:-1}"
+    done
+    log_status "    > Kept busy mount $m (never lazy-unmounted, #512)."
+    return 1
+}
 UMNT_COUNT=0
+UMNT_KEPT=0
 if command -v findmnt > /dev/null 2>&1; then
     while IFS= read -r mnt; do
         [ -z "$mnt" ] && continue
-        umount -l "$mnt" > /dev/null 2>&1 || true
+        _cleanup_umount "$mnt" || { UMNT_KEPT=$((UMNT_KEPT + 1)); continue; }
         UMNT_COUNT=$((UMNT_COUNT + 1))
     done < <(findmnt -rn -o TARGET | grep -E "unraid-aicliagents|zram_upper" | tac)
 else
     # Fallback: parse mount output more carefully (field 3 = mountpoint)
     while IFS= read -r mnt; do
         [ -z "$mnt" ] && continue
-        umount -l "$mnt" > /dev/null 2>&1 || true
+        _cleanup_umount "$mnt" || { UMNT_KEPT=$((UMNT_KEPT + 1)); continue; }
         UMNT_COUNT=$((UMNT_COUNT + 1))
     done < <(mount | grep -E "unraid-aicliagents|zram_upper" | awk '$2=="on" {print $3}' | tac)
 fi
 [ "$UMNT_COUNT" -gt 0 ] && log_status "    > Unmounted $UMNT_COUNT active storage stack(s)."
+[ "$UMNT_KEPT" -gt 0 ] && log_status "    > Kept $UMNT_KEPT busy mount(s) (#512)."
 
 # --- 5. Clear Runtime Locks & Temporary Scripts ---
 rm -f /tmp/unraid-aicliagents/.init_done

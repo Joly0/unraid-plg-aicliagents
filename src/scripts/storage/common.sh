@@ -2132,37 +2132,164 @@ bake_via_pseudofile_merge() {
 
 # _umount_real_or_detach_logged <mnt> <what> [tries]
 #
-# GH #9 root cause (2026-09-17): `umount X || umount -l X` is only safe when
-# nothing holds X. A lazily detached mount that something still holds keeps its
-# superblock alive out of sight. Two consequences the plugin actually suffered:
+# GH #9 root cause (2026-09-17): a lazily detached mount that something still
+# holds keeps its superblock alive out of sight. Two consequences the plugin
+# actually suffered:
 #   * X was previously an overlay whose lowerdir was a LIVE overlay; that
 #     consolidate merge was removed by Forgejo #236 because its private lower
 #     clone could keep the home superblock alive after a lazy detach.
 #   * X is a squashfs loop mount (atomic_write_layer's verify scratch) — the
 #     loop stays attached to the layer file for as long as the holder lives, even
 #     after a consolidate deletes the file (loop2/loop8 pinned for days).
-# So: REAL umount first, retried briefly (holders such as a verify `find` are
-# short-lived), and only then lazy-detach — recording WHO held it, so the next
-# occurrence names the culprit instead of leaving another silent leak.
-# Returns 0 when released, 2 when it had to lazy-detach. AICLI_UMOUNT_RETRY_S
-# (default 1) is the pause between tries (unit tests set 0).
+# #512 (2026-10-14): this helper no longer lazy-detaches at all. It is now
+# umount_or_keep: a busy mount stays mounted and is queued for the idle sweep.
+# Returns 0 when released, 2 when the mount is still busy (kept).
 _umount_real_or_detach_logged() {
+    umount_or_keep "$@" && return 0
+    return 2
+}
+
+# --- #512: no lazy unmount on a layer, an overlay or a scratch mount ---------
+#
+# A lazy unmount (`umount -l`) returns success while the kernel still holds the
+# mount. Its loop device keeps the backing .sqsh open, so a deleted layer keeps
+# its space until a reboot; on a small USB flash a consolidate could fill the
+# stick and break Unraid's own config writes. The rules:
+#   * a real umount only, retried briefly; a busy mount STAYS mounted, visible,
+#     and goes on the pending list so the idle sweep releases it later;
+#   * a layer file is deleted only when no loop device still reads it; else it
+#     is renamed to .pending-delete.<name> (no layer glob matches that) and the
+#     idle sweep, or the next boot, deletes it.
+
+# pending_release_list — the RAM list of mounts and files the sweep finishes.
+# One line per item: "<mount or ->\t<file or ->". AICLI_PENDING_RELEASE_LIST
+# overrides the path in tests.
+pending_release_list() { printf '%s' "${AICLI_PENDING_RELEASE_LIST:-/tmp/unraid-aicliagents/.pending_release}"; }
+
+# _pending_release_add <mnt|-> <file|-> — queue one item, once.
+_pending_release_add() {
+    local list line; list="$(pending_release_list)"
+    line="$(printf '%s\t%s' "${1:--}" "${2:--}")"
+    mkdir -p "$(dirname "$list")" 2>/dev/null || true
+    # A mount queued alone ("<mnt>\t-") is merged into its file's entry.
+    if [ "${1:--}" != "-" ] && [ "${2:--}" != "-" ] && [ -f "$list" ]; then
+        awk -F'\t' -v m="$1" '!($1 == m && $2 == "-")' "$list" > "$list.n" 2>/dev/null && mv -f "$list.n" "$list"
+    fi
+    grep -qxF "$line" "$list" 2>/dev/null || printf '%s\n' "$line" >> "$list"
+}
+
+# _pending_release_sweepable <mnt> — 0 for a mount the idle sweep may unmount:
+# a layer loop mount, a verify scratch or a conversion scratch. Never an overlay.
+_pending_release_sweepable() {
+    case "${1:-}" in
+        "${AICLI_LAYER_MNT_BASE:-/tmp/unraid-aicliagents/mnt}"/*) return 0 ;;
+        "${AICLI_AWL_SCRATCH_BASE:-/tmp/unraid-aicliagents/scratch}"/*) return 0 ;;
+        /tmp/unraid-aicliagents/.graduate_src_*) return 0 ;;
+    esac
+    return 1
+}
+
+# umount_or_keep <mnt> <what> [tries] — a REAL umount, tried <tries> times
+# (default 5, AICLI_UMOUNT_RETRY_S between tries, default 1). Never lazy.
+# 0 when the mount is gone (or was never mounted). 1 when it is still busy: the
+# mount stays, the holders go to the log, and the mount is queued for the sweep.
+umount_or_keep() {
     local mnt="${1:-}" what="${2:-mount}" tries="${3:-5}" i holders
     [ -n "$mnt" ] || return 0
     mountpoint -q "$mnt" 2>/dev/null || return 0
+    case "$tries" in ''|*[!0-9]*|0) tries=1 ;; esac
     for ((i = 1; i <= tries; i++)); do
         umount "$mnt" 2>/dev/null && return 0
-        sleep "${AICLI_UMOUNT_RETRY_S:-1}"
+        [ "$i" -lt "$tries" ] && sleep "${AICLI_UMOUNT_RETRY_S:-1}"
     done
+    mountpoint -q "$mnt" 2>/dev/null || return 0
     holders=""
     if command -v fuser >/dev/null 2>&1; then
         holders="$(fuser -vm "$mnt" 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/["\\]/ /g' | cut -c1-600)"
     fi
-    echo "[umount] $what at $mnt still busy after $tries tries — lazy-detaching (GH #9 leak path). holders: ${holders:-unknown}" >&2
-    lifecycle_log "warn" "storage" "lazy_detach_with_holders" \
+    echo "[umount] $what at $mnt is busy after $tries tries; kept mounted for the idle sweep (#512). holders: ${holders:-unknown}" >&2
+    lifecycle_log "warn" "storage" "umount_busy_kept" \
         "{\"what\":\"$what\",\"mnt\":\"$mnt\",\"tries\":$tries,\"holders\":\"${holders:-unknown}\"}" 2>/dev/null || true
-    umount -l "$mnt" 2>/dev/null || true
-    return 2
+    # Only a layer loop mount or a scratch mount goes on the sweep list. A home
+    # or agent overlay is the caller's to retry (it defers): the sweep must
+    # never unmount a home the plugin expects to stay mounted.
+    if _pending_release_sweepable "$mnt"; then
+        _pending_release_add "$mnt" "-"
+    fi
+    return 1
+}
+
+# layer_retire_file <sqsh> [mnt] — remove a layer file that no manifest names any
+# more. Unmount its loop mount first (real only), detach its loops, and delete
+# the file only when no loop still reads it. 0 when the file is gone. 1 when a
+# loop still holds it: the file becomes <dir>/.pending-delete.<name> (same disk,
+# so the rename costs no space) and goes on the pending list.
+layer_retire_file() {
+    local f="${1:-}" mnt="${2:-}" dir base parked
+    [ -n "$f" ] || return 0
+    [ -e "$f" ] || { [ -n "$mnt" ] && rmdir "$mnt" 2>/dev/null; return 0; }
+    if [ -n "$mnt" ] && ! umount_or_keep "$mnt" "old layer" 3; then
+        :   # still mounted: its loop stays; park the file below
+    else
+        release_layer_loops "$f" >/dev/null 2>&1 || true
+    fi
+    if [ -z "$(layer_loops_of "$f")" ]; then
+        rm -f "$f"
+        [ -n "$mnt" ] && rmdir "$mnt" 2>/dev/null
+        return 0
+    fi
+    dir="$(dirname "$f")"; base="$(basename "$f")"
+    parked="$dir/.pending-delete.$base"
+    mv -f "$f" "$parked" 2>/dev/null || parked="$f"
+    _pending_release_add "${mnt:--}" "$parked"
+    lifecycle_log "warn" "storage" "layer_delete_pending" \
+        "{\"file\":\"$parked\",\"mnt\":\"${mnt:--}\",\"loops\":\"$(layer_loops_of "$parked" | tr '\n' ' ')\"}" 2>/dev/null || true
+    return 1
+}
+
+# pending_release_sweep [dir...] — finish what umount_or_keep and
+# layer_retire_file left: one real umount try for each kept mount, then delete
+# each parked file no loop reads any more. Each <dir> is also searched for
+# .pending-delete.* files (after a reboot the RAM list is gone). Prints how many
+# items are still pending; returns 0 when none are.
+pending_release_sweep() {
+    local list mnt f left=0 d keep
+    list="$(pending_release_list)"
+    keep="$(mktemp "${list}.XXXXXX" 2>/dev/null)" || return 1
+    if [ -f "$list" ]; then
+        while IFS=$'\t' read -r mnt f; do
+            [ -n "$mnt$f" ] || continue
+            if [ "$mnt" != "-" ] && mountpoint -q "$mnt" 2>/dev/null; then
+                if ! umount "$mnt" 2>/dev/null; then
+                    printf '%s\t%s\n' "$mnt" "$f" >> "$keep"; left=$((left + 1)); continue
+                fi
+            fi
+            [ "$mnt" != "-" ] && case "$mnt" in /tmp/unraid-aicliagents/*) rmdir "$mnt" 2>/dev/null ;; esac
+            if [ "$f" != "-" ] && [ -e "$f" ]; then
+                release_layer_loops "$f" >/dev/null 2>&1 || true
+                if [ -n "$(layer_loops_of "$f")" ]; then
+                    printf '%s\t%s\n' "-" "$f" >> "$keep"; left=$((left + 1)); continue
+                fi
+                rm -f "$f"
+                lifecycle_log "info" "storage" "layer_delete_finished" "{\"file\":\"$f\"}" 2>/dev/null || true
+            fi
+        done < "$list"
+    fi
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        for f in "$d"/.pending-delete.*; do
+            [ -e "$f" ] || continue
+            grep -qF $'\t'"$f" "$keep" 2>/dev/null && continue
+            if [ -n "$(layer_loops_of "$f")" ]; then
+                printf '%s\t%s\n' "-" "$f" >> "$keep"; left=$((left + 1)); continue
+            fi
+            rm -f "$f"
+            lifecycle_log "info" "storage" "layer_delete_finished" "{\"file\":\"$f\"}" 2>/dev/null || true
+        done
+    done
+    if [ -s "$keep" ]; then mv -f "$keep" "$list"; else rm -f "$keep" "$list"; fi
+    printf '%s\n' "$left"
+    [ "$left" -eq 0 ]
 }
 
 # bake_via_hardlink_merge <type> <id> <persist_path> <lower_dir> <sqlite_stage> <kind> <db-paths...>

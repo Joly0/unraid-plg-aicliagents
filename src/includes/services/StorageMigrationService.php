@@ -66,8 +66,14 @@ class StorageMigrationService {
         // #373: name the uppers to wipe BEFORE the unmount, while the kernel
         // still shows the live mount's own upperdir/workdir.
         $wipeDirs = self::rebuildWipeDirs((string)$type, (string)$id, (string)$persistPath, $mnt);
-        exec("umount -l " . escapeshellarg($mnt) . " 2>/dev/null");
-        
+        // #512: a real unmount only. A busy mount stops the wipe: deleting its
+        // layers would leave their space held by the kernel until a reboot,
+        // and deleting its upper would remove files a session still uses.
+        if (!StorageMountService::unmountReal($mnt)) {
+            LogService::log("Wipe of $type $id stopped: $mnt is still in use. Close its sessions, then try again.", LogService::LOG_WARN, "StorageMigrationService");
+            return false;
+        }
+
         // 2. Wipe Flash
         foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $f) @unlink($f);
 
@@ -177,7 +183,8 @@ class StorageMigrationService {
                         }
                     }
                     if ($rescueCount > 0) LogService::log("Rescued $rescueCount file(s) from $name to $envPath", LogService::LOG_INFO, "StorageMigrationService");
-                    exec("umount -l " . escapeshellarg($mnt));
+                    // #512: a real unmount only; a busy image is kept, not purged.
+                    if (!StorageMountService::unmountReal($mnt)) continue;
                 }
                 LogService::log("Purging artifact: $name", LogService::LOG_INFO, "StorageMigrationService");
                 @unlink($file);

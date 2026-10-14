@@ -83,9 +83,22 @@ fi
 # Phase 3: residual mount/loop sweep. The graceful stop normally handled these;
 # this pass covers interrupted installs and historical layouts.
 log_status "[3/5] Detaching residual storage mounts and loop devices..."
+# #512: a REAL umount only, tried 3 times. Never `umount -l`: the server stays up
+# after an uninstall, and a lazily detached layer mount keeps its loop on the
+# layer file. A mount that stays busy is kept and named; Phase 5 then leaves the
+# folder that holds it (a plain rm -rf would delete through the live mount).
+UNINSTALL_KEPT_MOUNTS=0
 while IFS= read -r mnt; do
     [ -n "$mnt" ] || continue
-    umount -l "$mnt" 2>/dev/null || true
+    _un_ok=0
+    for _un_i in 1 2 3; do
+        if umount "$mnt" 2>/dev/null || ! mountpoint -q "$mnt" 2>/dev/null; then _un_ok=1; break; fi
+        sleep "${AICLI_UMOUNT_RETRY_S:-1}"
+    done
+    if [ "$_un_ok" -ne 1 ]; then
+        UNINSTALL_KEPT_MOUNTS=$((UNINSTALL_KEPT_MOUNTS + 1))
+        log_status "WARNING: $mnt is still busy; kept mounted (never lazy-unmounted, #512)."
+    fi
 done < <(awk '{print $2}' /proc/mounts 2>/dev/null \
     | grep -E '^'"$RUNTIME_DIR"'(/|$)|^'"$EMHTTP_DEST"'/agents(/|$)' \
     | sort -r || true)
@@ -133,7 +146,18 @@ fi
 
 # Phase 5: runtime and deployed UI/source removal. Config + persistence remain.
 log_status "[5/5] Removing runtime state and deployed plugin files..."
-rm -rf "$RUNTIME_DIR"
+# #512: never delete a folder that still holds a mount (a kept busy mount from
+# Phase 3): rm -rf would go into the live mount and delete user data.
+_rm_tree_unless_mounted() {
+    local d="$1"
+    [ -e "$d" ] || return 0
+    if awk -v d="$d" '$2 == d || index($2, d "/") == 1 { f = 1 } END { exit !f }' "${AICLI_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null; then
+        log_status "WARNING: kept $d, because a mount is still inside it (#512). Remove it after a reboot."
+        return 1
+    fi
+    rm -rf "$d"
+}
+_rm_tree_unless_mounted "$RUNTIME_DIR"
 rm -rf "$RUN_DIR/aicli-sessions"
 rm -f "$RUN_DIR"/aicliterm-*.sock
 rm -f "$RUN_DIR"/unraid-aicliagents-*.pid
@@ -150,7 +174,7 @@ rm -f "$CONFIG_DIR"/aicli-*.sh "$CONFIG_DIR"/aicli-*.page "$CONFIG_DIR"/aicli-sr
 if [ -L "$EMHTTP_DEST" ]; then
     rm -f "$EMHTTP_DEST"
 elif [ -d "$EMHTTP_DEST" ]; then
-    rm -rf "$EMHTTP_DEST"
+    _rm_tree_unless_mounted "$EMHTTP_DEST"
 fi
 rm -f "$PLUGIN_LOG"
 
