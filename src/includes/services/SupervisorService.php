@@ -796,6 +796,136 @@ class SupervisorService {
     }
 
     /**
+     * #496 (docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md): the tray step label for
+     * a conversion to plain folders (supervisor op `graduate`). The bash side writes
+     * the phase with job_ledger_set_phase. An unknown or empty phase gives "Running".
+     * R14: a copy step shows the rsync progress when it is known ($copy, from
+     * graduateCopyProgress); the steps without a percentage say they take time.
+     *
+     * @param array{done:int,total:int,pct:int,rate:string,eta_s:int}|null $copy
+     */
+    public static function graduatePhaseStep(string $phase, ?array $copy = null): string {
+        $labels = [
+            'closing'      => 'Closing workspaces',
+            'checking'     => 'Finding databases and measuring the home (can take several minutes)',
+            'copying'      => 'Copying the home',
+            'freeing'      => 'Freeing the boot disk: moving the old layers (can take several minutes)',
+            'copying-back' => 'Copying the home back',
+            'switching'    => 'Switching to plain folders',
+            'relaunching'  => 'Opening workspaces again',
+        ];
+        $label = $labels[$phase] ?? 'Running';
+        if (($phase === 'copying' || $phase === 'copying-back') && $copy !== null) {
+            $gb = static fn(int $b): string => number_format($b / 1073741824, 1);
+            // rsync's percentage is of ITS file list (the databases are copied
+            // separately and the caches are skipped), so the total is done / pct,
+            // not the measured size of the whole home (prod02: 9 of 13.1 GB at
+            // 100 %). The time column of a file-complete line is the ELAPSED time,
+            // so the time left comes from the rate, not from rsync.
+            $total = $copy['pct'] >= 2 ? (int)round($copy['done'] * 100 / $copy['pct']) : $copy['total'];
+            $label .= ': ' . $gb($copy['done']) . ' of ' . ($total > 0 ? 'about ' . $gb($total) . ' GB' : '? GB')
+                . ' (' . $copy['pct'] . ' %)';
+            if ($copy['rate'] !== '') $label .= ', ' . $copy['rate'];
+            $bps = self::rateBytesPerSecond($copy['rate']);
+            if ($bps > 0 && $total > $copy['done']) {
+                $min = (int)ceil(($total - $copy['done']) / $bps / 60);
+                $label .= ', about ' . $min . ' min left';
+            }
+        } elseif ($phase === 'copying' || $phase === 'copying-back') {
+            $label .= ' (can take a long time for a large home)';
+        }
+        return $label;
+    }
+
+    /**
+     * Tray progress for a conversion phase (see graduatePhaseStep). The two copies
+     * are most of the run: `copying` covers 20 to 50, `copying-back` 60 to 85.
+     */
+    public static function graduatePhaseProgress(string $phase, ?int $pct = null): int {
+        if ($pct !== null && $phase === 'copying') {
+            return 20 + (int)floor(max(0, min(100, $pct)) * 30 / 100);
+        }
+        if ($pct !== null && $phase === 'copying-back') {
+            return 60 + (int)floor(max(0, min(100, $pct)) * 25 / 100);
+        }
+        $progress = [
+            'closing' => 10, 'checking' => 15, 'copying' => 20, 'freeing' => 55,
+            'copying-back' => 60, 'switching' => 88, 'relaunching' => 95,
+        ];
+        return $progress[$phase] ?? 50;
+    }
+
+    /**
+     * #496: the one-sentence reason a conversion (op graduate) wrote when it
+     * stopped (/tmp/unraid-aicliagents/.convert_reason_<type>_<id>). '' when none.
+     */
+    public static function convertFailureReason(string $op, string $entity, string $dir = '/tmp/unraid-aicliagents'): string {
+        if ($op !== 'graduate') return '';
+        if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#', $entity, $m)) return '';
+        $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $m[2]);
+        $raw = @file_get_contents("$dir/.convert_reason_{$m[1]}_{$safe}");
+        if ($raw === false) return '';
+        $line = trim((string)strtok($raw, "\n"));
+        return mb_substr($line, 0, 200);
+    }
+
+    /** R14: "13.40MB/s" → bytes per second (rsync uses kB, MB, GB with 1024 steps). 0 when odd. */
+    public static function rateBytesPerSecond(string $rate): float {
+        if (!preg_match('/^([\d.]+)([kMG]?)B\/s$/', $rate, $m)) return 0.0;
+        $mult = ['' => 1, 'k' => 1024, 'M' => 1048576, 'G' => 1073741824][$m[2]];
+        return (float)$m[1] * $mult;
+    }
+
+    /**
+     * R14: parse rsync --info=progress2 output (the bar is redrawn with carriage
+     * returns). Pure. Null when no progress line is there yet.
+     * A line: "  3,217,031,168  23%   13.41MB/s    0:13:57 (xfr#…)".
+     *
+     * @return array{done:int,pct:int,rate:string,eta_s:int}|null
+     */
+    public static function parseRsyncProgress(string $raw): ?array {
+        $lines = preg_split('/[\r\n]+/', $raw) ?: [];
+        for ($i = count($lines) - 1; $i >= 0; $i--) {
+            if (preg_match('/^\s*([\d,]+)\s+(\d{1,3})%\s+(\S+\/s)\s+(\d+):(\d{2}):(\d{2})/', $lines[$i], $m)) {
+                return [
+                    'done'  => (int)str_replace(',', '', $m[1]),
+                    'pct'   => max(0, min(100, (int)$m[2])),
+                    'rate'  => $m[3],
+                    'eta_s' => (int)$m[4] * 3600 + (int)$m[5] * 60 + (int)$m[6],
+                ];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * R14: the copy progress of a conversion, from the files op_graduate writes:
+     * /tmp/unraid-aicliagents/.convert_progress_<type>_<id>.log (rsync output) and
+     * .convert_total_<type>_<id> (the measured size). Null when missing or older
+     * than 2 minutes (a stalled or finished copy shows the plain label).
+     *
+     * @return array{done:int,total:int,pct:int,rate:string,eta_s:int}|null
+     */
+    private static function graduateCopyProgress(string $entity, string $dir = '/tmp/unraid-aicliagents'): ?array {
+        if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#', $entity, $m)) return null;
+        $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $m[2]);
+        $log = "$dir/.convert_progress_{$m[1]}_{$safe}.log";
+        $mt = @filemtime($log);
+        if ($mt === false || time() - $mt > 120) return null;
+        $size = @filesize($log) ?: 0;
+        $fh = @fopen($log, 'rb');
+        if ($fh === false) return null;
+        if ($size > 4096) fseek($fh, -4096, SEEK_END);
+        $raw = (string)stream_get_contents($fh);
+        fclose($fh);
+        $p = self::parseRsyncProgress($raw);
+        if ($p === null) return null;
+        $total = (int)trim((string)@file_get_contents("$dir/.convert_total_{$m[1]}_{$safe}"));
+        return $p + ['total' => $total];
+    }
+    /**
+
+    /**
      * Forgejo #454: the write percentage that the merge script keeps in the
      * task status file of the home. Null when the file is missing, stale
      * (older than 10 minutes) or not in the write step.
@@ -962,6 +1092,9 @@ class SupervisorService {
                             // source (#231), never a raw token.
                             require_once __DIR__ . '/TaskService.php';
                             $step = 'Already saved. ' . TaskService::deferReasonHuman($defer, 'bake');
+                        } elseif ($op === 'graduate' && strpos($entity, 'home/') === 0) {
+                            // #496: say what changed; the home needs no tidy-ups from now on.
+                            $step = 'The home now uses plain folders. It needs no more tidy-ups.';
                         } elseif (
                             ($op === 'bake' || $op === 'consolidate') &&
                             strpos($entity, 'home/') === 0
@@ -986,6 +1119,10 @@ class SupervisorService {
                         if ($defer !== '') {
                             require_once __DIR__ . '/TaskService.php';
                             $err = 'Could not finish. ' . TaskService::deferReasonHuman($defer, (string)($job['op'] ?? ''));
+                        } elseif (($convertReason = self::convertFailureReason((string)($job['op'] ?? ''), (string)($job['entity'] ?? ''))) !== '') {
+                            // #496 (John, 2026-10-14): "The storage job stopped with an
+                            // error" told him nothing. The conversion writes its reason.
+                            $err = $convertReason;
                         } elseif ($backupReason !== '') {
                             // HOME_BACKUP.md 2026-09-29: name the cause in plain
                             // words; the Debug Console log lists the files.
@@ -1018,6 +1155,14 @@ class SupervisorService {
                         $phase = (string)$job['phase'];
                         $step = self::consolidatePhaseStep($phase, $pct);
                         $progress = self::consolidatePhaseProgress($phase, $pct);
+                    } elseif ($jobOp === 'graduate' && (string)($job['phase'] ?? '') !== '') {
+                        // #496: a conversion to plain folders names each step.
+                        $phase = (string)$job['phase'];
+                        // R14: the copies show rsync's own progress.
+                        $copy = ($phase === 'copying' || $phase === 'copying-back')
+                            ? self::graduateCopyProgress((string)($job['entity'] ?? '')) : null;
+                        $step = self::graduatePhaseStep($phase, $copy);
+                        $progress = self::graduatePhaseProgress($phase, $copy['pct'] ?? null);
                     } else {
                         $step = 'Running';
                         $progress = 50;

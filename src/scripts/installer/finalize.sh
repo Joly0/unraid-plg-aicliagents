@@ -148,6 +148,16 @@ log_step "Registering home backup schedule..."
 "${AICLI_RUN_CLOSED[@]}" php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/sync-backup-cron.php > /dev/null 2>&1
 log_ok "Home backup schedule synced from config."
 
+# --- Plain-folders offer (#496, CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R13) ---
+# One Unraid notification when a layered home sits on a disk that is not a USB
+# stick. Read only; a marker on the flash stops repeats. Best effort: a failure
+# here never fails the install.
+"${AICLI_RUN_CLOSED[@]}" php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/convert-offer-notify.php > /dev/null 2>&1 || true
+# #499: rebuild the storage notice in the Activity tray with the NEW code. The
+# supervisor publishes only when the storage state changes, so an update left the
+# old wording (and the old button) in the tray until then. Best effort.
+"${AICLI_RUN_CLOSED[@]}" php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/publish-storage-status.php > /dev/null 2>&1 || true
+
 # Verify UI entry points (D-186: Ensure entry points exist for emhttp)
 cd "$EMHTTP_DEST"
 MISSING_ENTRY=0

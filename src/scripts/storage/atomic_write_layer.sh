@@ -57,9 +57,35 @@ _AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappe
 # _awl_last_percent <file> — print the last "NN%" that mksquashfs wrote to the
 # progress file (0-100), or nothing. mksquashfs redraws its bar with carriage
 # returns, so split on them first. Forgejo #454.
+# #490: only the bar ("] 458/458 100%") counts. The summary at the end holds
+# lines such as "100.00% of uncompressed directory table size", which the old
+# pattern read as "00" and reported as the last value.
 _awl_last_percent() {
     [ -f "${1:-}" ] || return 0
-    tail -c 2000 "$1" 2>/dev/null | tr '\r' '\n' | grep -Eo '[0-9]{1,3}%' | tail -n 1 | tr -d '%'
+    tail -c 4000 "$1" 2>/dev/null | tr '\r' '\n' \
+        | grep -Eo '[0-9]+/[0-9]+ +[0-9]{1,3}%' | tail -n 1 | grep -Eo '[0-9]{1,3}%$' | tr -d '%'
+}
+
+# _awl_force_progress_flag — print "-force-progress" when this mksquashfs
+# accepts it, else nothing. #490 (2026-10-14): the option exists from
+# squashfs-tools 4.6 only. Unraid ships 4.5, which prints its usage and exits 1
+# on it, so every consolidate failed in under a second ("No-mount SQLite
+# consolidation bake failed"). 4.5 writes its bar to a file without the flag.
+# AICLI_MKSQ_FORCE_PROGRESS=0|1 is a test seam; the probe result is cached.
+_awl_force_progress_flag() {
+    case "${AICLI_MKSQ_FORCE_PROGRESS:-}" in
+        1) printf '%s' "-force-progress"; return 0 ;;
+        0) return 0 ;;
+    esac
+    if [ -z "${_AWL_FORCE_PROGRESS_OK:-}" ]; then
+        if mksquashfs -help 2>&1 | grep -q -- '-force-progress'; then
+            _AWL_FORCE_PROGRESS_OK=yes
+        else
+            _AWL_FORCE_PROGRESS_OK=no
+        fi
+    fi
+    [ "$_AWL_FORCE_PROGRESS_OK" = "yes" ] && printf '%s' "-force-progress"
+    return 0
 }
 
 # _awl_resolve_source <path> — print the real directory a symlinked bake source
@@ -224,7 +250,11 @@ atomic_write_layer() {
             : > "$_awl_prog_file" 2>/dev/null || _awl_prog_file=""
         fi
         if [ -n "$_awl_prog_file" ]; then
-            mksq_args="-force-progress $mksq_args"   # first: a trailing "-e" list would read it as a path
+            # first: a trailing "-e" list would read it as a path. #490: only
+            # when this mksquashfs knows the option (4.6+); 4.5 fails on it.
+            local _awl_fp
+            _awl_fp="$(_awl_force_progress_flag)"
+            [ -n "$_awl_fp" ] && mksq_args="$_awl_fp $mksq_args"
             (
                 while :; do
                     sleep "${AICLI_BAKE_PROGRESS_INTERVAL:-5}"

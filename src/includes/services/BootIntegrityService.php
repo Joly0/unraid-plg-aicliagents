@@ -737,10 +737,11 @@ class BootIntegrityService {
             );
             return;
         }
-        $lvl = escapeshellarg($severity);
+        // Unraid notify takes -i normal|warning|alert; -l is the link. 'critical' maps to alert.
+        $lvl = escapeshellarg($severity === 'critical' ? 'alert' : $severity);
         $sub = escapeshellarg($subject);
         $dsc = escapeshellarg($description);
-        $cmd = self::NOTIFY_SCRIPT . " -e 'AICliAgents' -s $sub -d $dsc -i 'tasks' -l $lvl";
+        $cmd = self::NOTIFY_SCRIPT . " -e 'AICliAgents' -s $sub -d $dsc -i $lvl";
         exec($cmd . ' 2>/dev/null');
     }
 

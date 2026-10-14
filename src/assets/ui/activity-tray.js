@@ -111,6 +111,41 @@
         return (a.meta && typeof a.meta.statement === 'string' && a.meta.statement.trim() !== '') ? a.meta.statement : (a.label || '');
     }
 
+    // #493: ask with Unraid's own dialog (swal), never the browser's native
+    // confirm, which only stays as the fallback when swal is missing. The open
+    // tray sits at z-index 1000003, so a body class lifts the dialog above it
+    // while it is open. The callback is a `function`: the webGUI's SweetAlert
+    // reports a Cancel only to a callback whose source starts with "function(".
+    var SWAL_LIFT_CLASS = 'aicli-swal-above-tray';
+    function trayConfirm(opts, onYes) {
+        if (typeof window.swal !== 'function') {
+            if (window.confirm(opts.plain)) onYes();
+            return;
+        }
+        if (!document.getElementById('aicli-swal-above-tray-css')) {
+            var st = document.createElement('style');
+            st.id = 'aicli-swal-above-tray-css';
+            st.textContent = 'body.' + SWAL_LIFT_CLASS + ' .sweet-overlay { z-index: 1000010 !important; }'
+                + 'body.' + SWAL_LIFT_CLASS + ' .sweet-alert { z-index: 1000011 !important; }';
+            document.head.appendChild(st);
+        }
+        document.body.classList.add(SWAL_LIFT_CLASS);
+        window.swal({
+            title: opts.title,
+            text: opts.html,
+            html: true,
+            type: 'warning',
+            showCancelButton: true,
+            confirmButtonText: opts.confirmText || 'OK',
+            cancelButtonText: 'Cancel',
+            // #b35900: white text on it is 4.8:1 (Epic #307); the theme orange is 2.5:1.
+            confirmButtonColor: '#b35900',
+        }, function (confirmed) {
+            document.body.classList.remove(SWAL_LIFT_CLASS);
+            if (confirmed) onYes();
+        });
+    }
+
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -871,16 +906,49 @@
                     if (act === 'consolidate_home') {
                         var user = el.getAttribute('data-user') || 'root';
                         var n = parseInt(el.getAttribute('data-count'), 10) || 0;
-                        var msg = 'Close ' + (n === 1 ? 'the open workspace' : 'all ' + (n || '') + ' open workspaces')
-                            + ', tidy up the storage, then start ' + (n === 1 ? 'it' : 'them') + ' again?\n\n'
-                            + 'Each agent is closed gracefully and its conversation is saved, so it can carry on.';
-                        if (!window.confirm(msg)) return;
-                        el.disabled = true;
-                        el.textContent = 'Starting…';
-                        fetch(ajaxUrl('consolidate_storage', { type: 'home', id: user }))
-                            .then(function (r) { return r.json(); })
-                            .then(function () { self._poll(); })
-                            .catch(function () { self._poll(); });
+                        var what = n === 1 ? 'the open workspace' : 'all ' + (n || '') + ' open workspaces';
+                        var them = n === 1 ? 'it' : 'them';
+                        var note = 'Each agent is closed gracefully and its conversation is saved, so it can carry on.';
+                        trayConfirm({
+                            title: 'Close and tidy up?',
+                            html: '<div style="text-align:left;line-height:1.6">'
+                                + '<div style="margin-bottom:10px;">Closes ' + esc(what) + ', tidies up the storage of home <b>' + esc(user)
+                                + '</b>, then starts ' + them + ' again.</div><div>' + note + '</div></div>',
+                            plain: 'Close ' + what + ', tidy up the storage, then start ' + them + ' again?\n\n' + note,
+                            confirmText: 'Close and tidy up',
+                        }, function () {
+                            el.disabled = true;
+                            el.textContent = 'Starting…';
+                            fetch(ajaxUrl('consolidate_storage', { type: 'home', id: user }))
+                                .then(function (r) { return r.json(); })
+                                .then(function () { self._poll(); })
+                                .catch(function () { self._poll(); });
+                        });
+                        return;
+                    }
+                    // #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R9): a layered home on a disk
+                    // that is not a USB stick is offered the conversion, not a merge.
+                    if (act === 'convert_home') {
+                        var cUser = el.getAttribute('data-user') || 'root';
+                        var cNote = 'The home stays on the boot disk and needs no more tidy-ups. '
+                            + 'Your current storage files are kept as a backup for 14 days, then removed; when the boot disk is short of space, that backup is kept on another disk. '
+                            // R14: never look hung. The Storage tab's dialog gives the size estimate.
+                            + 'For a large home this can take 30 minutes or more; the workspaces stay closed until it ends, and this tray shows the progress.';
+                        trayConfirm({
+                            title: 'Convert to plain folders?',
+                            html: '<div style="text-align:left;line-height:1.6">'
+                                + '<div style="margin-bottom:10px;">Every workspace of home <b>' + esc(cUser)
+                                + '</b> closes and opens again.</div><div>' + cNote + '</div></div>',
+                            plain: 'Convert the home of ' + cUser + ' to plain folders? Every workspace of this home closes and opens again.\n\n' + cNote,
+                            confirmText: 'Convert',
+                        }, function () {
+                            el.disabled = true;
+                            el.textContent = 'Starting…';
+                            fetch(ajaxUrl('convert_storage', { type: 'home', id: cUser }))
+                                .then(function (r) { return r.json(); })
+                                .then(function () { self._poll(); })
+                                .catch(function () { self._poll(); });
+                        });
                         return;
                     }
                     self._action(act, opId, isLocal);
@@ -935,9 +1003,17 @@
             // STORAGE_RECLAIM_NOTICE.md: the storage tidy-up that waits on open workspaces.
             // "ask" phase: one button does the whole job; "Later" hides it for this wait.
             // "tidying" phase: state only, no buttons.
-            var reclaimAsk = a.status === 'waiting' && a.meta && a.meta.action === 'consolidate_home';
+            var convertAsk = a.status === 'waiting' && a.meta && a.meta.action === 'convert_home';
+            var reclaimAsk = (a.status === 'waiting' && a.meta && a.meta.action === 'consolidate_home') || convertAsk;
             var reclaimTidy = a.status === 'waiting' && a.meta && a.meta.phase === 'tidying';
-            if (reclaimAsk) {
+            if (convertAsk) {
+                // #496: the home can become plain folders, so the one button converts it.
+                btns += '<button class="btn force" data-act="convert_home" data-opid="' + esc(a.opId) + '"'
+                    + ' data-user="' + esc(a.meta.user || 'root') + '"'
+                    + ' title="Closes every workspace of this home, changes the home to plain folders, then opens them again. It needs no more tidy-ups.">Convert to plain folders</button>';
+                btns += '<button class="btn" data-act="dismiss_activity" data-opid="' + esc(a.opId) + '"'
+                    + ' title="Hides this notice. You can convert the home later on the Home Storage tab.">Later</button>';
+            } else if (reclaimAsk) {
                 btns += '<button class="btn force" data-act="consolidate_home" data-opid="' + esc(a.opId) + '"'
                     + ' data-user="' + esc(a.meta.user || 'root') + '" data-count="' + esc(a.meta.count || 0) + '"'
                     + ' title="Closes every open workspace, tidies the storage, then starts them again. Conversations are saved first.">Close all and tidy up</button>';

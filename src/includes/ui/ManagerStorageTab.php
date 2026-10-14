@@ -62,10 +62,10 @@
         </div>
 
         <!-- HOME_BACKUP.md "2026-09-24 redesign (#287)": backup settings are per
-             home now, behind the Backup… button on each Home card above
+             home now, behind the Config backup… button on each Home card above
              (aicliOpenHomeBackup in ManagerStorageScripts.php). They save at once
              through set_home_backup_setting — never through the shared settings
              form, which this tab sits outside of (Bug #710). -->
-        <p id="aicli-home-backup-note" style="margin:10px 0 0; opacity:.85; font-size:12px;"><i class="fa fa-life-ring" aria-hidden="true"></i> Each home has its own backup: a second, plain copy of the home on a folder you choose, so damage to the Flash layers does not destroy that copy too. Use <b>Backup…</b> on a home's card to set it up, run it now, or restore a snapshot.</p>
+        <p id="aicli-home-backup-note" style="margin:10px 0 0; opacity:.85; font-size:12px;"><i class="fa fa-life-ring" aria-hidden="true"></i> Each home has its own backup: a second, plain copy of the home on a folder you choose, so damage to the Flash layers does not destroy that copy too. Use <b>Config backup…</b> on a home's card to set it up, run it now, or restore a snapshot.</p>
     </div>
 </div>

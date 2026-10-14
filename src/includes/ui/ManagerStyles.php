@@ -2062,6 +2062,16 @@
         }
         :is(#tab-config, #tab-store, #tab-storage) .aicli-card-header:has(> button) > span:first-child { flex: 1 1 100%; }
         :is(#tab-config, #tab-store, #tab-storage) .aicli-card-header > button { flex: 1 1 auto; font-size: 1.1rem !important; }
+        /* AI Agent Marketplace: the online-check status and its button sit in
+           one span, not straight in the header. The title, the status and the
+           button each get a line, so a long status ("Versions last checked
+           53 min ago (cached)") cannot push the button past the card edge. */
+        #tab-store .aicli-card-header:has(#version-check-btn) {
+            flex-wrap: wrap; row-gap: 4px; padding: 8px 12px !important;
+        }
+        #tab-store .aicli-card-header:has(#version-check-btn) > span { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; row-gap: 6px; }
+        #tab-store #version-check-status { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+        #tab-store #version-check-btn { flex: 1 1 auto; font-size: 1.1rem !important; }
         :is(#tab-config, #tab-store, #tab-storage) .aicli-card-body { padding: 12px; }
 
         /* Settings lists: the label goes above its field. Side by side, the

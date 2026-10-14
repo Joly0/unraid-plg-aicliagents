@@ -259,10 +259,16 @@ class StorageMetricsService {
             } catch (\Throwable $e) {
                 $_bkSummary = null;
             }
-            $homes[$_u] = array_merge($_st, FileStorage::effectiveBackendCaps($homeDev, $_hasLayers),
+            $_caps = FileStorage::effectiveBackendCaps($homeDev, $_hasLayers);
+            $homes[$_u] = array_merge($_st, $_caps,
                 ['upper_mode' => $homeUpperMode,
                  'percent' => self::upperPercent((int)($_st['dirty_mb'] ?? 0), $homeUpperMode)],
                 ['can_graduate' => FileStorage::canGraduate($homeDev, $homeWear, $_hasLayers, $homeHasTarget)],
+                // #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R9): a layered home on a
+                // non-USB disk can become plain folders in place. The Storage card
+                // reads THIS field; the tidy-up notice and the banner use the same rule.
+                ['can_convert' => FileStorage::canConvert($homeDev, $homeWear, $_caps['backend'], $_hasLayers, 'home'),
+                 'persist_path' => $homePath],
                 ['last_backup' => $_bk['last_backup'] ?? null,
                  'last_backup_run' => $_bk['last_run'] ?? null,
                  'backup' => $_bkSummary],
@@ -273,7 +279,9 @@ class StorageMetricsService {
             $agents[$_a] = array_merge($_st, FileStorage::effectiveBackendCaps($agentDev, $_hasLayers),
                 ['upper_mode' => $agentUpperMode,
                  'percent' => self::upperPercent((int)($_st['dirty_mb'] ?? 0), $agentUpperMode)],
-                ['can_graduate' => FileStorage::canGraduate($agentDev, $agentWear, $_hasLayers, $agentHasTarget)]);
+                ['can_graduate' => FileStorage::canGraduate($agentDev, $agentWear, $_hasLayers, $agentHasTarget)],
+                // #496 R11: agents keep their layers, so this is always false.
+                ['can_convert' => false]);
         }
 
         // Rootfs (RAM Disk) stats

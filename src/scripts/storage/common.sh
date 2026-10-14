@@ -1265,6 +1265,392 @@ sqlite_stage_choose_root() {
 }
 
 # ----------------------------------------------------------------------------
+# Work folder for storage jobs (docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md,
+# #496 R6). A conversion that has no room on the boot disk copies the home to a
+# folder on another disk first. The folder is never /boot, never RAM, never /tmp.
+# Order: the setting consolidate_stage_path > Docker appdata > VM domains > a
+# protected pool (most free first) > any other disk (most free first).
+# Test seams: AICLI_DOCKER_CFG, AICLI_DOMAIN_CFG, AICLI_SHARES_CFG_DIR,
+# AICLI_MNT_ROOT (the /mnt folder), AICLI_WORK_POOL_FACTS ("<path> <protected 0|1>
+# <free bytes>" per line, replaces the pool scan), AICLI_WORK_FREE_BYTES_FN,
+# AICLI_WORK_ALLOW_TMP=1 (unit tests: their temp folders are under /tmp).
+# ----------------------------------------------------------------------------
+
+# _cfg_value <file> <KEY> — the value of KEY="..." in an Unraid cfg file.
+_cfg_value() {
+    [ -f "${1:-}" ] || return 0
+    grep -oP "^${2}=\"?\K[^\"]*" "$1" 2>/dev/null | head -1
+}
+
+# _share_real_dir <path> — map a user-share path (/mnt/user/<share>/...) to the
+# pool that holds the share, so a job never writes through the shfs layer. A
+# path that is not on /mnt/user is printed unchanged. Prints nothing when the
+# share has no pool (array only): writing there would wake the array disks.
+_share_real_dir() {
+    local p="${1%/}" mnt="${AICLI_MNT_ROOT:-/mnt}" share rest pool cfgdir
+    case "$p" in
+        "$mnt"/user/*|"$mnt"/user0/*) ;;
+        *) printf '%s\n' "$p"; return 0 ;;
+    esac
+    rest="${p#"$mnt"/user/}"; rest="${rest#"$mnt"/user0/}"
+    share="${rest%%/*}"
+    [ "$rest" = "$share" ] && rest="" || rest="/${rest#*/}"
+    cfgdir="${AICLI_SHARES_CFG_DIR:-/boot/config/shares}"
+    pool="$(_cfg_value "$cfgdir/$share.cfg" shareCachePool)"
+    [ -n "$pool" ] || return 0
+    printf '%s/%s/%s%s\n' "$mnt" "$pool" "$share" "$rest"
+}
+
+# _work_free_bytes <dir> — free bytes on the file system of <dir> (or its
+# nearest existing parent).
+_work_free_bytes() {
+    if [ -n "${AICLI_WORK_FREE_BYTES_FN:-}" ]; then "$AICLI_WORK_FREE_BYTES_FN" "$1"; return; fi
+    local d="$1"
+    while [ -n "$d" ] && [ ! -d "$d" ]; do d="$(dirname "$d")"; done
+    df -P -B1 "${d:-/}" 2>/dev/null | awk 'NR==2 {print $4}'
+}
+
+# _work_pool_facts — "<mount> <protected 0|1> <free bytes>" for each pool or
+# disk under /mnt that can hold a work folder (not user shares, not /boot).
+# protected = a ZFS pool with a mirror/raidz vdev, or btrfs data in raid1/10/1c3.
+_work_pool_facts() {
+    if [ -n "${AICLI_WORK_POOL_FACTS+x}" ]; then printf '%s\n' "$AICLI_WORK_POOL_FACTS"; return 0; fi
+    local mnt="${AICLI_MNT_ROOT:-/mnt}" tgt fst src prot free
+    while read -r tgt fst src; do
+        case "$tgt" in
+            "$mnt"/user|"$mnt"/user0|"$mnt"/disks/*|"$mnt"/remotes/*|"$mnt"/addons/*|"$mnt"/rootshare*) continue ;;
+            "$mnt"/*/*) continue ;;
+            "$mnt"/*) ;;
+            *) continue ;;
+        esac
+        prot=0
+        case "$fst" in
+            zfs)
+                zpool status "${src%%/*}" 2>/dev/null | grep -qE '^\s+(mirror|raidz[0-9]*|draid)' && prot=1 ;;
+            btrfs)
+                btrfs filesystem df "$tgt" 2>/dev/null | grep -qiE '^Data, (RAID1|RAID10|RAID1C3|RAID1C4)' && prot=1 ;;
+            xfs|ext4) ;;
+            *) continue ;;
+        esac
+        free="$(_work_free_bytes "$tgt")"
+        printf '%s %s %s\n' "$tgt" "$prot" "${free:-0}"
+    done < <(findmnt -rn -o TARGET,FSTYPE,SOURCE 2>/dev/null)
+}
+
+# work_folder_candidates — print candidate work folders in R6 order, one a line.
+work_folder_candidates() {
+    local c dock dom
+    c="$(consolidate_stage_fallback_root)"
+    [ -n "$c" ] && printf '%s\n' "$c"
+    dock="$(_cfg_value "${AICLI_DOCKER_CFG:-/boot/config/docker.cfg}" DOCKER_APP_CONFIG_PATH)"
+    [ -n "$dock" ] && c="$(_share_real_dir "$dock")" && [ -n "$c" ] && printf '%s/aicliagents/work\n' "${c%/}"
+    dom="$(_cfg_value "${AICLI_DOMAIN_CFG:-/boot/config/domain.cfg}" DOMAINDIR)"
+    [ -n "$dom" ] && c="$(_share_real_dir "$dom")" && [ -n "$c" ] && printf '%s/aicliagents/work\n' "${c%/}"
+    _work_pool_facts | awk 'NF==3 && $2==1' | sort -k3,3nr | awk '{print $1"/aicliagents/work"}'
+    _work_pool_facts | awk 'NF==3 && $2!=1' | sort -k3,3nr | awk '{print $1"/aicliagents/work"}'
+}
+
+# work_folder_choose <need_bytes> [exclude_fs_of_path] — print the first
+# candidate that is usable (sqlite_stage_fallback_ok: not /boot, not RAM,
+# creatable, writable), has <need_bytes> free, and is not on the same file
+# system as [exclude_fs_of_path] (the boot disk the job wants to free). Return
+# 1 with nothing printed when none qualifies (for example while the array is
+# stopped and no pool is mounted).
+work_folder_choose() {
+    local need="${1:-0}" excl="${2:-}" c free excl_dev="" dev
+    case "$need" in ''|*[!0-9]*) need=0 ;; esac
+    [ -n "$excl" ] && excl_dev="$(stat -c %d "$excl" 2>/dev/null)"
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        [ "${AICLI_WORK_ALLOW_TMP:-0}" = "1" ] || case "$c" in /tmp|/tmp/*) continue ;; esac
+        sqlite_stage_fallback_ok "$c" || continue
+        if [ -n "$excl_dev" ]; then
+            dev="$(stat -c %d "$c" 2>/dev/null)"
+            [ "$dev" = "$excl_dev" ] && continue
+        fi
+        free="$(_work_free_bytes "$c")"
+        case "$free" in ''|*[!0-9]*) continue ;; esac
+        [ "$free" -ge "$need" ] || continue
+        printf '%s\n' "${c%/}"
+        return 0
+    done < <(work_folder_candidates | awk '!seen[$0]++')
+    return 1
+}
+
+# ----------------------------------------------------------------------------
+# Convert a layered home to plain folders (#496,
+# docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md). Pure-ish helpers op_graduate
+# uses; each works on plain folders so the unit tests drive them without root.
+# ----------------------------------------------------------------------------
+
+# Regenerable caches a conversion does not copy (the same set a home merge
+# prunes, storage_ops.sh op_consolidate). The folders stay, their content does not.
+CONVERT_CACHE_EXCLUDES="/.npm/* /.cache/* /.bun/install/* /.claude/cache/* /.claude/shell-snapshots/* /.claude/telemetry/*"
+
+# _rsync_pat_escape <rel> — escape rsync wildcard characters in a literal path.
+_rsync_pat_escape() {
+    printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'
+}
+
+# convert_write_excludes <file> <root> <db-paths...> — write the rsync exclude
+# file of a conversion: the regenerable caches, and each SQLite database with
+# its -wal/-shm/-journal (the databases are copied with the Online Backup API
+# instead). Paths are anchored at <root>.
+convert_write_excludes() {
+    local out="$1" root="${2%/}"; shift 2
+    local p db rel
+    : > "$out" || return 1
+    for p in $CONVERT_CACHE_EXCLUDES; do printf '%s\n' "$p" >> "$out"; done
+    for db in "$@"; do
+        [ -n "$db" ] || continue
+        rel="${db#"$root"/}"
+        [ "$rel" != "$db" ] || continue
+        rel="/$(_rsync_pat_escape "$rel")"
+        printf '%s\n%s\n%s\n%s\n' "$rel" "$rel-wal" "$rel-shm" "$rel-journal" >> "$out"
+    done
+}
+
+# convert_copy_tree <src> <dst> [exclude_file] [progress_file] — copy a home tree
+# with owner, mode, hard links and xattrs (no ACLs: /boot on an internal-boot
+# pool is mounted noacl, as op_graduate already assumes). --delete makes a retry
+# converge. R14: with [progress_file], rsync writes its overall progress there
+# (--info=progress2 over a file list built up front, so the percentage is of
+# the whole copy); the tray reads it (SupervisorService::graduateCopyProgress).
+convert_copy_tree() {
+    local src="${1%/}" dst="${2%/}" ex="${3:-}" prog="${4:-}"
+    local -a args=(-aHX --delete)
+    mkdir -p "$dst" || return 1
+    [ -n "$ex" ] && args+=(--exclude-from="$ex")
+    if [ -n "$prog" ]; then
+        args+=(--info=progress2 --no-inc-recursive)
+        rsync "${args[@]}" "$src/" "$dst/" > "$prog"
+    else
+        rsync "${args[@]}" "$src/" "$dst/"
+    fi
+}
+
+# convert_verify_tree <src> <dst> [exclude_file] [samples] — 0 when <dst> holds
+# the same tree as <src>: an rsync dry run lists no file to send or delete
+# (directory time stamps are ignored), and [samples] (default 20) files read
+# back with the same sha256. Prints the first difference on failure.
+convert_verify_tree() {
+    local src="${1%/}" dst="${2%/}" ex="${3:-}" samples="${4:-20}" diff f rel a b
+    local -a args=(-aHXn --delete --itemize-changes)
+    [ -n "$ex" ] && args+=(--exclude-from="$ex")
+    diff="$(rsync "${args[@]}" "$src/" "$dst/" 2>&1 | grep -v '^\.d' | grep -v '^$' | head -3)"
+    if [ -n "$diff" ]; then
+        printf 'tree differs: %s\n' "$(printf '%s' "$diff" | tr '\n' ' ')"
+        return 1
+    fi
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        rel="${f#"$dst"/}"
+        # A database is an Online Backup copy, not the same bytes as its source:
+        # convert_verify_dbs checks those.
+        head -c 16 "$f" 2>/dev/null | grep -qa "SQLite format 3" && continue
+        a="$(sha256sum "$src/$rel" 2>/dev/null | awk '{print $1}')"
+        b="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+        if [ -z "$a" ] || [ "$a" != "$b" ]; then
+            printf 'sha256 differs: %s\n' "$rel"
+            return 1
+        fi
+    done < <(find "$dst" -type f -size -64M 2>/dev/null | shuf -n "$samples" 2>/dev/null)
+    return 0
+}
+
+# convert_sync_until_clean <src> <dst> [exclude_file] [passes] — verify <dst>
+# against <src>; while files differ, copy the changes again and verify again,
+# up to [passes] (default 5). 0 when clean; 1 with the last difference printed.
+# The plugin's own services write into a home with every workspace closed (the
+# Relay's peer status and nonces, the hub state, resume records: prod02,
+# 2026-10-14, #496 run 3), so one copy and one verify is not enough. Each pass
+# copies only what changed, so it takes seconds. Progress goes to stderr.
+convert_sync_until_clean() {
+    local src="$1" dst="$2" ex="${3:-}" passes="${4:-5}" i why
+    case "$passes" in ''|*[!0-9]*) passes=5 ;; esac
+    for ((i = 1; i <= passes; i++)); do
+        if why="$(convert_verify_tree "$src" "$dst" "$ex" 5)"; then
+            return 0
+        fi
+        echo "[convert] pass $i: changed during the copy ($why) — copying the changes again" >&2
+        convert_copy_tree "$src" "$dst" "$ex" >/dev/null 2>&1 || true
+    done
+    why="$(convert_verify_tree "$src" "$dst" "$ex" 5)" && return 0
+    printf '%s\n' "$why"
+    return 1
+}
+
+# convert_verify_dbs <root> <dst> <db-paths...> — 0 when each database under
+# <root> has a copy at the same relative path in <dst> with a SQLite header.
+convert_verify_dbs() {
+    local root="${1%/}" dst="${2%/}" db rel; shift 2
+    for db in "$@"; do
+        [ -n "$db" ] || continue
+        rel="${db#"$root"/}"
+        if ! head -c 16 "$dst/$rel" 2>/dev/null | grep -qa "SQLite format 3"; then
+            printf 'database copy missing: %s\n' "$rel"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# convert_plan_mode <persist_free> <src_bytes> [margin] — print "direct" when
+# the persist disk holds a full copy beside the layers, else "staged".
+convert_plan_mode() {
+    local free="${1:-0}" src="${2:-0}" margin="${3:-536870912}"
+    case "$free$src$margin" in *[!0-9]*) printf 'staged'; return 0 ;; esac
+    if [ "$free" -ge $((src + margin)) ]; then printf 'direct'; else printf 'staged'; fi
+}
+
+# convert_fits_after_free <persist_free> <layers_bytes> <upper_bytes> <copy_bytes> [margin]
+# R7: 0 when the plain copy fits on the persist disk once the old layers (and a
+# writable layer on the same disk) have moved off it.
+convert_fits_after_free() {
+    local free="${1:-0}" layers="${2:-0}" upper="${3:-0}" copy="${4:-0}" margin="${5:-536870912}"
+    case "$free$layers$upper$copy$margin" in *[!0-9]*) return 1 ;; esac
+    [ $((free + layers + upper)) -ge $((copy + margin)) ]
+}
+
+# convert_copy_size_on <dir> <target_dir> — the bytes a copy of <dir> will take
+# on the file system of <target_dir>. When both are ZFS with compression on, the
+# allocated size of <dir> is a fair estimate (same lz4 family); otherwise the
+# apparent size (no compression assumed).
+convert_copy_size_on() {
+    local d="$1" tgt="$2" f1 f2 c1 c2
+    f1="$(findmnt -no FSTYPE -T "$d" 2>/dev/null | head -1)"
+    f2="$(findmnt -no FSTYPE -T "$tgt" 2>/dev/null | head -1)"
+    if [ "$f1" = "zfs" ] && [ "$f2" = "zfs" ]; then
+        c1="$(zfs get -H -o value compression "$(findmnt -no SOURCE -T "$d" | head -1)" 2>/dev/null)"
+        c2="$(zfs get -H -o value compression "$(findmnt -no SOURCE -T "$tgt" | head -1)" 2>/dev/null)"
+        if [ -n "$c1" ] && [ "$c1" != "off" ] && [ -n "$c2" ] && [ "$c2" != "off" ]; then
+            du -sB1 "$d" 2>/dev/null | awk '{print $1}'
+            return 0
+        fi
+    fi
+    du -sb "$d" 2>/dev/null | awk '{print $1}'
+}
+
+# layer_loops_of <file...> — print each loop device that still reads one of the
+# files. AICLI_LOSETUP replaces losetup in tests.
+layer_loops_of() {
+    local f
+    for f in "$@"; do
+        [ -n "$f" ] || continue
+        "${AICLI_LOSETUP:-losetup}" -j "$f" 2>/dev/null | cut -d: -f1
+    done | awk 'NF && !seen[$0]++'
+}
+
+# _loop_holders <loopdev> — "pid(comm)" of up to 3 processes whose mount table
+# still has <loopdev> mounted (another mount namespace: an SSH session, a
+# container). For the log only.
+_loop_holders() {
+    local dev="$1" f pid out=""
+    for f in /proc/[0-9]*/mountinfo; do
+        grep -q " $dev " "$f" 2>/dev/null || continue
+        pid="${f#/proc/}"; pid="${pid%/mountinfo}"
+        out="$out $pid($(cat "/proc/$pid/comm" 2>/dev/null))"
+        [ "$(printf '%s' "$out" | wc -w)" -ge 3 ] && break
+    done
+    printf '%s' "${out# }"
+}
+
+# release_layer_loops <file...> — #504: detach every loop device that still reads
+# one of the layer files, then wait up to AICLI_LOOP_RELEASE_WAIT_S (default 10)
+# seconds for the kernel to let go. An unmount does not always free the loop:
+# when the mount is also in another mount namespace, the loop stays attached,
+# and a layer file moved to another disk then keeps its space on this disk
+# until a reboot (prod02, 2026-10-14, #496 run 4). 0 when no loop is left;
+# 1 with "loopdev [holders]" lines printed for the loops that stay.
+release_layer_loops() {
+    local wait_s="${AICLI_LOOP_RELEASE_WAIT_S:-10}" dev left i
+    case "$wait_s" in ''|*[!0-9]*) wait_s=10 ;; esac
+    for dev in $(layer_loops_of "$@"); do
+        "${AICLI_LOSETUP:-losetup}" -d "$dev" 2>/dev/null || true
+    done
+    for ((i = 0; ; i++)); do
+        left="$(layer_loops_of "$@")"
+        [ -z "$left" ] && return 0
+        [ "$i" -ge "$wait_s" ] && break
+        sleep 1
+    done
+    for dev in $left; do
+        printf '%s %s\n' "$dev" "$(_loop_holders "$dev")"
+    done
+    return 1
+}
+
+# convert_lock_path <type> <id> — the file a running conversion holds (its pid).
+convert_lock_path() { printf '%s/.converting_%s_%s' "${AICLI_CONVERT_LOCK_DIR:-/tmp/unraid-aicliagents}" "$1" "$2"; }
+
+# convert_mount_blocked <persist> <type> <id> — #505: 0 (and a reason) when a
+# conversion owns this home, so no mount may build its old layered view: a
+# conversion process is alive, or a conversion intent is still open (recovery
+# finishes or rolls it back first). A lock of a dead process does not block.
+convert_mount_blocked() {
+    local persist="$1" type="$2" id="$3" lk pid
+    lk="$(convert_lock_path "$type" "${id//[^a-zA-Z0-9_-]/_}")"
+    if [ -f "$lk" ]; then
+        pid="$(head -c 16 "$lk" 2>/dev/null | tr -cd '0-9')"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            printf 'conversion running (pid %s)' "$pid"
+            return 0
+        fi
+    fi
+    case "$(read_intent "$persist" "$type" "$id")" in
+        *'"op":"graduate"'*'"mode":"'*) printf 'conversion intent open'; return 0 ;;
+    esac
+    return 1
+}
+
+# _convert_same_fs <a> <b> — 0 when both paths are on one file system.
+_convert_same_fs() { [ "$(stat -c %d "$1" 2>/dev/null)" = "$(stat -c %d "$2" 2>/dev/null)" ]; }
+
+# convert_rollback_fits <persist> <retire> <pt_dir> [margin] — #505: 0 when the
+# persist disk can take the retired layers and writable layer back, counting the
+# space the partial plain folder frees. Apparent sizes: the layers do not
+# compress, so this errs on the safe side for the writable layer only.
+convert_rollback_fits() {
+    local persist="$1" retire="$2" pt="$3" margin="${4:-67108864}" need free gain
+    # Same file system (direct mode): the move back is a rename and needs no room.
+    _convert_same_fs "$retire" "$persist" && return 0
+    need="$(du -sb "$retire" 2>/dev/null | awk '{print $1}')"; need="${need:-0}"
+    free="$(_work_free_bytes "$persist")"; free="${free:-0}"
+    gain=0
+    [ -d "$pt" ] && gain="$(du -sB1 "$pt" 2>/dev/null | awk '{print $1}')"
+    case "$need$free${gain:-0}$margin" in *[!0-9]*) return 1 ;; esac
+    [ $((free + ${gain:-0})) -ge $((need + margin)) ]
+}
+
+# convert_rollback <persist> <pt_dir> <retire> <upper> — #505 (R5): put the
+# retired layers and the writable layer back and drop the partial plain folder.
+#   0 = done (the caller clears the intent);
+#   3 = not enough room: NOTHING was moved, everything stays in <retire>;
+#   1 = a move failed part way: what moved stays moved, the caller keeps the
+#       intent, and the next try moves the rest (each step can run again).
+convert_rollback() {
+    local persist="${1%/}" pt="$2" retire="$3" upper="$4" f rc=0
+    # Nothing moved yet: only the partial plain folder goes.
+    [ -d "$retire" ] || { rm -rf "$pt" 2>/dev/null || true; return 0; }
+    if ! convert_rollback_fits "$persist" "$retire" "$pt"; then
+        return 3
+    fi
+    rm -rf "$pt" 2>/dev/null || true
+    for f in "$retire"/*.sqsh; do
+        [ -f "$f" ] || continue
+        mv -f "$f" "$persist/" || { rc=1; break; }
+    done
+    if [ "$rc" -eq 0 ] && [ -n "$upper" ] && [ -d "$retire/upper" ]; then
+        # A failed cross-disk move leaves a part copy at <upper>: remove it
+        # first, so a retry never moves the folder INTO it.
+        rm -rf "$upper" 2>/dev/null || true
+        mv -f "$retire/upper" "$upper" || rc=1
+    fi
+    [ "$rc" -eq 0 ] && rmdir "$retire" 2>/dev/null
+    return "$rc"
+}
+
+# ----------------------------------------------------------------------------
 # WP #935: SQLite live-backup helpers + selective UPPER cleanup.
 # See docs/specs/CONSOLIDATE_LIVE_BACKUP.md for the design.
 # ----------------------------------------------------------------------------
@@ -1613,6 +1999,23 @@ build_mksquashfs_sqlite_sidecar_excludes() {
     done
 }
 
+# _pseudofile_merge_args <base_args> <exclude_file> <pseudo_file>
+# #491: mksquashfs reads every word after "-e" as a path to exclude. A home
+# consolidate puts "-e .<name>_<N>" (orphan folders) at the end of the args, so
+# a trailing "-ef X -pf Y" became four exclude names: mksquashfs exited 0 and
+# packed the LIVE databases instead of their backups. Put -ef/-pf BEFORE a
+# trailing "-e ..." list (the rule _batch_mksquashfs_args uses for -processors).
+_pseudofile_merge_args() {
+    local base="${1:-}" ef="${2:-}" pf="${3:-}" head
+    case " $base " in
+        *" -e "*)
+            head="${base%% -e *}"
+            printf '%s -ef %s -pf %s%s' "$head" "$ef" "$pf" "${base#"$head"}"
+            ;;
+        *) printf '%s -ef %s -pf %s' "$base" "$ef" "$pf" ;;
+    esac
+}
+
 # bake_via_pseudofile_merge <type> <id> <persist_path> <lower_dir> <sqlite_stage> <kind> <db-paths...>
 #
 # Bakes a SquashFS layer from <lower_dir>, replacing each detected SQLite DB
@@ -1713,7 +2116,8 @@ bake_via_pseudofile_merge() {
     done
 
     local base_args="${MKSQUASHFS_ARGS:-${_AWL_DEFAULT_ARGS:--comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend}}"
-    local final_args="$base_args -ef $exclude_file -pf $pseudo_file"
+    local final_args
+    final_args="$(_pseudofile_merge_args "$base_args" "$exclude_file" "$pseudo_file")"
     local result=""
     if ! result=$(MKSQUASHFS_ARGS="$final_args" atomic_write_layer "$type" "$id" "$persist_path" "$lower_dir" "$kind"); then
         rm -rf "$merge_root" 2>/dev/null

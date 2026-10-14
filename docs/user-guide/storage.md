@@ -6,7 +6,7 @@
 
 ## In plain words
 
-The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
+The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. On a boot disk that is not a USB flash drive, a home does not need layers: it can be **plain folders**, an ordinary folder with no saves and no tidy-ups. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
 
 ## The basics
 
@@ -114,6 +114,27 @@ When a home's data sits on a real USB flash drive and a durable disk exists, the
 
 An internal boot drive in a server that boots from a ZFS pool is not a USB flash drive. The strip does not show there.
 
+### Convert a home to plain folders
+
+Layers are for a USB flash drive. When the boot disk is not a USB flash drive, the plugin already keeps anything new as plain folders. A home that had layers before stays layered, and it keeps needing saves and tidy-ups. A tidy-up needs room for a new layer beside the old ones, so on a small boot disk it can fail again and again. The conversion ends this.
+
+When a home has layers and its folder is not on a USB flash drive, the home card shows a green strip: "This home can change to plain folders. Then it needs no more saves or tidy-ups." with the button **Convert to plain folders**.
+
+1. Press **Convert to plain folders**. Expect: a dialog **Convert to plain folders?** that says:
+   - every workspace of this home closes and opens again;
+   - the home stays on the boot disk;
+   - it needs no more tidy-ups;
+   - your current storage files are kept as a backup for 14 days, then removed. When the boot disk is short of space, that backup is kept on another disk.
+2. Press **Convert**. Expect: "Conversion queued". Press **Cancel** to stop. Nothing changes then.
+3. Watch the Activity tray. The pill names each step: "Closing workspaces", "Checking space", "Copying the home", "Freeing the boot disk", "Copying the home back", "Switching to plain folders", "Opening workspaces again". On a boot disk with enough room, the steps "Freeing the boot disk" and "Copying the home back" do not occur.
+4. When it is done, the pill says "The home now uses plain folders. It needs no more tidy-ups." The workspaces open again by themselves.
+
+The plugin copies the home with every workspace closed. It does not save or merge first, so it needs no extra room for a new layer. When the boot disk has no room for the copy, the plugin copies the home to a work folder on another disk first. It then moves the old layers to that work folder, which frees the boot disk, and copies the home back. If a step fails, the plugin puts the old layers back, and the home is exactly as before. The work folder is the setting **Work folder for storage jobs**. See "The field "Work folder for storage jobs"" below. A conversion that needs the work folder does not start while the array is stopped.
+
+The home stays on the boot disk, so the plugin works while the array is stopped. Backups work as before. A home on a USB flash drive is never offered the conversion; use **Move off USB flash drive** for that. Agent files keep their layers.
+
+You can also start the conversion from the notice in the Activity tray (see "The notice to close workspaces") or from the Unraid notification "AICliAgents: homes can move to plain folders". That notification comes once after a plugin install or update when one or more homes can convert. It comes again only when that set of homes changes. Its link opens this dialog for the first such home.
+
 ## The setting "Writable layer for homes"
 
 This setting decides where the writable layer of each home lives. It applies to homes only. Agents keep their own rule.
@@ -150,16 +171,16 @@ The **Home Storage** tab shows one card for each user that has a home. A card wi
 | Field | What it shows |
 | :-- | :-- |
 | Name (top left) | The Unraid user that owns the home. |
-| "N MB persisted · N Layers" | The size of all saved layers and how many there are. |
-| Status word (top right) | **Layered**: nothing is unsaved. **N MB volatile**: that much unsaved data is in RAM. **N MB writable**: that much unsaved data is in the writable layer on disk. **OFFLINE**: the home is not mounted. |
-| Bar | For a RAM writable layer: how full the RAM area is, with the text "N% ZRAM used". For a disk writable layer: the text "N MB durable writable layer". The disk layer has no fixed size, so the bar never shows a false percentage. |
+| "N MB persisted · N Layers" | The size of all saved layers and how many there are. For a home in plain folders: "Plain folders on" and the folder. |
+| Status word (top right) | **Plain folders**: the home is an ordinary folder. It has no layers, no save button and no merge button. **Layered**: nothing is unsaved. **N MB volatile**: that much unsaved data is in RAM. **N MB writable**: that much unsaved data is in the writable layer on disk. **OFFLINE**: the home is not mounted. |
+| Bar | A home in plain folders has no bar. It shows one line: "Saved straight to disk. No saves or tidy-ups needed." For a layered home with a RAM writable layer: how full the RAM area is, with the text "N% ZRAM used". For a disk writable layer: the text "N MB durable writable layer". The disk layer has no fixed size, so the bar never shows a false percentage. |
 | Mount line | The folder where the plugin shows the home to the agents. |
 | Folder line | The folder that holds the layer files. |
 | Orange tile | The unsaved changes. In RAM mode it reads "ZRAM changes (volatile, not yet flushed)". In disk mode it reads "Writable changes (durable, not yet compacted)". |
 | Layer rows | One row per layer with its file name and size. |
-| Backup strip | The state of this home's backup and the button **Backup…**. See [Home backup and restore](backup-restore.md). |
+| Backup strip | The state of the config backup of this home and the button **Config backup…** (**Set up config backup…** when no folder is chosen). A config backup is a copy of the home folder: the settings, sign-ins and history of the agents. It is not a backup of the server. See [Home backup and restore](backup-restore.md). |
 
-A badge **Awaiting idle** (with an hourglass) means the plugin wants to merge this home but waits until no terminal uses it.
+A badge **Awaiting idle** (with an hourglass) means the plugin wants to merge this home but waits until no terminal uses it. A home in plain folders never shows this badge.
 
 ### The four buttons
 
@@ -172,7 +193,7 @@ The buttons are icons at the bottom of the card. On a phone, tap the icon. Hold 
 | Wrench | **Repair mount: this home is not mounted** | Unmounts and mounts the home's storage again. | It can interrupt open workspaces. |
 | Red trash can | **Delete home data (permanent)** | Deletes the whole home. | Not allowed while a workspace uses the home. |
 
-All four icons lock while a job runs on that home. The lock comes from the server, so it holds on every device and browser tab.
+All four icons lock while a job runs on that home. The lock comes from the server, so it holds on every device and browser tab. A home in plain folders shows only the wrench (when it is not mounted) and the trash can.
 
 #### Save (Persist)
 
@@ -278,6 +299,12 @@ Sometimes the plugin needs a merge, but workspaces hold the home. This happens w
 - **Later** hides the notice for this wait. A later wait asks again.
 
 A banner on the terminal page reads "Storage reclaim needed" until the tidy-up is done. When the last workspace closes, it reads "Storage tidy-up starting". You can minimise the banner. If you close the workspaces yourself, the tidy-up starts by itself.
+
+For a home that can change to plain folders, the notice offers the conversion instead. Its title is "Convert this home to plain folders", and its button is **Convert to plain folders**. **Later** works the same way. The banner then reads "Home can change to plain folders". The notice stays when no workspace is open, because no automatic tidy-up runs for such a home. See "Convert a home to plain folders" above.
+
+### The field "Work folder for storage jobs"
+
+This field is in the **Configuration** tab. It names a folder on a pool or an array disk. Storage jobs use it for temporary copies when the boot disk has no room: a merge uses it for database copies, and a conversion to plain folders uses it for the copy of the home and the old layers. Leave it empty and the plugin chooses a folder by itself, in this order: the Docker appdata folder, the VM domains folder, a protected pool with the most free space, any other disk with room. The plugin never uses RAM, `/tmp` or the boot disk. A value that points there is not saved.
 
 ## What happens when the array stops or the server shuts down
 
@@ -404,3 +431,10 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 - [Workspaces](workspaces.md) — how workspaces close and reopen.
 - [Agent Store](agent-store.md) — the size and the install of agent files.
 - [Getting started](getting-started.md) — the first-run choice of where to keep data.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-14** — A layered home on a boot disk that is not a USB flash drive can change to plain folders: the button **Convert to plain folders**, its dialog and tray steps, the conversion offer in the tidy-up notice and banner, the install notification, the card state **Plain folders**, and the field **Work folder for storage jobs**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #496.
+
+</details>

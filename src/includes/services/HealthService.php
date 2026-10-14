@@ -881,7 +881,7 @@ class HealthService {
         $cmd = escapeshellcmd($script)
             . " -e 'AICliAgents' -s " . escapeshellarg($subject)
             . ' -d ' . escapeshellarg($description)
-            . " -i 'tasks' -l " . escapeshellarg($severity);
+            . ' -i ' . escapeshellarg($severity);
         exec($cmd . ' 2>/dev/null');
     }
 

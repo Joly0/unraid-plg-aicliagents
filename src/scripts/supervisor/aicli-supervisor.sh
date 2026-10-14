@@ -1101,12 +1101,62 @@ _op_reconcile() {
                 local _gr_safe_id="${id//[^a-zA-Z0-9_-]/_}"
                 local _gr_pt_dir="${persist_path%/}/passthrough/${type}s/${id}"
                 local _gr_retire_dir="${persist_path%/}/.graduated/${type}_${_gr_safe_id}"
-                local _gr_seg _gr_bn _gr_present=0
+                local _gr_seg _gr_bn _gr_present=0 _gr_missing=0
                 _gr_seg="$(_intent_delete_segment "$_intent_json")"
                 while IFS= read -r _gr_bn; do
                     [ -n "$_gr_bn" ] || continue
-                    [ -f "${persist_path%/}/${_gr_bn}" ] && _gr_present=1
+                    if [ -f "${persist_path%/}/${_gr_bn}" ]; then _gr_present=1; else _gr_missing=1; fi
                 done < <(printf '%s' "$_gr_seg" | grep -oE '"[^"]+"' | tr -d '"')
+                # #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R8): a home conversion
+                # intent carries "mode", its own retire folder (on a work disk in
+                # staged mode), the writable layer and the copy. It moves SEVERAL
+                # layers, so "some layer still present" is not proof that nothing
+                # moved. Finish forward only when the plain copy was verified (the
+                # marker is written after the verify); otherwise put everything back.
+                local _gr_mode _gr_field
+                _gr_mode="$(printf '%s' "$_intent_json" | grep -oE '"mode":"[a-z]+"' | cut -d'"' -f4)"
+                if [ -n "$_gr_mode" ]; then
+                    _gr_field() { printf '%s' "$_intent_json" | grep -oE "\"$1\":\"[^\"]*\"" | head -1 | cut -d'"' -f4; }
+                    local _gr_r _gr_u _gr_c _gr_ver
+                    _gr_r="$(_gr_field retire)"; [ -n "$_gr_r" ] && _gr_retire_dir="$_gr_r"
+                    _gr_u="$(_gr_field upper)"; _gr_c="$(_gr_field copy)"
+                    _gr_ver="${persist_path%/}/.graduate_verified_${type}_${_gr_safe_id}"
+                    if [ "$_gr_missing" -eq 0 ]; then
+                        log_info "Reconcile: conversion intent for $entity but every layer is in place — nothing moved; clearing the intent"
+                        rm -f "$_intent_file" "$_gr_ver" 2>/dev/null || true
+                        lifecycle_log "info" "supervisor" "graduate_intent_cleared_flash" "{\"entity\":\"$entity\",\"mode\":\"$_gr_mode\"}" 2>/dev/null || true
+                    elif [ -f "$_gr_ver" ] && [ -d "$_gr_pt_dir" ] && [ -n "$(find "$_gr_pt_dir" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+                        log_info "Reconcile: conversion intent for $entity with a verified plain copy — finishing forward"
+                        if declare -f manifest_set_backend >/dev/null 2>&1 \
+                            && manifest_set_backend "$type" "$id" "passthrough"; then
+                            rm -f "$_intent_file" "$_gr_ver" "${persist_path%/}/.graduate_staging_${type}_${_gr_safe_id}" 2>/dev/null || true
+                            [ "$_gr_mode" = "staged" ] && [ -n "$_gr_c" ] && [ "$_gr_c" != "$_gr_pt_dir" ] && rm -rf "$_gr_c" 2>/dev/null
+                            lifecycle_log "info" "supervisor" "graduate_intent_completed_forward" "{\"entity\":\"$entity\",\"mode\":\"$_gr_mode\"}" 2>/dev/null || true
+                        else
+                            log_warn "Reconcile: conversion forward manifest write failed for $entity — will retry next tick"
+                        fi
+                    elif [ ! -d "$_gr_retire_dir" ]; then
+                        # Staged mode: the work disk (a pool) is not mounted yet.
+                        log_warn "Reconcile: conversion intent for $entity waits for its work folder $_gr_retire_dir (array or pool not mounted) — retry next tick"
+                    else
+                        # #505: the shared rollback checks the room first and moves
+                        # nothing when the layers cannot fit; the intent then stays
+                        # open (the home stays closed) and the next tick tries again.
+                        log_warn "Reconcile: conversion intent for $entity without a verified plain copy — putting the layers back"
+                        rm -f "$_gr_ver" 2>/dev/null || true
+                        local _gr_rb=0
+                        ( source "${AICLI_STORAGE_COMMON_SH:-${STORAGE_DIR}/common.sh}" >/dev/null 2>&1 \
+                            && convert_rollback "$persist_path" "$_gr_pt_dir" "$_gr_retire_dir" "$_gr_u" ) || _gr_rb=$?
+                        if [ "$_gr_rb" -eq 0 ]; then
+                            rm -f "$_intent_file" "${persist_path%/}/.graduate_staging_${type}_${_gr_safe_id}" 2>/dev/null || true
+                            lifecycle_log "warn" "supervisor" "graduate_intent_rolled_back" "{\"entity\":\"$entity\",\"mode\":\"$_gr_mode\"}" 2>/dev/null || true
+                        else
+                            log_error "Reconcile: rollback of the conversion of $entity not done (rc=$_gr_rb: 3 = too little room on $persist_path) — the layers stay in $_gr_retire_dir, the home stays closed, retry next tick"
+                            lifecycle_log "error" "supervisor" "graduate_intent_rollback_waiting" "{\"entity\":\"$entity\",\"rc\":$_gr_rb}" 2>/dev/null || true
+                        fi
+                    fi
+                    continue
+                fi
                 if [ "$_gr_present" -eq 1 ]; then
                     log_info "Reconcile: graduate intent for $entity but layers still on disk — move never happened; clearing stale intent (flash authoritative)"
                     rm -f "$_intent_file" 2>/dev/null || true
@@ -1316,6 +1366,32 @@ _op_reconcile() {
         done < <(find "$pdir/.graduated" -mindepth 1 -maxdepth 1 -mtime "+$_gr_ret_days" 2>/dev/null)
         rmdir "$pdir/.graduated" 2>/dev/null || true
     done
+
+    # #496 R4: a staged conversion keeps the retired layers in a WORK folder on
+    # another disk, which the loop above never sees. op_graduate records each
+    # such folder in RETIRED_LIST; reap it after the same window. A folder whose
+    # disk is not mounted (array stopped) keeps its line for a later tick.
+    local _rl="${AICLI_RETIRED_LIST:-/boot/config/plugins/unraid-aicliagents/retired_dirs.list}" _rl_keep _rl_d
+    if [ -s "$_rl" ]; then
+        _rl_keep=""
+        while IFS= read -r _rl_d; do
+            [ -n "$_rl_d" ] || continue
+            case "$_rl_d" in */retired/*) : ;; *) continue ;; esac   # only what op_graduate wrote
+            if [ ! -d "$(dirname "$_rl_d")" ]; then
+                _rl_keep="${_rl_keep}${_rl_d}"$'\n'; continue
+            fi
+            [ -d "$_rl_d" ] || continue
+            if [ -n "$(find "$_rl_d" -maxdepth 0 -mtime "+$_gr_ret_days" 2>/dev/null)" ]; then
+                rm -rf "$_rl_d" 2>/dev/null || true
+                log_info "Reconcile: reaped retired layers in the work folder $_rl_d (older than ${_gr_ret_days}d)"
+                lifecycle_log "info" "supervisor" "graduated_retention_reaped" \
+                    "{\"path\":\"$_rl_d\",\"retention_days\":$_gr_ret_days}" 2>/dev/null || true
+            else
+                _rl_keep="${_rl_keep}${_rl_d}"$'\n'
+            fi
+        done < "$_rl"
+        printf '%s' "$_rl_keep" > "$_rl.tmp" 2>/dev/null && mv -f "$_rl.tmp" "$_rl" 2>/dev/null || true
+    fi
 
     # S-03 (#1352): reap EXPIRED defer-reason markers (older than the TTL —
     # cfg defer_marker_ttl_h, default 24 h). Readers already ignore stale markers;
@@ -2093,6 +2169,20 @@ _op_graduate() {
     lifecycle_log "info" "supervisor" "graduate_start" \
         "{\"entity\":\"$entity\",\"reason\":\"$reason\"}" 2>/dev/null || true
 
+    # #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md): "Convert to plain folders" is an
+    # explicit close/resume workflow, the same as a user tidy-up: close every
+    # session of the home first, relaunch them after a successful conversion.
+    local closes_home=0
+    if [ "$type" = "home" ] && [ "$reason" = "user_convert" ]; then
+        closes_home=1
+        log_info "Convert close phase: closing sessions for home/$id"
+        [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "closing" 2>/dev/null
+        _close_home_for_consolidate "$id"
+    fi
+    # The child sets its own phases (checking, copying, freeing, copying-back,
+    # switching) through this job id.
+    export AICLI_JOB_ID="${_CURRENT_JOB_ID:-}"
+
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake.
     (
@@ -2138,9 +2228,19 @@ _op_graduate() {
         log_info "Graduate completed: $entity"
         lifecycle_log "info" "supervisor" "graduate_ok" \
             "{\"entity\":\"$entity\"}" 2>/dev/null || true
-        _supervisor_notify "normal" "AICliAgents: Storage graduated" \
-            "$entity has moved off the layering engine onto the passthrough backend. Old layers are retained in .graduated/ for ${GRADUATED_RETENTION_DAYS} days." \
-            "graduate_ok_${entity}" 3600
+        if [ "$type" = "home" ]; then
+            _supervisor_notify "normal" "AICliAgents: Home is now plain folders" \
+                "The home of $id is now plain folders. It no longer needs tidy-ups. The old layers are kept for ${GRADUATED_RETENTION_DAYS} days." \
+                "graduate_ok_${entity}" 3600
+        else
+            _supervisor_notify "normal" "AICliAgents: Storage graduated" \
+                "$entity has moved off the layering engine onto the passthrough backend. Old layers are retained in .graduated/ for ${GRADUATED_RETENTION_DAYS} days." \
+                "graduate_ok_${entity}" 3600
+        fi
+        if [ "$closes_home" -eq 1 ]; then
+            [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "relaunching" 2>/dev/null
+            _relaunch_home_sessions "$id" "$_CURRENT_JOB_ID"
+        fi
     elif [ "$exit_code" -eq 2 ]; then
         log_info "Graduate deferred: $entity (reason=${_OP_DEFER_REASON:-unknown})"
         lifecycle_log "info" "supervisor" "graduate_deferred" \
@@ -2149,12 +2249,31 @@ _op_graduate() {
         log_warn "Graduate precondition failed: $entity (reason=${_OP_DEFER_REASON:-unknown})"
         lifecycle_log "warn" "supervisor" "graduate_precondition_failed" \
             "{\"entity\":\"$entity\",\"defer_reason\":\"${_OP_DEFER_REASON:-}\"}" 2>/dev/null || true
-    else
+        if [ "$closes_home" -eq 1 ]; then
+            _supervisor_notify "warning" "AICliAgents: Home not converted" \
+                "The home of $id was not converted to plain folders (${_OP_DEFER_REASON:-precondition}). Nothing was changed. The debug log has the details." \
+                "graduate_refused_${entity}" 3600
+        fi
+    fi
+    # Refused: the home was not changed and will not be. Open its sessions again.
+    # #501: NOT on a deferral (exit 2): the job retries, and a reopened workspace
+    # would hold the home again. Relaunching there also lifted the start guard, so
+    # every retry closed the workspace, deferred and reopened it (prod02,
+    # 2026-10-14). The guard keeps the workspaces closed while the job is deferred;
+    # if the retry budget runs out the job fails and the guard goes stale.
+    if [ "$closes_home" -eq 1 ] && [ "$exit_code" -eq 4 ]; then
+        [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "relaunching" 2>/dev/null
+        _relaunch_home_sessions "$id" "$_CURRENT_JOB_ID"
+    fi
+    if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 2 ] && [ "$exit_code" -ne 4 ]; then
         log_error "Graduate failed: $entity (exit=$exit_code)"
         lifecycle_log "error" "supervisor" "graduate_failed" \
             "{\"entity\":\"$entity\",\"exit_code\":$exit_code}" 2>/dev/null || true
+        # A failed conversion put the layers back or never touched them: let the
+        # user start sessions again, the same as a failed user tidy-up.
+        [ "$closes_home" -eq 1 ] && _clear_home_consolidating "$id" "$_CURRENT_JOB_ID"
         _supervisor_notify "warning" "AICliAgents: Storage graduation failed" \
-            "Graduating $entity to the passthrough backend failed (exit $exit_code). The layered data is untouched. Check the lifecycle log." \
+            "Converting $entity to plain folders failed (exit $exit_code). The layers are in place, as before. The debug log has the details." \
             "graduate_failed_${entity}" 3600
     fi
 }
@@ -2422,7 +2541,24 @@ _job_finalize() {
             local g_elapsed=$(( now - queued_at ))
             local g_cap="$GRADUATE_WAIT_CAP_S"
             case "$g_cap" in ''|*[!0-9]*) g_cap=86400 ;; esac
-            if [ "$g_elapsed" -ge "$g_cap" ]; then
+            # #501: a conversion a person started keeps that person's workspaces
+            # closed while it waits, so it waits minutes, not a day
+            # (cfg user_convert_wait_cap_s, default 600). Then it fails and the
+            # workspaces open again; nothing was changed.
+            if [ "$reason" = "user_convert" ]; then
+                g_cap="${user_convert_wait_cap_s:-600}"
+                case "$g_cap" in ''|*[!0-9]*) g_cap=600 ;; esac
+            fi
+            if [ "$g_elapsed" -ge "$g_cap" ] && [ "$reason" = "user_convert" ]; then
+                state="failed"
+                log_warn "Convert job $job_id for $entity still deferred after ${g_elapsed}s (${defer}) — giving up, opening the workspaces again"
+                _supervisor_notify "warning" "AICliAgents: Home not converted" \
+                    "The home of $id could not be converted to plain folders: it stayed busy for $(( g_elapsed / 60 )) minutes (${defer}). Nothing was changed, and its workspaces open again. Try again later." \
+                    "graduate_wait_timeout_${entity}" 3600
+                lifecycle_log "warn" "supervisor" "graduate_job_wait_exhausted" \
+                    "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"elapsed_s\":$g_elapsed,\"cap_s\":$g_cap,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
+                [ "$type" = "home" ] && _relaunch_home_sessions "$id" "$job_id"
+            elif [ "$g_elapsed" -ge "$g_cap" ]; then
                 state="failed"
                 log_warn "Graduate job $job_id for $entity exhausted its 24 h wait budget (${g_elapsed}s >= ${g_cap}s) — failing"
                 _supervisor_notify "warning" "AICliAgents: Storage graduation timed out" \
@@ -3148,6 +3284,14 @@ _check_consolidate_policy() {
         case "$json" in
             *'"recommended":true'*) : ;;
             *) continue ;;
+        esac
+        # #496: a layered home on a non-USB disk gets "Convert to plain folders",
+        # not a merge. A merge there builds a second copy of the home on the same
+        # disk and is the job that cannot fit (prod02, 2026-10-14).
+        case "$json" in
+            *'"convert_offer":true'*)
+                log_info "Consolidate policy: home/$id can convert to plain folders — no merge queued"
+                continue ;;
         esac
 
         # Policy maintenance waits for natural idle. Explicit user consolidation
@@ -4029,7 +4173,9 @@ _work_tick() {
                         _op_mount "$req_type" "$req_id" "$req_reason"
                         ;;
                     graduate)
+                        _CURRENT_JOB_ID="$req_job"
                         _op_graduate "$req_type" "$req_id" "$req_reason"
+                        _CURRENT_JOB_ID=""
                         ;;
                     backup)
                         _op_backup_home "$req_type" "$req_id" "$req_reason" "$req_job"

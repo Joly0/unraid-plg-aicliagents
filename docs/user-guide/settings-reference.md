@@ -62,6 +62,7 @@ The Configuration tab shows seven cards: **Global Configuration**, **Session & E
 | **Home Storage** | Shows the folder where the persistent home data lives. You change it with **Change…**. | /boot/config/plugins/unraid-aicliagents/persistence (the flash drive) | A folder the picker lists as available, or a custom path | Move it to a cache pool for speed and space. See [Home and agent storage](storage.md). | **Change…** opens a picker. **Move storage here** starts the storage move. A confirm dialog "Migrate Storage?" follows. See "Warning dialogs" below. | No |
 | **Agent Storage** | Shows the folder where each agent's installed files live. You change it with **Change…**. | /boot/config/plugins/unraid-aicliagents/persistence (the flash drive) | A folder the picker lists as available, or a custom path | Move it to a cache pool or an Unassigned Device when the flash drive is small. | The same as **Home Storage**. | No |
 | **Consolidate Layer Ceiling** | Sets how many saved layers a home can build up before the plugin merges them into one. Merging starts two layers before the ceiling, or sooner when disk space is low. Agents always use one layer. | 30 layers | A whole number from 4 to 40 | Raise it for fewer merges. Lower it for a faster first load of a home. | Saves. | No |
+| **Work folder for storage jobs** | Names a folder on a pool or an array disk. Storage jobs use it for temporary copies when the boot disk has no room: a merge uses it for database copies, and a conversion to plain folders uses it for the copy of the home and the old layers. | Empty: the plugin chooses a folder (Docker appdata, then VM domains, then a protected pool) | Empty, or a full folder path that is not on the boot disk, in RAM or in `/tmp` | Set it when you want these copies on one disk of your choice. | Saves. A value that points to the boot disk, RAM or `/tmp` is not saved. | No |
 | **Device label (this browser only)** | Names this browser in the event record, for example "phone" or "office laptop". | Empty | Text, up to 40 characters | Set it when you use the plugin from several devices and want the activity record to say which one acted. | Saves in this browser only. The name does not go into the plugin settings. | No |
 | **Record a screen sample when I deliver a waiting message** | When you deliver a waiting Relay message by hand, the plugin keeps a cleaned sample of the agent's screen on this server. The sample helps the plugin recognise the screen of that agent. Nothing leaves the server. | Off (default) | On; Off (default) | Turn it on for a short time when a Relay message waits for an agent whose screen the plugin does not recognise. | Saves. | Yes |
 | **Wording of Relay notices typed into agents** | Sets the text of the one-line notice the plugin types into an agent when a Relay message waits. An agent that has the Relay skill already knows the rules, so a short notice saves tokens. An agent without the skill always gets the Full text. | Short (default): about 20 words | Short (default): about 20 words; Minimal: about 10 words; Full: the long original text; Custom: my own words | Choose Minimal to save the most tokens. Choose Custom to use your own wording. | Saves after the page checks the text. A preview below the control shows the notice for an actor and for a direct message. A custom text that does not pass the check is not saved. | No |
@@ -245,9 +246,10 @@ Below it, **User Home Persistence** shows one card for each home. A banner at th
 | :-- | :-- | :-- |
 | Save icon (**Persist to storage**) | Saves the unsaved changes of the home into a layer. | Confirm dialog "Persist Home Changes?" with the button **Persist Now**. |
 | Merge icon (**Consolidate**) | Saves unsaved changes and merges all layers into one. It is greyed out when there is one layer and no unsaved change. | Asks you to confirm. Workspaces of the home pause and resume when it ends. |
+| **Convert to plain folders** | Appears when the home has layers and its folder is not on a USB flash drive. It changes the home to plain folders in the same place. Then the home needs no more saves or tidy-ups. A home in plain folders has no save or merge icon. | Confirm dialog "Convert to plain folders?". Every workspace of the home closes and opens again. |
 | Wrench icon (**Repair mount**) | Appears when a home is not mounted. It unmounts and mounts the layers again. | Confirm dialog "Repair home storage?". It may briefly interrupt active sessions. |
 | Trash icon (**Delete home data (permanent)**) | Deletes the stored layers, settings and session data of the home. | Confirm dialog. For the primary user's home you must type DELETE. The deletion is permanent. |
-| **Set up backup…** / **Backup…** | Opens the backup dialog of this home. | Opens the dialog. |
+| **Set up config backup…** / **Config backup…** | Opens the config backup dialog of this home. The backup copies the home folder (agent settings, sign-ins and history). It does not copy the server. | Opens the dialog. |
 
 > [!WARNING]
 > **Delete home data** removes the layers, the settings and the session data of that home for good. A backup that you made to your own folder is not touched.
@@ -398,3 +400,10 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 - [Agent Relay](relay.md): topics, owners, remotes and linked boxes.
 - [Plugin management tools for agents](agent-tools.md): what an agent may read, change or propose.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Health dot, the Activity tray and the Debug Console.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-14** — New setting **Work folder for storage jobs** (the stored key `consolidate_stage_path`) and the home card button **Convert to plain folders**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #496.
+
+</details>

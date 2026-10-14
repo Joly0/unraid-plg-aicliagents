@@ -783,7 +783,28 @@ class StorageMountService {
     public static function isHomeMountHealthy(string $user): bool {
         $mnt = rtrim(UtilityService::getWorkDir($user) . "/home", '/');
         $mounts = file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '';
-        return (bool)preg_match("#^overlay\s+" . preg_quote($mnt, '#') . "\s+overlay\b#m", $mounts);
+        if (preg_match("#^overlay\s+" . preg_quote($mnt, '#') . "\s+overlay\b#m", $mounts)) {
+            return true;
+        }
+        // #506: a home in plain folders (passthrough, #496) is a bind mount of
+        // <persist>/passthrough/homes/<user>, not an overlay. Only overlays counted, so
+        // the page re-ran the home mount twice a second and never loaded (prod02,
+        // 2026-10-14, the first home ever converted).
+        $persist = rtrim(StoragePathResolver::homePersistPath($user), '/');
+        return $persist !== '' && self::isPlainHomeBound($mnt, $persist . '/passthrough/homes/' . $user);
+    }
+
+    /**
+     * #506: true when $mnt shows the plain-folder home $ptDir — a bind mount, so both
+     * paths report the same device and inode. Pure apart from stat (testable).
+     */
+    public static function isPlainHomeBound(string $mnt, string $ptDir): bool {
+        if (!is_dir($ptDir) || !is_dir($mnt)) return false;
+        clearstatcache(true, $mnt);
+        clearstatcache(true, $ptDir);
+        $a = @stat($mnt);
+        $b = @stat($ptDir);
+        return is_array($a) && is_array($b) && $a['dev'] === $b['dev'] && $a['ino'] === $b['ino'];
     }
 
     /** Stable per-home marker path; public for diagnostics and unit coverage. */

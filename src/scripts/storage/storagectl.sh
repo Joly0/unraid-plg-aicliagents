@@ -334,6 +334,18 @@ emit_json() {
         local _sbs="false"
         [ "$TYPE" = "agent" ] && _sbs="true"
         printf '"backend":"%s","supportsBake":%s,"supportsConsolidate":%s,"supportsSideBySide":%s,' "$(_json_str "$_bk")" "$_sb" "$_sc" "$_sbs"
+        # #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R9): a layered home on a
+        # non-USB disk is offered "Convert to plain folders" instead of merges.
+        # The device probe runs only for a layered home (rare once converted).
+        if [ "$TYPE" = "home" ] && [ "$_bk" = "flash" ] && declare -f convert_offer_from_facts >/dev/null 2>&1; then
+            local _cv="false" _cdev _cwear
+            _cdev="${AICLI_ITEST_BACKEND:-$(backend_for "$PERSIST" 2>/dev/null)}"
+            if [ "$_cdev" = "passthrough" ]; then
+                _cwear="$(probe_target "$PERSIST" 2>/dev/null | grep -oE '"wear":"[a-z_]+"' | cut -d'"' -f4)"
+                convert_offer_from_facts "$_cdev" "$_cwear" "$_bk" "$(_entity_has_layers "$PERSIST" "$TYPE" "$ID")" "$TYPE" >/dev/null && _cv="true"
+            fi
+            printf '"convert_offer":%s,' "$_cv"
+        fi
     fi
     # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3: an optional verb-specific object
     # (today: `stage`, carrying the staging mount path the installer writes to).

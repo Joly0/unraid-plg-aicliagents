@@ -191,6 +191,13 @@ class UtilityHandler {
                 $_POST['notebook_folder'] = $stored !== '' ? $stored : 'notebook';
             }
         }
+        // #496: "Work folder for storage jobs" is empty (automatic) or an absolute folder
+        // that is not the boot disk, RAM or /tmp. A bad value keeps the stored one.
+        if (array_key_exists('consolidate_stage_path', $_POST)) {
+            $stage = is_array($_POST['consolidate_stage_path']) ? '' : (string)$_POST['consolidate_stage_path'];
+            $_POST['consolidate_stage_path'] = self::normaliseStagePath(
+                $stage, (string)(\AICliAgents\Services\ConfigService::getConfig()['consolidate_stage_path'] ?? ''));
+        }
         saveAICliConfig($_POST);
         // HOME_BACKUP.md: the Manager UI no longer posts backup_* fields here
         // (#287: each home saves its own settings through
@@ -202,6 +209,26 @@ class UtilityHandler {
             \AICliAgents\Services\BackupCronService::sync(getAICliConfig());
         }
         return ['status' => 'ok'];
+    }
+
+    /**
+     * #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R6): the value stored for
+     * "Work folder for storage jobs". '' = automatic. Otherwise an absolute path
+     * of plain characters, with no `..`, that is not under /boot, /tmp, /dev/shm,
+     * /run or /var/run. A bad value returns $stored. Pure. The bash side checks
+     * again that the folder exists, is writable and is not RAM.
+     */
+    public static function normaliseStagePath(string $value, string $stored): string {
+        $v = trim($value);
+        if ($v === '') return '';
+        $v = rtrim($v, '/');
+        if ($v === ''
+            || preg_match('#^/[A-Za-z0-9._ /+-]+$#', $v) !== 1
+            || strpos($v, '..') !== false
+            || preg_match('#^/(boot|tmp|dev/shm|run|var/run)(/|$)#', $v) === 1) {
+            return $stored;
+        }
+        return $v;
     }
 
     /**

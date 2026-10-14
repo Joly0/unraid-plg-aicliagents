@@ -542,6 +542,37 @@ graduate_offer_from_facts() {
     printf 'ok'; return 0
 }
 
+# convert_offer_from_facts <device_backend> <probe_wear> <effective_backend>
+#                          <has_layers> <type>
+# docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md (#496, R1/R9): offer "Convert
+# to plain folders" for a LAYERED home whose persist device is NOT a USB stick.
+# Squashfs layers exist for a USB boot stick only; on an internal-boot pool or
+# any durable disk the plugin already picks plain folders for new data, and a
+# home stays layered only because its old layers pin it. Prints the reason and
+# returns 0 only when every fact holds:
+#   type == home, device_backend == passthrough, wear != wear_sensitive,
+#   effective_backend == flash (layered), has_layers == 1.
+# Pure (no subprocess). The PHP mirror is FileStorage::canConvert.
+convert_offer_from_facts() {
+    local device="${1:-}" wear="${2:-}" effective="${3:-}" has_layers="${4:-0}" type="${5:-}"
+    if [ "$type" != "home" ]; then
+        printf 'not_home'; return 1
+    fi
+    if [ "$device" != "passthrough" ]; then
+        printf 'device_not_passthrough'; return 1
+    fi
+    if [ "$wear" = "wear_sensitive" ] || [ -z "$wear" ]; then
+        printf 'wear_sensitive_or_unknown'; return 1
+    fi
+    if [ "$effective" != "flash" ]; then
+        printf 'not_layered'; return 1
+    fi
+    if [ "$has_layers" != "1" ]; then
+        printf 'no_layers'; return 1
+    fi
+    printf 'ok'; return 0
+}
+
 # mount_class_for <path> -> boot_usb | boot_internal | array | pool:<name> |
 #   ud_disk | ud_addons | remote | user_share | tmpfs | other
 # realpath-resolves FIRST (exclusive-share symlinks: /mnt/user/<share> →

@@ -585,7 +585,7 @@ class AdminService {
             'consolidate_layer_threshold_array' => ['group' => 'consolidate', 'description' => 'Layer count that starts an automatic consolidate on array storage.'],
             'consolidate_max_layers'            => ['group' => 'consolidate', 'description' => 'How many saved layers of a home directory can build up before the plugin must merge them into one.'],
 
-            'consolidate_stage_path'            => ['group' => 'consolidate', 'description' => 'A folder on a pool or array disk used to hold temporary database copies during a merge when the USB flash has no room. Never RAM, never the flash.'],
+            'consolidate_stage_path'            => ['group' => 'consolidate', 'description' => 'Work folder for storage jobs: a folder on a pool or array disk for temporary copies during a merge or a conversion to plain folders when the boot disk has no room. Empty means the plugin chooses one. Never RAM, never the boot disk.'],
 
             // ---- boot integrity ----
             'boot_integrity_strict' => ['group' => 'boot_integrity', 'description' => 'Blocks boot when a storage integrity check fails, instead of only warning.'],

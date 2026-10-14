@@ -150,7 +150,10 @@ class ConsolidateState {
             $job = @json_decode((string)@file_get_contents($f), true);
             if (!is_array($job)) continue;
             $op = (string)($job['op'] ?? '');
-            if ($op !== 'consolidate') continue;
+            // #500: a conversion to plain folders (op graduate) closes the home the same
+            // way and runs far longer than 10 minutes. Counting only consolidate let a
+            // workspace start in the middle of the copy (prod02, 2026-10-14).
+            if ($op !== 'consolidate' && $op !== 'graduate') continue;
             if ((string)($job['entity'] ?? '') !== $entity) continue;
             $state = (string)($job['state'] ?? '');
             if (in_array($state, ['queued', 'running', 'deferred'], true)) {

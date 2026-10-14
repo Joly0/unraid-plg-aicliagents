@@ -418,6 +418,61 @@ final class FileStorage
             && $hasQualifyingTarget;
     }
 
+    /**
+     * Forgejo #496 (docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R9): the PURE
+     * "Convert to plain folders" offer rule — the PHP mirror of bash
+     * convert_offer_from_facts (detect_backend.sh). A layered home whose persist
+     * folder is NOT on a USB stick can become plain folders in place. Offer IFF:
+     *   - $type == 'home'                    (agents keep their layers, R11)
+     *   - $deviceBackend == 'passthrough'    (the device verdict already picks
+     *                                         plain folders for anything new)
+     *   - $probeWear != 'wear_sensitive'     (never a USB stick: those keep
+     *                                         layers and get the #1380 relocation)
+     *   - $effectiveBackend == 'flash'       (the home is layered today)
+     *   - $hasLayers                          (the layers pin it to flash)
+     * Conservative: an empty or odd fact refuses. The probe's failure fallback is
+     * wear_sensitive, so a failed probe never offers. Leaves canGraduate alone.
+     */
+    public static function canConvert(string $deviceBackend, string $probeWear, string $effectiveBackend, bool $hasLayers, string $type): bool
+    {
+        return $type === 'home'
+            && $deviceBackend === 'passthrough'
+            && $probeWear !== '' && $probeWear !== 'wear_sensitive'
+            && $effectiveBackend === 'flash'
+            && $hasLayers;
+    }
+
+    /**
+     * #496: the facts canConvert needs for ONE home, read without mounting or
+     * changing anything: the raw device verdict and the probe wear axis of the
+     * home persist folder, and whether `home_<user>_*.sqsh` layers exist there
+     * (the same glob StorageMetricsService counts). Memoised per request by the
+     * two probes it calls.
+     * @return array{device:string,wear:string,effective:string,has_layers:bool,persist:string}
+     */
+    public static function convertFactsForHome(string $user): array
+    {
+        $persist = self::persistPathFor('home', $user);
+        $device  = (string)(self::backendForPath($persist)['backend'] ?? '');
+        $wear    = (string)(self::probeTarget($persist)['wear'] ?? '');
+        $hasLayers = $persist !== '' && preg_match('/^[A-Za-z0-9._-]+$/', $user) === 1
+            && count(glob(rtrim($persist, '/') . '/home_' . $user . '_*.sqsh') ?: []) > 0;
+        $effective = self::effectiveBackendCaps($device, $hasLayers)['backend'];
+        return ['device' => $device, 'wear' => $wear, 'effective' => $effective,
+                'has_layers' => $hasLayers, 'persist' => $persist];
+    }
+
+    /** #496: can this one home be converted to plain folders now? Never throws. */
+    public static function canConvertHome(string $user): bool
+    {
+        try {
+            $f = self::convertFactsForHome($user);
+            return self::canConvert($f['device'], $f['wear'], $f['effective'], $f['has_layers'], 'home');
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
     /** Resolve the persist path for an entity (lazy-loads the resolver). */
     private static function persistPathFor(string $type, string $id): string
     {

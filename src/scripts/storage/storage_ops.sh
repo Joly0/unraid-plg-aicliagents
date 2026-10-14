@@ -370,6 +370,20 @@ fi
 # Validate persistence path
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; exit 1; }
 
+# #505 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R18): never build a home's layered
+# view while a conversion owns the home. Some of its layers can be on the work
+# disk at that moment, so the view would be incomplete, and a workspace that
+# starts on it writes into a writable layer the conversion is moving. Every mount
+# (page load, workspace start, supervisor) comes through here. Deferred, not
+# failed: the caller retries, and the mount works once the conversion ends.
+if [ "$TYPE" = "home" ] && [ "${AICLI_CONVERT_SELF:-0}" != "1" ]; then
+    if _CONV_WHY="$(convert_mount_blocked "$PERSIST_PATH" "$TYPE" "$ID")"; then
+        error "Home $ID is being converted to plain folders ($_CONV_WHY) — mount refused until it ends."
+        _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_convert_running" "convert_running" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
+    fi
+fi
+
 # S-02 (#1352): late-mount defer. A persist path under /mnt/ whose backing mount
 # is ABSENT (findmnt resolves the path to the rootfs "/" — the dir exists but the
 # pool / Unassigned Device behind it is not mounted yet; UD mounts can land up to
@@ -2470,6 +2484,14 @@ update_task_status() {
 # manual run, a test) nothing is set. Never fails the merge.
 _consol_phase() {
     [ -n "${AICLI_JOB_ID:-}" ] || return 0
+    # #494: job_ledger_set_phase lives in supervisor/queue_helpers.sh, which no
+    # storage script loaded, so this was a no-op since #454 and the tray said
+    # "Closing sessions" for the whole merge. Load it once, as backup_home.sh does.
+    if ! declare -f job_ledger_set_phase >/dev/null 2>&1; then
+        local _qh="${_SO_DIR:-$(dirname "${BASH_SOURCE[0]}")}/../supervisor/queue_helpers.sh"
+        # shellcheck disable=SC1090
+        [ -f "$_qh" ] && source "$_qh" 2>/dev/null || true
+    fi
     declare -f job_ledger_set_phase >/dev/null 2>&1 || return 0
     job_ledger_set_phase "$AICLI_JOB_ID" "$1" 2>/dev/null || true
 }
@@ -2965,10 +2987,13 @@ log "Consolidated volume written: $FINAL_NAME"
 _consol_phase "finalizing"
 update_task_status "Finalizing volume..." 80 ""
 
-# Sanity: check FAT32 size limit on the final file
+# Sanity: check FAT32 size limit on the final file. #495: only on a vfat persist
+# folder (the same rule as the _fat32_cap_check preflight). On a ZFS or btrfs
+# boot disk a merged layer over 3.9 GB is valid and was thrown away.
 SQSH_SIZE=$(stat -c%s "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
 MAX_SIZE=$((3900 * 1024 * 1024)) # 3.9GB
-if [ "$SQSH_SIZE" -gt "$MAX_SIZE" ]; then
+_CONSOL_PERSIST_FST="${AICLI_ITEST_PERSIST_FSTYPE:-$(findmnt --noheadings --output FSTYPE --target "$PERSIST_PATH" 2>/dev/null || echo '')}"
+if [ "$_CONSOL_PERSIST_FST" = "vfat" ] && [ "$SQSH_SIZE" -gt "$MAX_SIZE" ]; then
     error "Consolidated volume exceeds 3.9GB FAT32 limit ($SQSH_SIZE bytes). Removing and keeping old layers."
     update_task_status "Failed" 0 "Exceeds FAT32 limit"
     rm -f "$PERSIST_PATH/$FINAL_NAME"
@@ -3453,6 +3478,347 @@ fi
 
 lifecycle_log "info" "graduate" "graduate_start" \
     "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
+
+# ---- HOME: convert to plain folders from the merged view (#496) -------------
+# docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md. A home is NOT saved and
+# merged first (the old steps 2-3 below, kept for agents): on a full boot disk
+# that merge is the step that cannot fit. The merged view (every layer plus the
+# writable layer) is copied as it is, with the home's sessions closed by the
+# supervisor (reason user_convert). Two modes:
+#   direct — the persist disk has room for the copy beside the layers: copy into
+#            the plain folder, verify, retire the layers to .graduated/, flip.
+#   staged — no room: copy to a work folder on another disk, verify, write the
+#            intent, move the layers and the writable layer to the work folder
+#            (this frees the boot disk), copy back, verify, flip. A failure after
+#            the move puts everything back (R5); the supervisor finishes or rolls
+#            back an interrupted run from the intent (R8).
+if [ "$TYPE" = "home" ]; then
+    _gr_phase() {
+        [ -n "${AICLI_JOB_ID:-}" ] || return 0
+        if ! declare -f job_ledger_set_phase >/dev/null 2>&1; then
+            # shellcheck disable=SC1091
+            source "$_SO_DIR/../supervisor/queue_helpers.sh" 2>/dev/null || true
+        fi
+        declare -f job_ledger_set_phase >/dev/null 2>&1 || return 0
+        job_ledger_set_phase "$AICLI_JOB_ID" "$1" 2>/dev/null || true
+    }
+    _gr_bytes() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
+    # The plain reason the tray shows when the job fails (SupervisorService reads it).
+    _GR_REASON_FILE="/tmp/unraid-aicliagents/.convert_reason_${TYPE}_${_GR_LOCK_ID}"
+    rm -f "$_GR_REASON_FILE" 2>/dev/null || true
+    _gr_reason() { printf '%s\n' "$1" > "$_GR_REASON_FILE" 2>/dev/null || true; }
+    _gr_phase "checking"
+
+    # #505: while this conversion runs, no other mount may build the old layered
+    # view of this home (an on-demand mount from a page load did, mid-run, on
+    # prod02 2026-10-14). op_mount refuses while this lock's process is alive or
+    # a conversion intent is open; this run's own mount passes AICLI_CONVERT_SELF.
+    _GR_CONVERT_LOCK="$(convert_lock_path "$TYPE" "$_GR_LOCK_ID")"
+    if _gr_why="$(convert_mount_blocked "$PERSIST_PATH" "$TYPE" "$ID")"; then
+        _gr_reason "Another conversion of this home is still open. Nothing was changed."
+        error "Conversion refused: $_gr_why."
+        exit 1
+    fi
+    printf '%s\n' "$BASHPID" > "$_GR_CONVERT_LOCK" 2>/dev/null || true
+
+    # The view must be mounted and idle. The conversion copies the live view as it
+    # is, so a mounted home is NOT refreshed: the refresh-only op_mount reported
+    # "busy" one second after the supervisor closed the workspace and deferred the
+    # whole run (#501, prod02 2026-10-14). Mount only when the home is not mounted.
+    _GR_VIEW="$(readlink -f -- "$MNT_POINT" 2>/dev/null || printf '%s' "$MNT_POINT")"
+    if ! mountpoint -q "$_GR_VIEW" 2>/dev/null; then
+        if AICLI_CONVERT_SELF=1 op_mount "$TYPE" "$ID" "$PERSIST_PATH"; then :; else
+            _gr_rc=$?
+            [ "$_gr_rc" -eq 2 ] && _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "mount_busy" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
+            error "Could not mount the home view for the conversion (rc=$_gr_rc)."
+            exit 1
+        fi
+        _GR_VIEW="$(readlink -f -- "$MNT_POINT" 2>/dev/null || printf '%s' "$MNT_POINT")"
+    fi
+    # The workspaces were just closed: give their processes time to let go of the
+    # home before deciding it is busy (AICLI_CONVERT_IDLE_WAIT_S, default 60).
+    _gr_wait="${AICLI_CONVERT_IDLE_WAIT_S:-60}"
+    case "$_gr_wait" in ''|*[!0-9]*) _gr_wait=60 ;; esac
+    _gr_waited=0
+    while home_mount_in_use "$MNT_POINT" && [ "$_gr_waited" -lt "$_gr_wait" ]; do
+        sleep 2; _gr_waited=$((_gr_waited + 2))
+    done
+    if home_mount_in_use "$MNT_POINT"; then
+        log "Home is still busy after ${_gr_waited}s (a process holds it) — deferring the conversion."
+        _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "mount_busy" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$MNT_POINT\"}"
+    fi
+    [ "$_gr_waited" -gt 0 ] && log "Home went idle after ${_gr_waited}s."
+    mountpoint -q "$_GR_VIEW" 2>/dev/null || { error "Home view $_GR_VIEW is not mounted — refusing."; exit 1; }
+
+    mapfile -t _GR_LAYERS < <(_layer_discover_sorted "$PERSIST_PATH" "$TYPE" "$ID")
+    [ "${#_GR_LAYERS[@]}" -gt 0 ] || _gr_precondition_refuse "no_layers_to_convert"
+    _GR_LAYER_NAMES=""
+    _GR_LAYERS_BYTES=0
+    for _gr_l in "${_GR_LAYERS[@]}"; do
+        _GR_LAYER_NAMES="${_GR_LAYER_NAMES:+$_GR_LAYER_NAMES,}\"$(basename "$_gr_l")\""
+        _GR_LAYERS_BYTES=$(( _GR_LAYERS_BYTES + $(_gr_bytes "$(stat -c %s "$_gr_l" 2>/dev/null)") ))
+    done
+    _GR_PERSIST_DEV="$(stat -c %d "$PERSIST_PATH" 2>/dev/null)"
+    _GR_UPPER_BYTES=0
+    _GR_UPPER_SAME_FS=0
+    if [ -d "$UPPER_DIR" ]; then
+        if [ "$(stat -c %d "$UPPER_DIR" 2>/dev/null)" = "$_GR_PERSIST_DEV" ]; then
+            _GR_UPPER_SAME_FS=1
+            _GR_UPPER_BYTES="$(_gr_bytes "$(du -sB1 "$UPPER_DIR" 2>/dev/null | awk '{print $1}')")"
+        fi
+    fi
+
+    _GR_PT_DIR="$PERSIST_PATH/passthrough/${TYPE}s/$ID"
+    _GR_STAGING_MARKER="$PERSIST_PATH/.graduate_staging_${TYPE}_${_GR_LOCK_ID}"
+    _GR_VERIFIED_MARKER="$PERSIST_PATH/.graduate_verified_${TYPE}_${_GR_LOCK_ID}"
+    if [ -d "$_GR_PT_DIR" ] && [ -n "$(find "$_GR_PT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] \
+        && [ ! -f "$_GR_STAGING_MARKER" ] && [ ! -f "$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")" ]; then
+        _gr_precondition_refuse "pt_dir_occupied"
+    fi
+
+    _GR_SQLITE_DBS="$(detect_sqlite_dbs "$_GR_VIEW" 2>/dev/null)"
+    _GR_META="/tmp/unraid-aicliagents/.convert_${TYPE}_${_GR_LOCK_ID}_$$"
+    mkdir -p "$_GR_META"
+    _GR_EXCLUDES="$_GR_META/excludes"
+    # shellcheck disable=SC2086
+    convert_write_excludes "$_GR_EXCLUDES" "$_GR_VIEW" $_GR_SQLITE_DBS || { error "Cannot write the exclude list."; exit 1; }
+
+    log "Measuring the home ($_GR_VIEW)..."
+    # The whole view, caches included: a slight overestimate is the safe side.
+    _GR_SRC_BYTES="$(_gr_bytes "$(du -sb "$_GR_VIEW" 2>/dev/null | awk '{print $1}')")"
+    _GR_PERSIST_FREE="$(_gr_bytes "$(df -P -B1 "$PERSIST_PATH" 2>/dev/null | awk 'NR==2 {print $4}')")"
+    _GR_MODE="$(convert_plan_mode "$_GR_PERSIST_FREE" "$_GR_SRC_BYTES")"
+    log "Home: $_GR_SRC_BYTES bytes to copy; boot disk free $_GR_PERSIST_FREE; layers $_GR_LAYERS_BYTES; writable layer $_GR_UPPER_BYTES (same disk: $_GR_UPPER_SAME_FS) — mode $_GR_MODE."
+
+    _GR_WORK=""
+    _GR_COPY="$_GR_PT_DIR"
+    _GR_RETIRE="$PERSIST_PATH/.graduated/${TYPE}_${_GR_LOCK_ID}"
+    if [ "$_GR_MODE" = "staged" ]; then
+        _GR_WORK_NEED=$(( _GR_SRC_BYTES + _GR_LAYERS_BYTES + _GR_UPPER_BYTES + 1073741824 ))
+        if ! _GR_WORK="$(work_folder_choose "$_GR_WORK_NEED" "$PERSIST_PATH")"; then
+            error "The boot disk has no room for a copy of the home (needs $_GR_SRC_BYTES bytes, $_GR_PERSIST_FREE free), and no work folder on another disk has $_GR_WORK_NEED bytes free. Start the array, or set the work folder for storage jobs."
+            _gr_precondition_refuse "no_work_folder"
+        fi
+        _GR_COPY="$_GR_WORK/copy/${TYPE}_${_GR_LOCK_ID}"
+        _GR_RETIRE="$_GR_WORK/retired/${TYPE}_${_GR_LOCK_ID}"
+        log "Staged mode: work folder $_GR_WORK."
+    fi
+
+    # R14: the tray reads the copy progress and the measured total from these.
+    _GR_PROG="/tmp/unraid-aicliagents/.convert_progress_${TYPE}_${_GR_LOCK_ID}.log"
+    printf '%s\n' "$_GR_SRC_BYTES" > "/tmp/unraid-aicliagents/.convert_total_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
+    : > "$_GR_PROG" 2>/dev/null || true
+    _gr_cleanup_meta() {
+        rm -rf "$_GR_META" "$_GR_PROG" "/tmp/unraid-aicliagents/.convert_total_${TYPE}_${_GR_LOCK_ID}" "$_GR_CONVERT_LOCK" 2>/dev/null || true
+    }
+
+    # ---- copy + verify (nothing destructive yet) ----
+    _gr_phase "copying"
+    : > "$_GR_STAGING_MARKER" 2>/dev/null || true
+    log "Copying the home to $_GR_COPY..."
+    if ! convert_copy_tree "$_GR_VIEW" "$_GR_COPY" "$_GR_EXCLUDES" "$_GR_PROG" 2>>"$DEBUG_LOG"; then
+        _gr_reason "Copying the home failed (disk full or a read error). Nothing was changed."
+        error "Copy of the home failed — layers untouched."
+        _gr_cleanup_meta; exit 1
+    fi
+    if [ -n "$_GR_SQLITE_DBS" ]; then
+        _gr_sba=0
+        # shellcheck disable=SC2086
+        AICLI_SQLITE_READ_ROOT="" sqlite_backup_all "$_GR_VIEW" "$_GR_COPY" $_GR_SQLITE_DBS || _gr_sba=$?
+        if [ "$_gr_sba" -ne 0 ]; then
+            _gr_reason "A database could not be copied (${SQLITE_BACKUP_FAILED_DB:-a database}). Nothing was changed."
+            error "SQLite copy of ${SQLITE_BACKUP_FAILED_DB:-a database} failed: ${SQLITE_BACKUP_ERROR:-no message} — layers untouched."
+            _gr_cleanup_meta; exit 1
+        fi
+    fi
+    # #502: the plugin's own services (Relay, hub, resume records) keep writing
+    # small files into the home; copy the changes again until the copy matches.
+    if ! _gr_why="$(convert_sync_until_clean "$_GR_VIEW" "$_GR_COPY" "$_GR_EXCLUDES" 5 2>>"$DEBUG_LOG")"; then
+        _gr_reason "Files in the home kept changing during the copy. Nothing was changed; try again."
+        error "Copy verify failed: files kept changing during the copy ($_gr_why) — layers untouched."
+        _gr_cleanup_meta; exit 1
+    fi
+    # shellcheck disable=SC2086
+    if ! _gr_why="$(convert_verify_dbs "$_GR_VIEW" "$_GR_COPY" $_GR_SQLITE_DBS)"; then
+        _gr_reason "A database copy is missing. Nothing was changed."
+        error "Copy verify failed: $_gr_why — layers untouched."
+        _gr_cleanup_meta; exit 1
+    fi
+    log "Copy verified."
+
+    if [ "$_GR_MODE" = "staged" ]; then
+        _GR_EST="$(_gr_bytes "$(convert_copy_size_on "$_GR_COPY" "$PERSIST_PATH")")"
+        _GR_PERSIST_FREE="$(_gr_bytes "$(df -P -B1 "$PERSIST_PATH" 2>/dev/null | awk 'NR==2 {print $4}')")"
+        _gr_upper_freed=0; [ "$_GR_UPPER_SAME_FS" = "1" ] && _gr_upper_freed="$_GR_UPPER_BYTES"
+        if ! convert_fits_after_free "$_GR_PERSIST_FREE" "$_GR_LAYERS_BYTES" "$_gr_upper_freed" "$_GR_EST"; then
+            error "The home needs about $_GR_EST bytes on the boot disk, but only $(( _GR_PERSIST_FREE + _GR_LAYERS_BYTES + _gr_upper_freed )) bytes are free even after the old layers move off it. Nothing was changed."
+            rm -rf "$_GR_COPY" 2>/dev/null || true
+            _gr_cleanup_meta
+            _gr_precondition_refuse "boot_disk_too_small"
+        fi
+        log "The plain home will take about $_GR_EST bytes on the boot disk; it fits after the layers move off."
+    fi
+
+    # ---- critical section: bake lock, unmount, intent, retire ----
+    _GR_BAKE_LOCK="/var/run/aicli-bake-${TYPE}-${_GR_LOCK_ID}.lock"
+    exec 9>"$_GR_BAKE_LOCK"
+    if ! flock -n 9; then
+        _gr_cleanup_meta
+        _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "bake_lock_held"
+    fi
+    mapfile -t _GR_NOW < <(_layer_discover_sorted "$PERSIST_PATH" "$TYPE" "$ID")
+    if [ "${_GR_NOW[*]}" != "${_GR_LAYERS[*]}" ]; then
+        _gr_cleanup_meta
+        _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "bake_landed_during_consolidate" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
+    fi
+    # #502: the last pass, as close to the unmount as possible. What the plugin's
+    # services write between this pass and the unmount (seconds: Relay status,
+    # nonces) is not carried over; they rebuild it on the next contact.
+    _gr_phase "copying"
+    if ! _gr_why="$(convert_sync_until_clean "$_GR_VIEW" "$_GR_COPY" "$_GR_EXCLUDES" 3 2>>"$DEBUG_LOG")"; then
+        _gr_cleanup_meta
+        _gr_reason "Files in the home kept changing just before the switch. Nothing was changed; try again."
+        error "Copy verify failed just before the switch: files kept changing ($_gr_why) — layers untouched."
+        exit 1
+    fi
+    log "Final pass done: the copy matches the home."
+    if _mount_teardown_arbiter "$MNT_POINT"; then :; else
+        _gr_cleanup_meta
+        log "The home view is still busy — deferring (nothing changed)."
+        _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "mount_busy" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
+    fi
+    for _gr_lm in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
+        [ -d "$_gr_lm" ] || continue
+        # #504: a real unmount only. A lazy one hides the mount but keeps the
+        # squashfs and its loop alive while anything still uses it, so a moved
+        # layer keeps its space on the boot disk. release_layer_loops below
+        # then stops the run before anything moves.
+        mountpoint -q "$_gr_lm" 2>/dev/null && { umount "$_gr_lm" 2>/dev/null || true; }
+        rmdir "$_gr_lm" 2>/dev/null || true
+    done
+    # #504: staged mode frees the boot disk by moving the layers to the work disk.
+    # A layer that a loop device still reads keeps its space after the move
+    # (until a reboot), and the copy back then runs out of room. Release every
+    # loop first; when one stays, stop here, before anything moved.
+    if [ "$_GR_MODE" = "staged" ] && ! _gr_why="$(release_layer_loops "${_GR_LAYERS[@]}")"; then
+        _gr_cleanup_meta
+        _gr_reason "The system still holds the old layers open, so moving them would not free the boot disk. Nothing was changed. Restart the server, then try again."
+        error "Layer loop devices stay attached after the unmount: $(printf '%s' "$_gr_why" | tr '\n' ';') — conversion stopped before any move."
+        lifecycle_log "error" "graduate" "convert_loops_pinned" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
+        exit 1
+    fi
+
+    write_intent "$PERSIST_PATH" "$TYPE" "$ID" \
+        "{\"op\":\"graduate\",\"mode\":\"$_GR_MODE\",\"keep\":\"\",\"pt_dir\":\"$_GR_PT_DIR\",\"copy\":\"$_GR_COPY\",\"retire\":\"$_GR_RETIRE\",\"upper\":\"$UPPER_DIR\",\"delete\":[$_GR_LAYER_NAMES]}"
+    _itest_sigkill_window "graduate_after_intent"
+
+    # _gr_rollback — R5: put the layers and the writable layer back, drop the
+    # partial plain folder, clear the intent. The home is as it was.
+    # #505: convert_rollback checks the room first. With too little room it moves
+    # NOTHING and the intent stays open: the home stays closed (op_mount refuses)
+    # and the supervisor retries the rollback each tick, instead of a half-moved
+    # home that a workspace then starts on.
+    _gr_rollback() {
+        local _rb_rc=0
+        error "Rolling back: putting the layers and the writable layer back."
+        rm -f "$_GR_VERIFIED_MARKER" 2>/dev/null || true
+        convert_rollback "$PERSIST_PATH" "$_GR_PT_DIR" "$_GR_RETIRE" "$UPPER_DIR" 2>>"$DEBUG_LOG" || _rb_rc=$?
+        if [ "$_rb_rc" -ne 0 ]; then
+            if [ "$_rb_rc" -eq 3 ]; then
+                _gr_reason "The boot disk has too little room to put the old layers back. They are safe in $_GR_RETIRE. The home stays closed; free some space on the boot disk and the plugin puts them back."
+            else
+                _gr_reason "Putting the old layers back stopped part way. They are safe in $_GR_RETIRE. The home stays closed; the plugin tries again."
+            fi
+            error "ROLLBACK incomplete (rc=$_rb_rc): the intent stays open; the supervisor retries. Files: $_GR_RETIRE"
+            lifecycle_log "error" "graduate" "convert_rollback_incomplete" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"rc\":$_rb_rc,\"retire\":\"$_GR_RETIRE\"}" 2>/dev/null || true
+            return 0
+        fi
+        clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
+        rm -f "$_GR_STAGING_MARKER" 2>/dev/null || true
+        lifecycle_log "warn" "graduate" "convert_rolled_back" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mode\":\"$_GR_MODE\"}" 2>/dev/null || true
+    }
+
+    _gr_phase "freeing"
+    mkdir -p "$_GR_RETIRE" 2>/dev/null
+    log "Moving the old layers to $_GR_RETIRE (kept ${graduated_retention_days:-14} days)..."
+    for _gr_l in "${_GR_LAYERS[@]}"; do
+        if ! mv -f "$_gr_l" "$_GR_RETIRE/" 2>>"$DEBUG_LOG"; then
+            error "Could not move $(basename "$_gr_l")."
+            _gr_rollback; _gr_cleanup_meta; exit 1
+        fi
+    done
+    if [ -d "$UPPER_DIR" ]; then
+        if [ "$_GR_UPPER_SAME_FS" = "1" ] || [ "$_GR_MODE" = "staged" ]; then
+            if ! mv -f "$UPPER_DIR" "$_GR_RETIRE/upper" 2>>"$DEBUG_LOG"; then
+                error "Could not move the writable layer."
+                _gr_rollback; _gr_cleanup_meta; exit 1
+            fi
+        else
+            # A RAM writable layer: its content is in the copy; it is not kept.
+            rm -rf "$UPPER_DIR" 2>/dev/null || true
+        fi
+        mkdir -p "$UPPER_DIR" 2>/dev/null || true
+    fi
+    _itest_sigkill_window "graduate_after_move"
+
+    if [ "$_GR_MODE" = "staged" ]; then
+        _gr_phase "copying-back"
+        log "Copying the home back to $_GR_PT_DIR..."
+        if ! convert_copy_tree "$_GR_COPY" "$_GR_PT_DIR" "" "$_GR_PROG" 2>>"$DEBUG_LOG"; then
+            _gr_reason "Copying the home back to the boot disk failed. The home was put back as it was."
+            error "Copy back to the boot disk failed."
+            _gr_rollback; _gr_cleanup_meta; exit 1
+        fi
+        if ! _gr_why="$(convert_verify_tree "$_GR_COPY" "$_GR_PT_DIR")"; then
+            _gr_reason "The copy on the boot disk did not match. The home was put back as it was."
+            error "Verify of the copy on the boot disk failed: $_gr_why"
+            _gr_rollback; _gr_cleanup_meta; exit 1
+        fi
+    fi
+    : > "$_GR_VERIFIED_MARKER" 2>/dev/null || true
+    sync "$PERSIST_PATH" 2>/dev/null || sync
+
+    _gr_phase "switching"
+    if ! manifest_set_backend "$TYPE" "$ID" "passthrough"; then
+        _gr_reason "The switch to plain folders failed. The home was put back as it was."
+        error "Manifest switch failed."
+        _gr_rollback; _gr_cleanup_meta; exit 1
+    fi
+    _itest_sigkill_window "graduate_after_manifest"
+    clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
+    rm -f "$_GR_STAGING_MARKER" "$_GR_VERIFIED_MARKER" 2>/dev/null || true
+    if [ "$_GR_MODE" = "staged" ]; then
+        rm -rf "$_GR_COPY" 2>/dev/null
+        # R4: the supervisor reaps this retire folder after the retention window.
+        touch "$_GR_RETIRE" 2>/dev/null || true
+        printf '%s\n' "$_GR_RETIRE" >> "${AICLI_RETIRED_LIST:-/boot/config/plugins/unraid-aicliagents/retired_dirs.list}" 2>/dev/null || true
+    fi
+    _gr_cleanup_meta
+
+    lifecycle_log "info" "graduate" "graduate_ok" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mode\":\"$_GR_MODE\",\"pt_dir\":\"$_GR_PT_DIR\",\"retired\":\"$_GR_RETIRE\",\"bytes\":$_GR_SRC_BYTES}" 2>/dev/null || true
+    log "Conversion complete: home $ID is plain folders at $_GR_PT_DIR (old layers kept in $_GR_RETIRE)."
+
+    [ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"
+    mkdir -p "$MNT_POINT" 2>/dev/null
+    if [ "$ID" != "root" ] && id "$ID" >/dev/null 2>&1; then
+        chown "$ID" "$_GR_PT_DIR" "$MNT_POINT" 2>/dev/null || true
+    fi
+    if mount --bind "$_GR_PT_DIR" "$MNT_POINT" 2>/dev/null; then
+        lifecycle_log "info" "storagectl" "passthrough_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$_GR_PT_DIR\"}" 2>/dev/null || true
+        log "Plain home bind mounted at $MNT_POINT."
+    else
+        log "Bind mount failed (non-fatal) — the next mount binds the plain folder."
+    fi
+    exit 0
+fi
 
 # ---- 2. Flush the upper (op_bake path; serialises itself on the bake lock) ---
 log "Flushing upper before migration (op_bake)..."

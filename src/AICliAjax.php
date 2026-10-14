@@ -171,7 +171,7 @@ if (isset($_GET['action'])) {
         // that the operator did not expect, and the request that sent it left no
         // line at all at the default log level. continue_session additionally
         // records who asked (TerminalHandler::recordContinue).
-        $milestones = ['start', 'stop', 'restart', 'install_agent', 'uninstall_agent', 'consolidate_storage', 'persist_home', 'repair_agent_storage', 'repair_home_storage', 'save', 'wipe_storage',
+        $milestones = ['start', 'stop', 'restart', 'install_agent', 'uninstall_agent', 'consolidate_storage', 'convert_storage', 'persist_home', 'repair_agent_storage', 'repair_home_storage', 'save', 'wipe_storage',
             'continue_session', 'graceful_close', 'restart_fresh', 'reload_onto_current', 'refresh_bridge', 'workspace_export', 'stop_unreachable', 'view_unreachable'];
         $logLvl = in_array($action, $milestones) ? AICLI_LOG_INFO : AICLI_LOG_DEBUG;
         aicli_log("Handling AJAX Request: $action ($id)", $logLvl, "AICliAjax");

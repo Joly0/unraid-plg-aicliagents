@@ -29,9 +29,9 @@ Use both. The layers keep your work safe from a power cut. A backup keeps your h
 Open the **AI CLI Agents** page under Unraid's Settings menu, and open the **Home Storage** tab. Each home has its own card. At the bottom of the card is the backup strip:
 
 - A line of status text.
-- A button. It reads **Set up backup…** when no folder is chosen. Otherwise it reads **Backup…**.
+- A button. It reads **Set up config backup…** when no folder is chosen. Otherwise it reads **Config backup…**. The backup copies the home folder: the settings, sign-ins and history of the agents. It does not copy the server.
 
-Press the button to open the dialog **Backup — name** (the name is the Unraid user). Every home has its own settings: its own folder, mode, schedule and snapshots. Two homes can use two folders.
+Press the button to open the dialog **Config backup — name** (the name is the Unraid user). Every home has its own settings: its own folder, mode, schedule and snapshots. Two homes can use two folders.
 
 The text under the cards says: "Each home has its own backup: a second, plain copy of the home on a folder you choose, so damage to the Flash layers does not destroy that copy too."
 
@@ -39,12 +39,12 @@ The text under the cards says: "Each home has its own backup: a second, plain co
 
 | Text | Meaning |
 | :-- | :-- |
-| **Backup is not set up.** | No folder is chosen. |
-| **No folder chosen — earlier backups found in** a path | Snapshots from an earlier setup exist in that path. The dialog offers that folder. |
-| **Not backed up yet · to** a path | A folder is set, but no backup has run. |
-| **Backing up —** a step | A backup is queued, waiting or running. The step changes as the job moves. |
-| **Last backup** time **·** size **(cold)** or **(warm)** | The last backup worked. The line adds the schedule, for example "daily at 02:00". |
-| **Last backup failed:** a reason | The last run did not finish. No snapshot was kept for it. The earlier snapshot is still good. |
+| **Config backup is not set up.** | No folder is chosen. |
+| **No folder chosen — earlier config backups found in** a path | Snapshots from an earlier setup exist in that path. The dialog offers that folder. |
+| **Config not backed up yet · to** a path | A folder is set, but no backup has run. |
+| **Backing up config —** a step | A backup is queued, waiting or running. The step changes as the job moves. |
+| **Last config backup** time **·** size **(cold)** or **(warm)** | The last backup worked. The line adds the schedule, for example "daily at 02:00". |
+| **Last config backup failed:** a reason | The last run did not finish. No snapshot was kept for it. The earlier snapshot is still good. |
 
 A warm backup can add "· N files changed during the backup". This is not an error. See "Cold and warm" below.
 
@@ -53,7 +53,7 @@ A warm backup can add "· N files changed during the backup". This is not an err
 ### Set up a backup
 
 1. Open the **Home Storage** tab.
-2. Press **Set up backup…** on the card of the home.
+2. Press **Set up config backup…** on the card of the home.
 3. Press **Choose folder…** under **Destination folder**. Expect: the plugin's folder browser opens.
 4. Go to the folder that should hold the snapshots. The browser has a **New folder** button. It makes a folder for you. Press **Select**.
 5. Read the result line under the folder. Expect: a check mark, the real path, the file system, and the free space, for example "/mnt/cache/backups (xfs) — 812.4 GB free". If you see a cross and a reason, choose another folder.
@@ -176,7 +176,7 @@ A restore puts a snapshot back into the home. It always runs as a cold job. It c
 
 ### Restore a snapshot
 
-1. Press **Backup…** on the card of the home.
+1. Press **Config backup…** on the card of the home.
 2. In the list, find the snapshot and press **Restore…**. Expect: a dialog **Restore name’s home?**
 3. Read the facts: the time, warm or cold, the number of files and the size. A warm snapshot shows a yellow line: it may not be perfectly consistent.
 4. Choose **Replace** or **Merge** (see the table).
@@ -265,8 +265,8 @@ A backup is a job in the same queue as saves and merges. Only one storage job ru
 
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
-| **Backup is not set up.** | No folder is chosen. | Press **Set up backup…** and choose a folder. |
-| **Last backup failed:** a reason | The job stopped. The plugin removed the partial snapshot. | Read the reason. Common causes: the drive is gone, there is no room, or a file differed from the home. Fix the cause and press **Back up now**. |
+| **Config backup is not set up.** | No folder is chosen. | Press **Set up config backup…** and choose a folder. |
+| **Last config backup failed:** a reason | The job stopped. The plugin removed the partial snapshot. | Read the reason. Common causes: the drive is gone, there is no room, or a file differed from the home. Fix the cause and press **Back up now**. |
 | The result line shows a cross | The plugin refuses the folder. | Read the reason. Choose a folder on a pool, a disk or an Unassigned Devices drive. |
 | **Not saved:** a reason | A value was refused. | The field shows the last saved value. Enter an allowed value. **Keep** must be from 1 to 50. |
 | "Could not load the backup settings." | The dialog could not read the settings. | Press **Try again**. |

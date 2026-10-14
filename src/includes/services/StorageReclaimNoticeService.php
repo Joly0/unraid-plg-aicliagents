@@ -12,7 +12,9 @@
  *     <constraints>Best effort: sync() never throws and never blocks the supervisor tick
  *     that calls it. The button runs the existing consolidate_storage flow
  *     (StorageHandler::consolidate): it closes every session of the home with its resume
- *     id, tidies, and relaunches them. A person dismissing the ask ("Later") is
+ *     id, tidies, and relaunches them. For a layered home on a disk that is not a USB
+ *     stick (`can_convert`, #496) the button runs convert_storage instead: the home
+ *     becomes plain folders and needs no more tidy-ups. A person dismissing the ask ("Later") is
  *     remembered for that episode only (the started_at of the wait), so a new wait asks
  *     again but the same wait never nags.</constraints>
  * </module_context>
@@ -26,6 +28,9 @@ class StorageReclaimNoticeService
 
     /** AJAX action the tray button calls (the Storage tab's own Consolidate action). */
     public const ACTION = 'consolidate_storage';
+
+    /** #496: AJAX action the tray's "Convert to plain folders" button calls. */
+    public const ACTION_CONVERT = 'convert_storage';
 
     public static function opId(string $user): string
     {
@@ -76,6 +81,31 @@ class StorageReclaimNoticeService
         if (!empty($maintenance['consolidating'])) {
             return ['phase' => 'handoff', 'label' => '', 'step' => '', 'meta' => []];
         }
+
+        $startedAt = (int)($maintenance['started_at'] ?? 0);
+        $n = count($openNames);
+        $shown = array_slice($openNames, 0, 4);
+        $list = implode(', ', $shown) . ($n > count($shown) ? ' and ' . ($n - count($shown)) . ' more' : '');
+        $why = (($maintenance['reason'] ?? '') === 'space_pressure') ? 'Disk space is low.' : 'Workspace memory is nearly full.';
+
+        // #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R9): a layered home on a disk that is
+        // not a USB stick gets the conversion, not a merge. No automatic tidy-up runs for
+        // it, so the ask stays even when no workspace is open.
+        if (!empty($maintenance['can_convert'])) {
+            if ($dismissedEpisode > 0 && $dismissedEpisode === $startedAt) return null;
+            $open = $n === 0 ? ''
+                : " $n workspace" . ($n === 1 ? ' is' : 's are') . " open: $list. They close and open again by themselves.";
+            return [
+                'phase' => 'ask',
+                'label' => 'Convert this home to plain folders',
+                'step'  => "$why This home can change to plain folders. Then it needs no more tidy-ups.$open",
+                'meta'  => [
+                    'chip' => 'needs you', 'user' => $user, 'phase' => 'ask', 'count' => $n,
+                    'startedAt' => $startedAt,
+                    'action' => 'convert_home',
+                ],
+            ];
+        }
         // No workspace is open and the tidy-up has not started yet, or the automatic
         // tidy-up is running: nothing else shows it, so this entry does.
         if (count($openNames) === 0) {
@@ -87,13 +117,8 @@ class StorageReclaimNoticeService
             ];
         }
 
-        $startedAt = (int)($maintenance['started_at'] ?? 0);
         if ($dismissedEpisode > 0 && $dismissedEpisode === $startedAt) return null;
 
-        $n = count($openNames);
-        $shown = array_slice($openNames, 0, 4);
-        $list = implode(', ', $shown) . ($n > count($shown) ? ' and ' . ($n - count($shown)) . ' more' : '');
-        $why = (($maintenance['reason'] ?? '') === 'space_pressure') ? 'Disk space is low.' : 'Workspace memory is nearly full.';
         return [
             'phase' => 'ask',
             'label' => 'Close workspaces for a storage tidy-up',

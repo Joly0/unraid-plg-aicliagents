@@ -282,6 +282,20 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </div>
                         </dd>
 
+                        <?php /* #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R6): the setting
+                           consolidate_stage_path. Empty = the plugin picks a folder by itself
+                           (Docker appdata, then VM domains, then a protected pool). */ ?>
+                        <dt>Work folder for storage jobs</dt>
+                        <dd>
+                            <input type="text" name="consolidate_stage_path" aria-label="Work folder for storage jobs" data-testid="consolidate-stage-path"
+                                   value="<?=htmlspecialchars((string)($config['consolidate_stage_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                   placeholder="Automatic" style="width: 100%;" <?=$autoSave?>>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                A folder on a pool or array disk. Storage jobs use it for temporary copies when the boot disk has no room, for example a merge or a conversion to plain folders.
+                                Leave it empty and the plugin chooses a folder by itself. It is never RAM and never the boot disk.
+                            </div>
+                        </dd>
+
                         <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
                            only — stored in localStorage, never sent to the server on its own, and
                            never round-tripped through this form's own action=save. It travels only

@@ -65,6 +65,7 @@ class StorageHandler {
             // Note: get_task_status outputs raw JSON and is dispatched directly
             case 'persist_home':                $result = self::persistHomeAction(); break;
             case 'consolidate_storage':         $result = self::consolidate(); break;
+            case 'convert_storage':             $result = self::convertAction(); break; // #496: layered home → plain folders
             case 'get_home_sessions':            return self::getHomeSessions();    // R1: read-only, list open sessions for home consolidate warning
             case 'backup_home':                 $result = self::backupHomeAction(); break; // HOME_BACKUP.md
             case 'backup_status':               return self::backupStatusAction();  // HOME_BACKUP.md: read-only, no Nchan publish
@@ -104,7 +105,7 @@ class StorageHandler {
                 'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'preflight_storage_backend', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
-                'consolidate_storage', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
+                'consolidate_storage', 'convert_storage', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
@@ -283,6 +284,15 @@ class StorageHandler {
         if ($raw === false || $raw === '') return $none;
         $decoded = @json_decode($raw, true);
         if (!is_array($decoded)) return $none;
+
+        // #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R9): a waiting tidy-up for a home
+        // that can become plain folders offers the conversion instead of a merge. The
+        // tray notice and the terminal banner read this one flag. Computed only while
+        // a wait is open, so the common no-wait read runs no probe.
+        if (($decoded['state'] ?? '') === 'waiting') {
+            require_once __DIR__ . '/../services/FileStorage.php';
+            $extra['can_convert'] = \AICliAgents\Services\FileStorage::canConvertHome($user);
+        }
 
         return array_merge(['status' => 'ok', 'now' => time()], $decoded, $extra);
     }
@@ -1532,6 +1542,87 @@ class StorageHandler {
             ? "Consolidation queued. Sessions will be closed and automatically resumed on completion. Watch the activity tray for progress."
             : "Consolidation queued. It runs on the next storage cycle. Watch the activity tray for progress.";
         return ['status' => 'queued', 'job_id' => (string)$jobId, 'message' => $msg];
+    }
+
+    /** AJAX `convert_storage` (#496): GET/POST type=home, id=<user>, optional continue_after=0. */
+    private static function convertAction(): array {
+        $type = (string)($_REQUEST['type'] ?? 'home');
+        if ($type !== 'home') {
+            return ['status' => 'error', 'message' => 'Only a home can be converted to plain folders.'];
+        }
+        $continueAfter = (string)($_REQUEST['continue_after'] ?? '1') !== '0';
+        return self::convertHome((string)($_REQUEST['id'] ?? ''), null, $continueAfter);
+    }
+
+    /**
+     * #496 (docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md): queue the conversion
+     * of a layered home on a non-USB disk to plain folders. The supervisor runs
+     * it as op `graduate`, reason `user_convert`: it closes the home's sessions
+     * as for a user consolidate, copies the merged view, switches, and relaunches
+     * from the SAME relaunch manifest the consolidate flow uses. Same order as
+     * consolidate(): writeHomeManifest → markHomeConsolidating → enqueue → wake.
+     *
+     * $gate (test seam) decides whether the home may be converted; the default
+     * is FileStorage::canConvertHome. A refusal has no side effect at all.
+     */
+    public static function convertHome(string $id, ?callable $gate = null, bool $continueAfter = true): array {
+        $id = trim($id);
+        if ($id === '' || $id === '0') $id = 'root';
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+            return ['status' => 'error', 'message' => 'invalid_id'];
+        }
+        if ($gate === null) {
+            require_once __DIR__ . '/../services/FileStorage.php';
+            $gate = static function (string $u): bool { return \AICliAgents\Services\FileStorage::canConvertHome($u); };
+        }
+        if (!$gate($id)) {
+            return ['status' => 'error',
+                    'message' => "The home of $id cannot be converted. Only a home with layers on a disk that is not a USB flash drive can change to plain folders."];
+        }
+        aicli_log("AJAX Request: Convert home $id to plain folders", AICLI_LOG_INFO);
+
+        require_once __DIR__ . '/../services/UpgradeRelaunchService.php';
+        $manifest = [];
+        $seen = [];
+        foreach (\AICliAgents\Services\TerminalService::listActiveSessionsForHome($id) as $s) {
+            $sid = (string)($s['id'] ?? '');
+            if ($sid === '' || isset($seen[$sid])) continue;
+            $seen[$sid] = true;
+            $wp      = (string)($s['path'] ?? '');
+            $agentId = (string)($s['agentId'] ?? '');
+            $manifest[] = [
+                'sessionId'     => $sid,
+                'workspacePath' => $wp,
+                'agentId'       => $agentId,
+                'hadResume'     => $wp !== '' && $agentId !== '',
+                'working'       => $continueAfter,
+            ];
+        }
+        if (!empty($manifest)
+            && \AICliAgents\Services\UpgradeRelaunchService::writeHomeManifest($id, $manifest) === false) {
+            aicli_log("Convert(home): failed to write relaunch manifest for $id — aborting", AICLI_LOG_WARN);
+            return ['status' => 'error', 'message' => 'Could not write relaunch manifest. Try again.'];
+        }
+        require_once __DIR__ . '/../services/ConsolidateState.php';
+        $epoch = \AICliAgents\Services\ConsolidateState::markHomeConsolidating($id);
+
+        $jobId = \AICliAgents\Services\SupervisorService::enqueueJob('home', $id, 'graduate', 'user_convert', 5, $epoch);
+        if ($jobId === null) {
+            \AICliAgents\Services\SupervisorService::enqueue('home', $id, 'graduate', 'user_convert', 5, null, false, $epoch);
+        }
+        self::trackJobActivity($jobId, "Converting home $id to plain folders");
+        \AICliAgents\Services\SupervisorService::wake();
+
+        \AICliAgents\Services\LifecycleLogService::log(
+            \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+            'storage', 'storage_convert_queued',
+            ['type' => 'home', 'id' => $id, 'job_id' => $jobId]
+        );
+        // The tidy-up ask in the tray hands over to this job's own entry now.
+        \AICliAgents\Services\StorageReclaimNoticeService::sync(self::forceReclaimState(), $id);
+
+        return ['status' => 'queued', 'job_id' => (string)$jobId,
+                'message' => 'Conversion queued. Workspaces of this home close and open again when it is done. Watch the activity tray for progress.'];
     }
 
     /**
