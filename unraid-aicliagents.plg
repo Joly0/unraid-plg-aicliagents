@@ -3,7 +3,7 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.15.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
-## 2026.10.15.01
+## 2026.10.15.02
 
 &gt; **The plugin is now open source under the MIT license.** The `LICENSE` file is at the top of the repository, and the licenses of the bundled libraries are in `THIRD_PARTY_NOTICES.md`. The public history now shows each change as its own commit, and `CONTRIBUTING.md` says how a pull request is handled. The Notebook hang warning from 2026.10.13.01 still applies: if an Unraid page hangs with the Notebook on, set **Notebook** to Off on the Configuration tab and tell us on GitHub.
 
@@ -26,6 +26,9 @@
 - **Fix: agent sessions find tools installed in `~/.local/bin`** (reported on GitHub).
 - **Fix: a terminal whose connection drops reconnects only when its workspace still exists,** so a workspace closed in another browser no longer shows an error page.
 - **Fix: large files upload again,** where they failed with "The server answered with HTML instead of JSON".
+- **Fix: a path in the terminal that starts with `/`, `./` or `~/` opens on a click whatever its file type,** for example `~/.claude/secrets/ha.token` or `/etc/ssl/site.crt`. Before, only a fixed list of file types was a link. A path inside a web address, such as `ftp://host/file.x`, is not a link.
+- **Fix: a new Grok Build workspace starts Grok fresh** instead of stopping at "No session found for current directory".
+- **Fix: the Activity tray's "needs approval" label and its Approve, Force and error texts are easy to read** on light and dark themes.
 
 **Voice**
 
