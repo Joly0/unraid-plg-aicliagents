@@ -3,6 +3,35 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.15.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.10.15.01
+
+&gt; **The plugin is now open source under the MIT license.** The `LICENSE` file is at the top of the repository, and the licenses of the bundled libraries are in `THIRD_PARTY_NOTICES.md`. The public history now shows each change as its own commit, and `CONTRIBUTING.md` says how a pull request is handled. The Notebook hang warning from 2026.10.13.01 still applies: if an Unraid page hangs with the Notebook on, set **Notebook** to Off on the Configuration tab and tell us on GitHub.
+
+**Config Hub (thanks to Joly0 on GitHub)**
+
+- **Feat: switch an MCP server off for all agents without losing its agent choices.** Each server row has an on/off switch. A server that is off is removed from every agent's config at the next Apply, and comes back with the same agent ticks when you switch it on.
+- **Feat: a remote MCP server can log in and send HTTP headers.** Choose **Bearer token** or **Custom header** under Authentication, and add extra headers if the server's docs ask for them. A token is never stored as typed text: keep it under Secrets and type its key in braces, for example `{MY_TOKEN}`. The token fields have the eye icon to show the value.
+- **Feat: a Test connection button checks a remote server before you save.** It connects from your Unraid server and shows the HTTP status and a short reason. It saves nothing.
+- **Improve: a Config Hub write that fails names its real cause in the log,** such as a broken link to a skills folder.
+
+**Storage**
+
+- **Fix: merging a home's layers works again on Unraid's mksquashfs 4.5** (reported on GitHub). The plugin checks what the installed mksquashfs supports before it asks for progress output. When a merge fails, the log now shows mksquashfs's own error message.
+- **Feat: a home kept in layers can be converted to plain folders** from its card on the Storage tab (**Convert to plain folders**). The home then needs no saves, merges or tidy-ups. Every workspace of the home closes and opens again, the Activity tray names each step, and the old layers are kept for 14 days. A conversion that fails rolls back cleanly.
+- **Fix: a removed agent layer frees its space on the flash at once,** and storage layers no longer stay attached after they are unmounted.
+
+**Terminals and workspaces**
+
+- **Fix: a terminal start that hangs now ends with an error after a minute** instead of showing Initializing forever (reported on GitHub). Old terminal connections from a dropped browser are cleaned up when a workspace starts.
+- **Fix: agent sessions find tools installed in `~/.local/bin`** (reported on GitHub).
+- **Fix: a terminal whose connection drops reconnects only when its workspace still exists,** so a workspace closed in another browser no longer shows an error page.
+- **Fix: large files upload again,** where they failed with "The server answered with HTML instead of JSON".
+
+**Voice**
+
+- **Fix: dictation works with the voice engine again.** Speech is sent in a format every engine accepts, and an engine error stays on screen long enough to read.
+- **Fix: the Agent Store header stays inside its card on a phone** when the version-check line is long.
+
 ## 2026.10.13.01
 
 &gt; **Known issue: a page can hang while the Notebook is on.** A few Unraid pages have frozen on one server while the Notebook was turned on. We have not found the cause yet. This release makes the Notebook ask the server for much less (see below) and adds a way to record what happens, but we cannot promise it is fixed.
