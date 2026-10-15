@@ -102,7 +102,7 @@ The instructions that the plugin gives to every agent say this: when a `[Relay]`
 3. Press a row. Expect: the row opens and shows the full text.
 4. Use the trash icon on a row to delete that message. Use **Clear read** to delete every message shown. Use **Refresh** to load the list again.
 
-The list shows messages sent (an up arrow) and received (a down arrow), and topic news (a megaphone), newest first. A **Contacts** list at the top shows who the workspace can message and whether each one is online. Contacts on a linked box appear in a group for that box.
+The list shows messages sent (an up arrow) and received (a down arrow), and topic news (a megaphone), newest first. A **Contacts** list at the top shows who the workspace can message and whether each one is online. Contacts on a linked box appear in a group for that box. The list shows one row for each workspace. If a workspace is closed, its row leaves the list after 3 days. A linked-box contact that its box no longer lists also leaves after 3 days, or at once when it has only a raw id and no name. If two closed workspaces have the same name on the same box, only the newest one shows. Old messages stay, and you can still answer an old message.
 
 ### Choose what a workspace listens to
 
@@ -286,3 +286,10 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 - [Plugin management tools for agents](agent-tools.md): the other set of tools that agents use.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Activity tray and the Debug Console.
 - [Settings reference](settings-reference.md): every setting on every tab.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-16** — The Contacts list hides closed workspaces after 3 days, shows one row for each name on each box, and drops linked-box contacts that their box no longer lists. Messages are not deleted. Spec `docs/specs/AGENT_RELAY_POC.md`, issue #546.
+
+</details>

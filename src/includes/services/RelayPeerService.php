@@ -180,10 +180,29 @@ class RelayPeerService {
         return $row !== null && !in_array($row['state'], ['unlinked', 'unlinked_by_peer'], true);
     }
 
+    /**
+     * #546: does the last contact sync of this contact's box list it? true / false,
+     * or null when the box is unusable or has never sent a list (cannot judge).
+     */
+    public static function contactSyncState(string $id): ?bool {
+        if (!self::enabled()) return null;
+        [$peerId, $sid] = self::splitContactId($id);
+        $row = $peerId !== '' ? RelayPeerStore::find($peerId) : null;
+        if ($row === null || in_array($row['state'], ['unlinked', 'unlinked_by_peer'], true)) return null;
+        $cache = RelayPeerStore::readRuntime($peerId, 'contacts', []);
+        if (empty($cache['fetched_at'])) return null;
+        foreach ((array)($cache['contacts'] ?? []) as $c) if (is_array($c) && (string)($c['session_id'] ?? '') === $sid) return true;
+        return false;
+    }
+
     public static function decorateHistoryContact(array $contact): array {
         [$peerId] = self::splitContactId((string)$contact['session_id']);
         $row = RelayPeerStore::find($peerId);
         if ($row === null) return $contact;
+        // #546: a name learned from history reads "<name> @ <box>", like a synced contact.
+        if ((string)$contact['name'] !== (string)$contact['session_id'] && strpos((string)$contact['name'], ' @ ') === false) {
+            $contact['name'] = self::remoteDisplayName((string)$contact['name'], $row);
+        }
         $contact['online'] = false;
         $contact['box'] = RelayPeerStore::displayName($row);
         $contact['peer_state'] = self::peerState($row);

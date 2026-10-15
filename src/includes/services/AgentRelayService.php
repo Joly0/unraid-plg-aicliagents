@@ -1550,7 +1550,7 @@ class AgentRelayService {
      * contact still works and its messages stay readable in history.
      */
     public static function agentContacts(string $sessionId, bool $forListing = true): array {
-        $sessionId=self::cleanId($sessionId); $out=[]; $known=[]; $labels=[]; $historyOnly=[];
+        $sessionId=self::cleanId($sessionId); $out=[]; $known=[]; $labels=[]; $historyOnly=[]; $activity=[]; $owners=[];
         if (empty(self::settings()['direct_messages_enabled'])) return $out;
         // Discovery: registered subscribers (this is the cross-box registration
         // mechanism — a subscribed peer is a valid contact even before any DM) +
@@ -1560,15 +1560,22 @@ class AgentRelayService {
         // stops appearing here rather than being filtered out of legitimate ones (#137).
         $traceIds=[];
         foreach (glob(self::path('subscriptions/*.json')) ?: [] as $file) { $traceIds[]=basename($file,'.json'); }
-        foreach ((self::actors()['actors'] ?? []) as $actor) { $traceIds[]=is_array($actor)?(string)($actor['session_id'] ?? ''):(string)$actor; }
+        foreach ((self::actors()['actors'] ?? []) as $actor) { $oid=is_array($actor)?(string)($actor['session_id'] ?? ''):(string)$actor; $traceIds[]=$oid; $owners[self::cleanId($oid)]=true; }
         self::ensureDirectIndex();
         $strongIds=array_flip(array_filter(array_map(fn($i)=>self::cleanId((string)$i), $traceIds)));
         foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) foreach (glob(self::path("direct/$box/*"), GLOB_ONLYDIR) ?: [] as $dir) {
             $traceIds[]=basename($dir);
             // Newest message activity for this id, from its index directories.
-            $hid=self::cleanId(basename($dir)); if ($hid==='' || isset($strongIds[$hid])) continue;
-            $historyOnly[$hid]=max($historyOnly[$hid] ?? 0, (int)@filemtime($dir));
+            // #546: the activity time is the newest message stamp in the file names, not
+            // the folder time: an index rebuild rewrites the folder and would make an old
+            // contact look new.
+            $hid=self::cleanId(basename($dir)); if ($hid==='') continue;
+            $activity[$hid]=max($activity[$hid] ?? 0, self::indexDirActivity($dir));
+            if (isset($strongIds[$hid])) continue;
+            $historyOnly[$hid]=$activity[$hid];
         }
+        // #546: a subscription file is also a sign of life (written when the session subscribes).
+        foreach (array_keys($strongIds) as $sid) { $m=(int)@filemtime(self::path("subscriptions/$sid.json")); if ($m>0) $activity[$sid]=max($activity[$sid] ?? 0,$m); }
         // Merge the live drawer into the discoverable set — see discoverableContactIds:
         // a currently-open workspace is a valid DM target the moment it exists, even
         // before it has touched the Relay (a freshly-launched SIBLING agent in the same
@@ -1602,6 +1609,11 @@ class AgentRelayService {
         // Saved workspaces (drawer + managed) are never history-only.
         foreach ($drawer as $w) { $wid=self::cleanId((string)($w['id'] ?? '')); if ($wid!=='') unset($historyOnly[$wid]); }
         foreach (array_keys(ConfigService::getManagedWorkspaces()) as $mid) unset($historyOnly[self::cleanId((string)$mid)]);
+        $saved=[]; foreach ($drawer as $w) { $wid=self::cleanId((string)($w['id'] ?? '')); if ($wid!=='') $saved[$wid]=true; }
+        foreach (array_keys(ConfigService::getManagedWorkspaces()) as $mid) $saved[self::cleanId((string)$mid)]=true;
+        $keepIds=[$sessionId=>true]; // ids the duplicate collapse never drops
+        foreach ($owners as $oid=>$_) $keepIds[$oid]=true;
+        foreach ($remoteOnline as $rid=>$_) $keepIds[$rid]=true;
         foreach (array_keys($known) as $id) {
             if ($id===$sessionId) continue;
             // #351: a test session is never listed, whatever the source of its id
@@ -1612,12 +1624,19 @@ class AgentRelayService {
             if (RelayPeerService::isPeerContactId($id) && !isset($extra[$id]) && ($isRemoteCaller || !RelayPeerService::historyContactUsable($id))) continue;
             if (isset($extra[$id])) { $out[]=$extra[$id]; continue; }
             $name=$labels[$id]['name'] ?? '';
-            if ($name==='') { $n=self::dmPeerName($id); $name=$n!==''?$n:$id; } // cross-box peer name from its newest DM
+            $readable=$name!=='';
+            if ($name==='') { $n=self::dmPeerName($id); $readable=$n!==''; $name=$readable?$n:$id; } // cross-box peer name from its newest DM
+            // #546: a closed workspace (no workspace record) leaves the list after the grace period;
+            // a linked-box contact its box no longer lists too. Saved workspaces, topic owners and
+            // remotes stay. The messages stay: only this derived row is left out.
+            if ($forListing && !isset($saved[$id]) && !isset($owners[$id]) && !isset($remoteOnline[$id])
+                && self::closedContactHidden($id, $activity[$id] ?? null, RelayPeerService::isPeerContactId($id) ? RelayPeerService::contactSyncState($id) : null, $readable, ProcessManager::isRunning($id))) continue;
             $row=['session_id'=>$id,'name'=>$name,'agent_id'=>$labels[$id]['agent_id'] ?? '','online'=>isset($remoteOnline[$id]) ? $remoteOnline[$id] : ProcessManager::isRunning($id)];
             if (RelayPeerService::isPeerContactId($id)) $row=RelayPeerService::decorateHistoryContact($row);
             $restart=self::conversationRestart($id); if ($restart!==null) $row['fresh_context_since']=(string)$restart['restarted_at']; // DRAWER_RESTART_AS_NEW.md
             $out[]=$row;
         }
+        if ($forListing) $out=self::collapseOfflineDuplicates($out,$activity,$keepIds); // #546
         return self::dedupeContactsByName($out);
     }
 
@@ -1652,6 +1671,76 @@ class AgentRelayService {
         if ($lastActivity === null || RelayPeerService::isPeerContactId($id)) return false;
         if (($now ?? time()) - $lastActivity <= self::HISTORY_CONTACT_MAX_AGE) return false;
         return !ProcessManager::isRunning($id);
+    }
+
+    /**
+     * #546 (docs/specs/AGENT_RELAY_POC.md "2026-10-16"): how long a contact stays in
+     * the list after its workspace is gone. 3 days: a person can still answer a
+     * message from the last weekend, and the list does not keep older clutter.
+     * The messages are never removed. Only the list row leaves.
+     */
+    const CLOSED_CONTACT_GRACE = 3 * 86400;
+
+    /** Newest message time (unix) from the stamped file names of one index folder; 0 when empty. */
+    private static function indexDirActivity(string $dir): int {
+        $best=0;
+        foreach (glob($dir.'/*.json') ?: [] as $f) {
+            if (!preg_match('/^(\d{8})T(\d{6})Z_/', basename($f), $m)) continue;
+            $t=strtotime($m[1].'T'.$m[2].'Z'); if ($t!==false && $t>$best) $best=$t;
+        }
+        return $best>0 ? $best : (int)@filemtime($dir);
+    }
+
+    /**
+     * #546: true when a contact row is left out of the LIST because its workspace
+     * is gone. Pure, so a test can set every fact.
+     *   $activity    newest sign of life (message or subscription), null if unknown
+     *   $peerListed  linked-box id only: true = its box lists it, false = its last
+     *                contact sync does not list it, null = no usable sync yet
+     *   $readable    the row has a real name (not the raw id)
+     * A running session is never hidden. A linked-box contact whose box still lists
+     * it is never hidden, and one with no usable sync is kept (we cannot judge).
+     * A linked-box contact missing from the last sync is hidden at once when it has
+     * no readable name, and after the grace period when it has one.
+     */
+    public static function closedContactHidden(string $id, ?int $activity, ?bool $peerListed, bool $readable, bool $running, ?int $now = null): bool {
+        if ($running) return false;
+        $old = $activity !== null && ($now ?? time()) - $activity > self::CLOSED_CONTACT_GRACE;
+        if (RelayPeerService::isPeerContactId($id)) {
+            if ($peerListed !== false) return false;
+            return !$readable || $activity === null || $old;
+        }
+        return $old;
+    }
+
+    /**
+     * #546: one row per workspace. Offline rows with the same name on the same box
+     * collapse to the newest (most recent activity, then the id for a stable
+     * result). An online row is never dropped. A row in $keepIds (this session,
+     * a topic owner, a remote client) is never dropped either.
+     *
+     * @param array<int,array<string,mixed>> $rows
+     * @param array<string,int> $activity session id => newest sign of life
+     * @param array<string,bool> $keepIds
+     */
+    public static function collapseOfflineDuplicates(array $rows, array $activity, array $keepIds = []): array {
+        $best=[];
+        foreach ($rows as $c) {
+            if (!empty($c['online'])) continue;
+            $id=(string)($c['session_id'] ?? ''); $k=strtolower((string)($c['name'] ?? '')).'|'.(string)($c['box'] ?? '');
+            $a=(int)($activity[$id] ?? 0);
+            if (!isset($best[$k]) || $a>$best[$k][0] || ($a===$best[$k][0] && strcmp($id,$best[$k][1])>0)) $best[$k]=[$a,$id];
+        }
+        $out=[];
+        foreach ($rows as $c) {
+            $id=(string)($c['session_id'] ?? '');
+            if (empty($c['online']) && !isset($keepIds[$id])) {
+                $k=strtolower((string)($c['name'] ?? '')).'|'.(string)($c['box'] ?? '');
+                if (($best[$k][1] ?? $id)!==$id) continue;
+            }
+            $out[]=$c;
+        }
+        return $out;
     }
 
     /**
@@ -1743,7 +1832,7 @@ class AgentRelayService {
      *
      * @return array<int,string> ids swept (for logging/tests)
      */
-    public static function sweepOrphanedSubscriptions(): array {
+    public static function sweepOrphanedSubscriptions(int $minAgeSeconds = 0): array {
         $swept=[];
         $owners=[]; foreach ((self::actors()['actors'] ?? []) as $a) { $sid=self::cleanId(is_array($a)?(string)($a['session_id'] ?? ''):(string)$a); if ($sid!=='') $owners[$sid]=true; }
         $live=[]; foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) { $id=self::cleanId((string)($w['id'] ?? '')); if ($id!=='') $live[$id]=true; }
@@ -1753,6 +1842,10 @@ class AgentRelayService {
         foreach (glob(self::path('subscriptions/*.json')) ?: [] as $file) {
             $id=self::cleanId(basename($file,'.json')); if ($id==='') continue;
             if (isset($owners[$id]) || isset($live[$id]) || isset($dmPeers[$id])) continue;
+            // #546: the periodic run skips a fresh file (a session that is still starting)
+            // and a configured remote client; the boot run (age 0) keeps its old rules.
+            if ($minAgeSeconds>0 && time()-(int)@filemtime($file) < $minAgeSeconds) continue;
+            if ($minAgeSeconds>0 && self::remoteName($id)!=='') continue;
             if (ProcessManager::isRunning($id)) continue;
             if (@unlink($file)) $swept[]=$id;
         }

@@ -3997,6 +3997,28 @@ _relay_peer_tick() {
 }
 
 # ---------------------------------------------------------------------------
+# Relay orphan sweep (#546) — every 10 minutes
+# ---------------------------------------------------------------------------
+# A closed session's Relay subscription used to live until the next reboot and
+# kept a ghost contact in the list. relay-agent.php sweep-orphans removes only a
+# subscription that is older than 10 minutes, has no workspace, no live process,
+# no topic-owner role, no remote client and no message history. Message history
+# is never touched. Runs detached with a hard timeout.
+_RELAY_SWEEP_LAST=0
+_RELAY_SWEEP_PID=""
+_relay_sweep_tick() {
+    [ "$(command -v php)" ] || return 0
+    local now; now=$(date +%s)
+    [ $(( now - _RELAY_SWEEP_LAST )) -ge 600 ] || return 0
+    if [ -n "$_RELAY_SWEEP_PID" ] && kill -0 "$_RELAY_SWEEP_PID" 2>/dev/null; then return 0; fi
+    _RELAY_SWEEP_LAST="$now"
+    timeout 60 php -d display_errors=0 \
+        "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-agent.php" sweep-orphans \
+        >/dev/null 2>&1 &
+    _RELAY_SWEEP_PID=$!
+}
+
+# ---------------------------------------------------------------------------
 # Relay HTTP listener ownership audit (#331)
 # ---------------------------------------------------------------------------
 # A listener from an older plugin generation kept 0.0.0.0:8237 open for 8 days
@@ -4423,6 +4445,7 @@ _do_start() {
         _work_tick
         _relay_drain_tick
         _relay_peer_tick
+        _relay_sweep_tick
         _relay_http_audit_tick
 
         # Reset the wake flag for THIS sleep window; a SIGUSR1 arriving during a
