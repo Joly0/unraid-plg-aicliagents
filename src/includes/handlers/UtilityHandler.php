@@ -657,6 +657,11 @@ class UtilityHandler {
      * rather than leaking whether the path is real.
      */
     private static function checkPath() {
+        // #544: a list form. `paths` is a JSON array of strings; the answer is one
+        // boolean per path, in order, and nothing else (no resolved path, no content).
+        if (isset($_POST['paths'])) {
+            return self::checkPaths($_POST['paths']);
+        }
         $rawPath = $_POST['path'] ?? '';
         if (!is_string($rawPath) || $rawPath === '' || strlen($rawPath) > 4096) {
             return ['status' => 'error', 'message' => 'Missing or invalid path'];
@@ -687,6 +692,37 @@ class UtilityHandler {
             'reason' => $exists ? '' : 'not_found',
             'readOnly' => $exists && ValidationService::isReadOnlyPath($resolved),
         ];
+    }
+
+    /** #544: most paths one batched check_path request may carry. */
+    public const CHECK_PATHS_MAX = 50;
+    /** #544: longest path one batched check may carry. A longer one answers false. */
+    public const CHECK_PATH_MAX_LEN = 4096;
+
+    /**
+     * #544 (docs/specs/TMUX_PATH_LINKS.md): batched existence check for the paths
+     * on one terminal row. Each answer is true only when the path is inside the
+     * allowed folders AND is a regular file. A refused, missing, directory, odd
+     * or too-long entry is false. The caller cannot tell these apart.
+     *
+     * @param mixed $raw the `paths` POST value (JSON array of strings)
+     */
+    public static function checkPaths($raw) {
+        $list = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($list) || $list === [] || !array_is_list($list) || count($list) > self::CHECK_PATHS_MAX) {
+            return ['status' => 'error', 'message' => 'Missing or invalid paths'];
+        }
+        $out = [];
+        foreach ($list as $p) {
+            $ok = false;
+            if (is_string($p) && $p !== '' && strlen($p) <= self::CHECK_PATH_MAX_LEN && strpos($p, "\0") === false) {
+                $expanded = \AICliAgents\Services\UtilityService::expandAgentHome($p);
+                $resolved = ValidationService::validateReadPath($expanded);
+                $ok = $resolved !== false && is_file($resolved);
+            }
+            $out[] = $ok;
+        }
+        return ['status' => 'ok', 'exists' => $out];
     }
 
     /**

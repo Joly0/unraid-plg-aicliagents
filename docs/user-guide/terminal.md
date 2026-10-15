@@ -36,9 +36,11 @@ When an agent prints a file path, the terminal makes it a link. Point at the pat
 
 A file that is not a text file opens in the file browser of Unraid, in a new tab.
 
-A path becomes a link only when it has a folder part, such as `docs/specs/plan.md`, and when it ends with a known text-file ending. Examples of known endings: md, txt, php, json, yml, sh, log, conf, py. A path that starts with `./` or `/` or `~/` works. A bare file name, such as `README.md`, is not a link, because the plugin cannot tell it from a normal word. A path that the agent's screen breaks over two lines is still one link.
+A path becomes a link only when the file exists. The terminal asks the server when you point at a line, and it underlines only the paths that are real files. The underline can show a fraction of a second after the pointer arrives. A path with a typo, a file that is gone, a folder, and a place that the plugin does not open (for example, under `/etc`) get no underline. The plugin remembers each answer for a few seconds, so a file that an agent creates becomes a link soon after.
 
-The plugin finds the file before it opens it. A relative path is read from the workspace folder. If the file is not there, a small message says "File not found" and shows the path. If the file is in a place that the plugin does not open (for example, under `/etc`), the message says that the location cannot be opened from here. The file may exist in that case.
+A path that starts with `./` or `/` or `~/` can be any file type, for example `~/bin/backup`. A path from the workspace folder, such as `docs/specs/plan.md`, needs a known text-file ending (md, txt, php, json, yml, sh, log, conf, py and others). A bare file name, such as `README.md`, is a link when that file is in the workspace folder. A word that only looks like a file name (for example `e.g`) is not a link. If the check cannot reach the server, a path with a known ending or a start of `./`, `/` or `~/` and a file type still links, and the other kinds do not. Web addresses, the plugin's own pages and Notebook references are links at once and are not checked. A path that the agent's screen breaks over two lines is still one link.
+
+A relative path is read from the workspace folder. If you open a path in another way (for example, from a Notebook note) and the file is not there, a small message says "File not found" and shows the path. If the file is in a place that the plugin does not open, the message says that the location cannot be opened from here.
 
 > [!NOTE]
 > The plugin gives each agent a short instruction that asks it to write a path that the terminal can use. A file inside the workspace is written as a path from the workspace folder, and a file in the workspace root starts with `./`. A file in another place is written with its full path. If one agent writes a bare file name, ask it to write the path.
@@ -185,7 +187,7 @@ When the plugin types a fixed notice into an agent (for example, a Relay notice)
 
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
-| A file name in the terminal is not a link. | The name has no folder part, or the ending is not in the list of known text endings. | Ask the agent to write the path from the workspace folder, for example `./notes.txt`. |
+| A file name in the terminal is not a link. | The file does not exist (check for a typo), it is in a place that the plugin does not open, or the name is not in the workspace folder. | Check the path. Ask the agent to write the path from the workspace folder, for example `./notes.txt`. |
 | The message "File not found" shows when you click a link. | The path does not point to a file now. The agent may have named a wrong or removed file. | Check the path. Ask the agent for the right one. |
 | The message "That location cannot be opened from here" shows. | The path is outside the places that the plugin opens. | Open the file with the Unraid file browser or another tool. |
 | A plain drag does not select text. | The terminal uses the mouse for the agent. | Hold Shift while you drag, or use the **Copy from terminal** icon. |
@@ -206,3 +208,10 @@ When the plugin types a fixed notice into an agent (for example, a Relay notice)
 - [Getting started](getting-started.md): the first-run guide, which explains copy and paste in short.
 - [Settings reference](settings-reference.md): every setting, with allowed values.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Debug Console, for problems that this page does not solve.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-16** — A path in the terminal is a link only when the file exists. A path with no file type (`~/bin/backup`) and a bare file name in the workspace folder (`README.md`) can be links too. Spec `docs/specs/TMUX_PATH_LINKS.md`, issue #544.
+
+</details>
