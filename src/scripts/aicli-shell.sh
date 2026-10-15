@@ -783,6 +783,30 @@ _aicli_discover_claude_chat() {
     [ -n "$_newest_jsonl" ] && basename "$_newest_jsonl" .jsonl
 }
 
+# True when Grok Build has a saved session for the folder the agent starts in.
+# Grok keeps one directory per folder, named with the URL-encoded path
+# (~/.grok/sessions/%2Fmnt%2Fuser%2Fwork/<session-id>), and '--continue' finds
+# only a session of the current folder. The store root also holds a shared
+# search index (session_search.sqlite), so "any file in the store" is true after
+# the first Grok run anywhere: a new workspace in a new folder then ran
+# '--continue', Grok exited with "No session found for current directory", and
+# a slow (>= 3 s) exit parked the workspace (#530, live-agents run 2026-10-15).
+_aicli_grok_has_session_here() {
+    local _dir="${AICLI_CWD:-$AICLI_WORKSPACE_PATH}" _store="$HOME_DIR/.grok/sessions"
+    local _d _name _decoded
+    [ -n "$_dir" ] && [ -d "$_store" ] || return 1
+    [ "$_dir" = "/" ] || _dir="${_dir%/}"
+    for _d in "$_store"/*/; do
+        [ -d "$_d" ] || continue
+        _name=$(basename "$_d")
+        _decoded=$(printf '%b' "${_name//%/\\x}")
+        [ "$_decoded" = "/" ] || _decoded="${_decoded%/}"
+        [ "$_decoded" = "$_dir" ] || continue
+        [ -n "$(find "$_d" -mindepth 1 -maxdepth 1 2>/dev/null | head -1)" ] && return 0
+    done
+    return 1
+}
+
 # Refresh the in-memory and durable resume ids after Claude has had a chance to
 # write its active conversation. This must run before an automatic relaunch so
 # /resume switches and a newly-created fresh chat both resume the correct
@@ -1284,7 +1308,9 @@ while true; do
             can_resume=1
         fi
     elif [ "$AGENT_ID" == "grok-build" ]; then
-        if [ -d "$HOME_DIR/.grok/sessions" ] && [ -n "$(find "$HOME_DIR/.grok/sessions" -type f 2>/dev/null)" ]; then
+        # #530: '--continue' resumes only a session of the CURRENT folder, so
+        # look in this folder's own session directory, not the whole store.
+        if _aicli_grok_has_session_here; then
             can_resume=1
         fi
     elif [ "$AGENT_ID" == "kimi-code" ]; then
