@@ -223,7 +223,10 @@
         // 2026-09-09) — a tool validated a destructive request and is waiting for a
         // human, not a worker. Distinct purple so it reads as "needs YOUR action",
         // not just another in-progress task.
-        + '.status.pending_approval { background: rgba(155,89,182,0.2); color: #9b59b6; }'
+        // Text mixed with the theme text colour like the labels above: plain
+        // purple on its own tint was 3.6:1 (white) and 3.0:1 (black); the gate's
+        // axe check failed on it (#540).
+        + '.status.pending_approval { background: rgba(155,89,182,0.2); color: color-mix(in srgb, #9b59b6 50%, var(--text-color, #e0e0e0)); }'
         + '.pill .dot.approve { background: #9b59b6; animation: aicli-act-pulse 1.2s ease-in-out infinite; }'
         // relay_waiting (RELAY_WAITING_PILL.md, 2026-09-09): a Relay notice the
         // readiness gate held back, now visible and one click from delivered.
@@ -236,11 +239,11 @@
         // Force inject types into a pane the plugin still judges busy. It is the
         // operator overruling a safety check, so it is amber, not the calm teal of
         // the "go and look" step that precedes it.
-        + '.btn.force { border-color: #e68a00; color: #e68a00; font-weight: 700; }'
+        + '.btn.force { border-color: #e68a00; color: color-mix(in srgb, #e68a00 50%, var(--text-color, #e0e0e0)); font-weight: 700; }'
         + '.row .step { margin-top: 4px; font-size: 11px; opacity: 0.65; word-break: break-word; }'
-        + '.row .err { margin-top: 4px; font-size: 11px; color: #d9534f; word-break: break-word; }'
+        + '.row .err { margin-top: 4px; font-size: 11px; color: color-mix(in srgb, #d9534f 60%, var(--text-color, #e0e0e0)); word-break: break-word; }'
         + '.row .consequence { margin-top: 4px; font-size: 11px; opacity: 0.85; word-break: break-word; }'
-        + '.btn.approve { border-color: #9b59b6; color: #9b59b6; font-weight: 700; }'
+        + '.btn.approve { border-color: #9b59b6; color: color-mix(in srgb, #9b59b6 50%, var(--text-color, #e0e0e0)); font-weight: 700; }'
         + '.bar { margin-top: 6px; height: 4px; border-radius: 2px; overflow: hidden;'
         + '  background: rgba(255,255,255,0.08); }'
         + '.bar > div { height: 100%; background: var(--orange, #e68a00); transition: width 0.3s ease-out; }'
