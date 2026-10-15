@@ -94,7 +94,7 @@
                     } else {
                         swal('Not removed', (res && res.message) || 'Unknown error. Check the Debug Console.', 'error');
                     }
-                    if (typeof refreshStats === 'function') refreshStats();
+                    if (typeof refreshStats === 'function') refreshStats(); if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
                 });
             });
         });

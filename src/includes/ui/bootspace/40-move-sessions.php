@@ -126,7 +126,7 @@
                     unlift();
                     if (r && r.status === 'queued') {
                         swal({ title: 'Move queued', text: r.message || 'Watch the activity tray for progress.', type: 'info', timer: 3000, showConfirmButton: false });
-                        if (typeof window.refreshStats === 'function') window.refreshStats();
+                        if (typeof window.refreshStats === 'function') window.refreshStats(); if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
                     } else {
                         fail(r && r.message);
                     }
@@ -188,7 +188,7 @@
                     unlift();
                     if (r && r.status === 'queued') {
                         swal({ title: 'Queued', text: r.message || 'Watch the activity tray for progress.', type: 'info', timer: 3000, showConfirmButton: false });
-                        if (typeof window.refreshStats === 'function') window.refreshStats();
+                        if (typeof window.refreshStats === 'function') window.refreshStats(); if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
                     } else {
                         fail(r && r.message);
                     }
