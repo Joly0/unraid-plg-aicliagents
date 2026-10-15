@@ -10,6 +10,8 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/HomeCacheService.php';
+
 class ConfigService {
     const CONFIG_PATH = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
     private static ?string $lastWorkspaceSaveMessage = null;
@@ -206,6 +208,11 @@ class ConfigService {
             // or below this is still sent in chunks when it is bigger than one
             // chunk — this setting only bounds the TOTAL file size.
             'upload_max_bytes'                      => '536870912',
+            // BOOT_DISK_SPACE.md R5: where the caches of a plain-folder home live.
+            // 'ram' (a tmpfs for each home, capped) or 'pool' (a folder on a pool).
+            'home_cache_location'                   => 'ram',
+            'home_cache_path'                       => '',
+            'home_cache_ram_mb'                     => '1024',
         ];
 
         if (!file_exists(self::CONFIG_PATH)) {
@@ -337,6 +344,18 @@ class ConfigService {
             $newConfig['storage_backend_mode'] = StorageBackendPolicyService::normalizeMode(
                 $newConfig['storage_backend_mode']
             );
+        }
+
+        // BOOT_DISK_SPACE.md R5: the three cache settings. A bad value is replaced, never stored.
+        if (array_key_exists('home_cache_location', $newConfig)) {
+            $newConfig['home_cache_location'] = HomeCacheService::normaliseLocation($newConfig['home_cache_location']);
+        }
+        if (array_key_exists('home_cache_ram_mb', $newConfig)) {
+            $newConfig['home_cache_ram_mb'] = HomeCacheService::normaliseRamMb($newConfig['home_cache_ram_mb']);
+        }
+        if (array_key_exists('home_cache_path', $newConfig)) {
+            $newConfig['home_cache_path'] = HomeCacheService::normalisePath(
+                $newConfig['home_cache_path'], (string)(self::getConfig()['home_cache_path'] ?? ''));
         }
 
         if (isset($newConfig['storage_upper_mode'])) {

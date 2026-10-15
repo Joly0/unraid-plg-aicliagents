@@ -22,6 +22,11 @@ log() {
 
 log "Array disks mounted. Checking for deferred storage restoration..."
 
+# BOOT_DISK_SPACE.md R5: the pool is back. Plain homes whose caches fell back to
+# RAM at array stop go back to the pool folder when the setting asks for it.
+# A bind that is busy stays on RAM until the home restarts. Best effort.
+timeout 20 bash "$EMHTTP_DEST/src/scripts/storage/home-cache.sh" reapply >/dev/null 2>&1 || true
+
 # 1. Clean up emergency mode if active
 if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
     log "Emergency mode detected. Cleaning up and restoring normal operation..."

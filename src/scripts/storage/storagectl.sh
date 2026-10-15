@@ -934,6 +934,16 @@ _pt_mount_versioned() {
     emit_json 0 "ok" ""; exit 0
 }
 
+# BOOT_DISK_SPACE.md R5 (#537): a plain HOME gets its cache folders (home_cache_dirs)
+# bound to RAM or to a pool folder, so caches do not fill the boot disk. Agents
+# and layered homes are not touched. Never fails the mount.
+_pt_cache_step() {
+    [ "$TYPE" = "home" ] || return 0
+    declare -f home_cache_mount >/dev/null 2>&1 || return 0
+    home_cache_mount "$ID" "${OWNER:-$ID}" "$1" "$PERSIST" 2>/dev/null || true
+    return 0
+}
+
 _pt_mount() {
     local mnt pdir; mnt="$(_mnt_point)"; pdir="$(_pt_dir)"
     guard_path "$PERSIST" "PERSIST" || { emit_json 1 "failed" "guard_reject"; exit 1; }
@@ -957,6 +967,7 @@ _pt_mount() {
         # #304 sat on the mount point, this branch reported "ok", and the agent
         # stayed "[Agent Binary Missing]" with its install on disk.
         if [ "$(stat -L -c '%d:%i' "$mnt" 2>/dev/null)" = "$(stat -L -c '%d:%i' "$pdir" 2>/dev/null)" ]; then
+            _pt_cache_step "$mnt"   # idempotent: a bind that is in place stacks nothing
             emit_json 0 "ok" ""; exit 0
         fi
         # Something else is mounted. Remove it only when nothing holds it (a real
@@ -969,6 +980,7 @@ _pt_mount() {
     fi
     if mount --bind "$pdir" "$mnt" 2>/dev/null; then
         lifecycle_log "info" "storagectl" "passthrough_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$pdir\"}" 2>/dev/null || true
+        _pt_cache_step "$mnt"
         emit_json 0 "ok" ""; exit 0
     fi
     _sc_err "passthrough bind failed: $pdir -> $mnt"

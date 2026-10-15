@@ -252,8 +252,18 @@ _stop_umount() {
 # 8a. Unmount home overlays
 WORK_BASE="/tmp/unraid-aicliagents/work"
 if [ -d "$WORK_BASE" ]; then
+    # BOOT_DISK_SPACE.md R5: the cache binds of a plain home sit inside the home
+    # mount and may live on a pool. Remove them first (lazily when busy: this
+    # runs at array stop and shutdown), then the home, then the RAM cache.
+    source "$EMHTTP_DEST/src/scripts/storage/common.sh" 2>/dev/null || true
     for mnt in "$WORK_BASE"/*/home; do
+        _hc_id=""
+        if declare -f home_cache_id_of_mount >/dev/null 2>&1; then
+            _hc_id="$(home_cache_id_of_mount "$mnt" 2>/dev/null || true)"
+        fi
+        [ -z "$_hc_id" ] || home_cache_release_binds "$_hc_id" "$mnt" 1 2>/dev/null || true
         _stop_umount "$mnt"
+        [ -z "$_hc_id" ] || home_cache_release_ram "$_hc_id" 1 2>/dev/null || true
     done
 fi
 

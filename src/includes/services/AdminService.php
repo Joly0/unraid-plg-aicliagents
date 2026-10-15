@@ -589,6 +589,11 @@ class AdminService {
 
             'consolidate_stage_path'            => ['group' => 'consolidate', 'description' => 'Work folder for storage jobs: a folder on a pool or array disk for temporary copies during a merge or a conversion to plain folders when the boot disk has no room. Empty means the plugin chooses one. Never RAM, never the boot disk.'],
 
+            // BOOT_DISK_SPACE.md R5: caches of plain-folder homes
+            'home_cache_location' => ['group' => 'consolidate', 'description' => 'Cache location for plain-folder homes: ram (default) keeps the npm, pip and tool caches of a plain-folder home in RAM, so they do not fill the boot disk; pool keeps them in a folder on a pool.'],
+            'home_cache_path'     => ['group' => 'consolidate', 'description' => 'Cache folder on a pool: the folder under /mnt/<pool> that holds the caches of plain-folder homes when the cache location is pool. When the pool is not mounted, the caches use RAM.'],
+            'home_cache_ram_mb'   => ['group' => 'consolidate', 'description' => 'RAM cache size per home, in MB (256 to 8192, default 1024): the most RAM the caches of one plain-folder home can use.'],
+
             // ---- boot integrity ----
             'boot_integrity_strict' => ['group' => 'boot_integrity', 'description' => 'Blocks boot when a storage integrity check fails, instead of only warning.'],
             'verify_sha256_on_boot' => ['group' => 'boot_integrity', 'description' => 'Checks file hashes on every boot, instead of only file size and time.'],

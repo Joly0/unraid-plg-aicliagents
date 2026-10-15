@@ -143,6 +143,16 @@ class HealthService {
         } catch (\Throwable $e) {
             $checks['favourites'] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
         }
+        // BOOT_DISK_SPACE.md R5: `home_cache_ram` is CONDITIONAL, like `favourites` -
+        // absent while no plain-folder home keeps its caches in RAM.
+        try {
+            $caps = HomeCacheService::ramCaps();
+            if ($caps !== []) {
+                $checks['home_cache_ram'] = HomeCacheService::evalRamCaps($caps, HomeCacheService::totalRamBytes());
+            }
+        } catch (\Throwable $e) {
+            $checks['home_cache_ram'] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
+        }
         return [
             'schema'             => self::SCHEMA_VERSION,
             'overall'            => self::aggregate($checks),

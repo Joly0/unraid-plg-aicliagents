@@ -69,6 +69,8 @@ class StorageHandler {
             // BOOT_DISK_SPACE.md R4: old agent versions
             case 'agent_old_versions':          return self::agentOldVersions();      // read-only, no Nchan publish
             case 'remove_old_versions':         $result = self::removeOldVersionsAction(); break;
+            case 'clear_home_caches':           $result = self::clearHomeCaches(); break; // BOOT_DISK_SPACE.md R5: empty the caches of a plain home
+            case 'get_home_cache_status':       return self::homeCacheStatus();    // BOOT_DISK_SPACE.md R5: read-only
             case 'get_home_sessions':            return self::getHomeSessions();    // R1: read-only, list open sessions for home consolidate warning
             case 'backup_home':                 $result = self::backupHomeAction(); break; // HOME_BACKUP.md
             case 'backup_status':               return self::backupStatusAction();  // HOME_BACKUP.md: read-only, no Nchan publish
@@ -108,7 +110,7 @@ class StorageHandler {
                 'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'preflight_storage_backend', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
-                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
+                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
@@ -1572,6 +1574,30 @@ class StorageHandler {
         } catch (\InvalidArgumentException $e) {
             return ['status' => 'error', 'message' => 'invalid_agent'];
         }
+    }
+
+    /**
+     * AJAX `clear_home_caches` (BOOT_DISK_SPACE.md R5): GET/POST user=<home id>. Empties the
+     * cache folders of a plain-folder home. Refused while a workspace of that home runs.
+     */
+    private static function clearHomeCaches(): array {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = 'root';
+        aicli_log("AJAX Request: Clear caches of home $user", AICLI_LOG_INFO);
+        $r = \AICliAgents\Services\HomeCacheService::clear($user);
+        if (($r['status'] ?? '') === 'ok') {
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+                'storage', 'home_caches_cleared', ['id' => $user, 'freed_bytes' => (int)($r['freed_bytes'] ?? 0)]);
+        }
+        return $r;
+    }
+
+    /** AJAX `get_home_cache_status` (read-only): GET user=<home id>. */
+    private static function homeCacheStatus(): array {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = 'root';
+        return ['status' => 'ok'] + \AICliAgents\Services\HomeCacheService::status($user);
     }
 
     /** AJAX `convert_storage` (#496): GET/POST type=home, id=<user>, optional continue_after=0. */

@@ -306,6 +306,48 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </div>
                         </dd>
 
+                        <?php /* BOOT_DISK_SPACE.md R5 (#537): where the caches of a plain-folder home live.
+                           Keys: home_cache_location, home_cache_path, home_cache_ram_mb. */ ?>
+                        <dt>Cache location for plain-folder homes</dt>
+                        <dd>
+                            <select name="home_cache_location" aria-label="Cache location for plain-folder homes" data-testid="home-cache-location" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['home_cache_location'] ?? 'ram', 'ram', _('RAM (default): no boot disk use, emptied when the server restarts'))?>
+                                <?=mk_option($config['home_cache_location'] ?? 'ram', 'pool', _('A folder on a pool'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Tools such as npm and pip keep downloaded files in cache folders. In a plain-folder home these folders do not use the boot disk: they live in RAM, or in a folder on a pool.
+                                A cache is only a copy that a tool downloads again, so a restart that empties it loses nothing. When the pool is not mounted, the caches use RAM.
+                            </div>
+                        </dd>
+
+                        <dt>Cache folder on a pool</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="text" name="home_cache_path" id="home_cache_path" aria-label="Cache folder on a pool" data-testid="home-cache-path"
+                                       value="<?=htmlspecialchars((string)($config['home_cache_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                       placeholder="/mnt/cache/aicli-caches" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                <button type="button" class="aicli-btn-slim" onclick="openPathPicker('home_cache_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Used when the cache location is a pool. The folder must be on a pool, for example /mnt/cache/aicli-caches. A user share (/mnt/user) is not accepted.
+                                Each home gets its own folder inside it.
+                            </div>
+                        </dd>
+
+                        <dt>RAM cache size per home</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="home_cache_ram_mb" aria-label="RAM cache size per home" data-testid="home-cache-ram-mb"
+                                       value="<?=htmlspecialchars((string)($config['home_cache_ram_mb'] ?? '1024'), ENT_QUOTES, 'UTF-8')?>"
+                                       min="256" max="8192" step="256" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">MB</span>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                The most RAM the caches of one plain-folder home can use. The RAM is used only while the caches hold data. A tool whose cache is full gets a "no space" error until you clear the caches.
+                                The new size applies the next time the home starts. From 256 to 8192 MB.
+                            </div>
+                        </dd>
+
                         <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
                            only — stored in localStorage, never sent to the server on its own, and
                            never round-tripped through this form's own action=save. It travels only

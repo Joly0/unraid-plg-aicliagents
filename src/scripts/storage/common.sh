@@ -19,6 +19,14 @@ if ! declare -f entity_upper_mode >/dev/null 2>&1; then
     unset _cmn_storage_dir
 fi
 
+# BOOT_DISK_SPACE.md R5: cache folders of a plain-folder home (RAM or pool).
+if ! declare -f home_cache_apply >/dev/null 2>&1; then
+    _cmn_hc_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+    # shellcheck source=home_cache.sh
+    [ -f "$_cmn_hc_dir/home_cache.sh" ] && source "$_cmn_hc_dir/home_cache.sh" 2>/dev/null
+    unset _cmn_hc_dir
+fi
+
 # Ensure debug log directory exists
 mkdir -p "$(dirname "$DEBUG_LOG")"
 
@@ -1385,7 +1393,17 @@ work_folder_choose() {
 
 # Regenerable caches a conversion does not copy (the same set a home merge
 # prunes, storage_ops.sh op_consolidate). The folders stay, their content does not.
-CONVERT_CACHE_EXCLUDES="/.npm/* /.cache/* /.bun/install/* /.claude/cache/* /.claude/shell-snapshots/* /.claude/telemetry/*"
+# BOOT_DISK_SPACE.md R5: the ONE list of cache folders of a home, relative to the
+# home, one per line. The cache redirect of a plain home (home_cache_*) and this
+# exclude list both read it. The layered merge prune (_bake_prune_patterns) is a
+# separate list with the same intent; a test compares the two.
+# NOT here: .claude/plugins (installed plugins) and .gemini/tmp (chat logs).
+home_cache_dirs() {
+    printf '%s\n' .npm .cache .bun/install/cache .claude/cache .claude/shell-snapshots .claude/telemetry tmp
+}
+
+CONVERT_CACHE_EXCLUDES="$(home_cache_dirs | sed 's#^#/#; s#$#/*#' | tr '\n' ' ')"
+CONVERT_CACHE_EXCLUDES="${CONVERT_CACHE_EXCLUDES% }"
 
 # _rsync_pat_escape <rel> — escape rsync wildcard characters in a literal path.
 _rsync_pat_escape() {
@@ -2194,15 +2212,30 @@ _pending_release_sweepable() {
 # 0 when the mount is gone (or was never mounted). 1 when it is still busy: the
 # mount stays, the holders go to the log, and the mount is queued for the sweep.
 umount_or_keep() {
-    local mnt="${1:-}" what="${2:-mount}" tries="${3:-5}" i holders
+    local mnt="${1:-}" what="${2:-mount}" tries="${3:-5}" i holders _hc_id=""
     [ -n "$mnt" ] || return 0
     mountpoint -q "$mnt" 2>/dev/null || return 0
     case "$tries" in ''|*[!0-9]*|0) tries=1 ;; esac
+    # BOOT_DISK_SPACE.md R5: the cache binds of a plain home sit inside the home
+    # mount. They go first, or the home unmount fails as busy.
+    if declare -f home_cache_id_of_mount >/dev/null 2>&1 && _hc_id="$(home_cache_id_of_mount "$mnt")"; then
+        if ! home_cache_release_binds "$_hc_id" "$mnt"; then
+            echo "[umount] cache binds of the home at $mnt are busy; the home stays mounted" >&2
+            home_cache_reapply "$_hc_id" 2>/dev/null || true
+            return 1
+        fi
+    else
+        _hc_id=""
+    fi
     for ((i = 1; i <= tries; i++)); do
-        umount "$mnt" 2>/dev/null && return 0
+        if umount "$mnt" 2>/dev/null; then
+            [ -z "$_hc_id" ] || home_cache_release_ram "$_hc_id" 2>/dev/null || true
+            return 0
+        fi
         [ "$i" -lt "$tries" ] && sleep "${AICLI_UMOUNT_RETRY_S:-1}"
     done
-    mountpoint -q "$mnt" 2>/dev/null || return 0
+    mountpoint -q "$mnt" 2>/dev/null || { [ -z "$_hc_id" ] || home_cache_release_ram "$_hc_id" 2>/dev/null || true; return 0; }
+    [ -z "$_hc_id" ] || home_cache_reapply "$_hc_id" 2>/dev/null || true
     holders=""
     if command -v fuser >/dev/null 2>&1; then
         holders="$(fuser -vm "$mnt" 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/["\\]/ /g' | cut -c1-600)"

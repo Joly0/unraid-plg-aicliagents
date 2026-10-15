@@ -3822,6 +3822,8 @@ if [ "$TYPE" = "home" ]; then
     if mount --bind "$_GR_PT_DIR" "$MNT_POINT" 2>/dev/null; then
         lifecycle_log "info" "storagectl" "passthrough_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$_GR_PT_DIR\"}" 2>/dev/null || true
         log "Plain home bind mounted at $MNT_POINT."
+        # BOOT_DISK_SPACE.md R5: the caches of the new plain home go to RAM or a pool.
+        { declare -f home_cache_mount >/dev/null 2>&1 && home_cache_mount "$ID" "$ID" "$MNT_POINT" "$PERSIST_PATH" 2>/dev/null; } || true
     else
         log "Bind mount failed (non-fatal) — the next mount binds the plain folder."
     fi
@@ -4044,6 +4046,10 @@ if [ "$_GR_TD" -eq 0 ]; then
     if mount --bind "$_GR_PT_DIR" "$MNT_POINT" 2>/dev/null; then
         lifecycle_log "info" "storagectl" "passthrough_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$_GR_PT_DIR\"}" 2>/dev/null || true
         log "Passthrough bind mounted at $MNT_POINT."
+        # BOOT_DISK_SPACE.md R5: a plain home gets its cache binds (agents do not).
+        if [ "$TYPE" = "home" ] && declare -f home_cache_mount >/dev/null 2>&1; then
+            home_cache_mount "$ID" "$ID" "$MNT_POINT" "$PERSIST_PATH" 2>/dev/null
+        fi
     else
         log "Passthrough bind failed (non-fatal) — the next mount binds via the passthrough path."
     fi

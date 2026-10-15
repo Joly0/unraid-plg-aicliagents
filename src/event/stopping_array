@@ -194,6 +194,11 @@ else
         done
     fi
 
+    # BOOT_DISK_SPACE.md R5: a cache bind that lives on a pool would hold that
+    # pool when the array stops. Move the cache binds of plain homes to RAM first.
+    # Bounded and best effort: it can never keep the array from stopping.
+    timeout 20 bash "$EMHTTP_DEST/src/scripts/storage/home-cache.sh" repoint-ram >/dev/null 2>&1 || true
+
     # Authoritative array-cwd sweep — ALWAYS runs, independent of the tmux pass.
     # tmux enumeration can return empty at stop-time (server momentarily
     # unresponsive — seen on the test server: a live claude session invisible to
