@@ -60,6 +60,7 @@ require_once "$ui_path/ManagerGlobalState.php";
 require_once "$ui_path/EventStream.php";
 require_once "$ui_path/ManagerLogScripts.php";
 require_once "$ui_path/ManagerStorageScripts.php";
+require_once "$ui_path/ManagerBootSpaceScripts.php"; // BOOT_DISK_SPACE.md (epic #534)
 require_once "$ui_path/ManagerStoreScripts.php";
 require_once "$ui_path/ManagerHubScripts.php";
 require_once "$ui_path/ManagerAutoContinueScripts.php"; // AUTO_CONTINUE_PATTERNS.md

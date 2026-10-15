@@ -12,6 +12,7 @@ This directory contains the modular UI fragments of the AICliAgents plugin, deco
 | `ManagerStoreTab.php` | HTML for the "Agent Store" marketplace. | `$registry`, `$csrf_token`. |
 | `ManagerLogScripts.php` | JS logic for log viewer (copy, clear, switch) + R-08 support/share UX (bundle download, forum post, GitHub issue, known issues). | jQuery, SweetAlert. |
 | `ManagerStorageScripts.php` | JS logic for storage status and maintenance. | jQuery, SweetAlert. |
+| `ManagerBootSpaceScripts.php` | Loader for the Boot disk space tools: defines `window.aicliBootSpace` and includes `bootspace/*.php` (BOOT_DISK_SPACE.md, epic #534). | jQuery, SweetAlert. |
 | `ManagerStoreScripts.php` | JS logic for agent marketplace actions. | jQuery, SweetAlert. |
 | `ManagerHubTab.php` | HTML for the "Config Hub" tab (MCP server hub, OP #1362). | ManagerHubScripts. |
 | `ManagerHubScripts.php` | JS logic for the Config Hub (fetch() pattern, drift UI). | window.csrf_token, SweetAlert. |

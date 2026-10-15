@@ -49,6 +49,10 @@
              docs/specs/STORAGE_DURABILITY_SUPERVISOR.md §"Storage-tab redesign
              under J". -->
 
+        <!-- BOOT_DISK_SPACE.md R1 (epic #534): the Boot disk space card. Filled by the
+             bootspace/ fragments (ManagerBootSpaceScripts.php). Empty until then. -->
+        <div id="aicli-boot-space-card"></div>
+
         <!-- Home Storage Section -->
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; margin-top:24px;">
             <div style="display:flex; align-items:center; gap:12px;">
