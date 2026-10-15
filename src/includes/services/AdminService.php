@@ -594,6 +594,8 @@ class AdminService {
             'home_cache_location' => ['group' => 'consolidate', 'description' => 'Cache location for plain-folder homes: ram (default) keeps the npm, pip and tool caches of a plain-folder home in RAM, so they do not fill the boot disk; pool keeps them in a folder on a pool.'],
             'home_cache_path'     => ['group' => 'consolidate', 'description' => 'Cache folder on a pool: the folder under /mnt/<pool> that holds the caches of plain-folder homes when the cache location is pool. When the pool is not mounted, the caches use RAM.'],
             'home_cache_ram_mb'   => ['group' => 'consolidate', 'description' => 'RAM cache size per home, in MB (256 to 8192, default 1024): the most RAM the caches of one plain-folder home can use.'],
+            // BOOT_DISK_SPACE.md R6
+            'history_move_path'                 => ['group' => 'consolidate', 'description' => 'Folder for moved sessions: a folder under a pool (/mnt/<pool>/...) that receives old conversation sessions moved out of a home. Empty means none is chosen yet. Moved sessions cannot be resumed, and are not reachable while the array is stopped.'],
 
             // ---- boot integrity ----
             'boot_integrity_strict' => ['group' => 'boot_integrity', 'description' => 'Blocks boot when a storage integrity check fails, instead of only warning.'],

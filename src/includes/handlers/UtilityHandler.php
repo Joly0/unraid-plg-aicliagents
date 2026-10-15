@@ -198,6 +198,14 @@ class UtilityHandler {
             $_POST['consolidate_stage_path'] = self::normaliseStagePath(
                 $stage, (string)(\AICliAgents\Services\ConfigService::getConfig()['consolidate_stage_path'] ?? ''));
         }
+        // BOOT_DISK_SPACE.md R6: "Folder for moved sessions" is empty or a folder under
+        // /mnt/<pool>. A bad value keeps the stored one.
+        if (array_key_exists('history_move_path', $_POST)) {
+            require_once __DIR__ . '/../services/HistoryMoveService.php';
+            $hist = is_array($_POST['history_move_path']) ? '' : (string)$_POST['history_move_path'];
+            $_POST['history_move_path'] = \AICliAgents\Services\HistoryMoveService::normaliseSetting(
+                $hist, (string)(\AICliAgents\Services\ConfigService::getConfig()['history_move_path'] ?? ''));
+        }
         saveAICliConfig($_POST);
         // HOME_BACKUP.md: the Manager UI no longer posts backup_* fields here
         // (#287: each home saves its own settings through

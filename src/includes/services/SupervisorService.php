@@ -984,6 +984,12 @@ class SupervisorService {
         return $progress[$step] ?? 50;
     }
 
+    /** BOOT_DISK_SPACE.md R6: ops historymove and historyback. */
+    private static function isHistoryOp(string $op): bool {
+        require_once __DIR__ . '/HistoryJobService.php';
+        return HistoryJobService::isHistoryOp($op);
+    }
+
     /**
      * The tray opId a ledger job mirrors into. Every op except `backup`/
      * `restore` uses the generic `storage_job_<jobId>` id
@@ -1102,6 +1108,10 @@ class SupervisorService {
                             // source (#231), never a raw token.
                             require_once __DIR__ . '/TaskService.php';
                             $step = 'Already saved. ' . TaskService::deferReasonHuman($defer, 'bake');
+                        } elseif (self::isHistoryOp($op)) {
+                            // BOOT_DISK_SPACE.md R6: say how many files moved and how many stayed.
+                            $step = HistoryJobService::doneStep($jobId);
+                            HistoryJobService::cleanup($jobId);
                         } elseif ($op === 'graduate' && strpos($entity, 'home/') === 0) {
                             // #496: say what changed; the home needs no tidy-ups from now on.
                             $step = 'The home now uses plain folders. It needs no more tidy-ups.';
@@ -1132,6 +1142,10 @@ class SupervisorService {
                         if ($defer !== '') {
                             require_once __DIR__ . '/TaskService.php';
                             $err = 'Could not finish. ' . TaskService::deferReasonHuman($defer, (string)($job['op'] ?? ''));
+                        } elseif (self::isHistoryOp((string)($job['op'] ?? '')) && ($historyReason = HistoryJobService::failureReason($jobId)) !== '') {
+                            // BOOT_DISK_SPACE.md R6: the job wrote its reason ("The array is stopped...").
+                            $err = $historyReason;
+                            HistoryJobService::cleanup($jobId);
                         } elseif (($convertReason = self::convertFailureReason((string)($job['op'] ?? ''), (string)($job['entity'] ?? ''))) !== '') {
                             // #496 (John, 2026-10-14): "The storage job stopped with an
                             // error" told him nothing. The conversion writes its reason.
@@ -1162,6 +1176,10 @@ class SupervisorService {
                     } elseif ($jobOp === 'restore') {
                         $step = self::restorePhaseStep((string)($job['phase'] ?? ''));
                         $progress = self::restorePhaseProgress($step);
+                    } elseif (self::isHistoryOp($jobOp)) {
+                        // BOOT_DISK_SPACE.md R6: counts from the progress file of the job.
+                        $step = HistoryJobService::runningStep($jobOp, $jobId);
+                        $progress = HistoryJobService::runningProgress($jobId);
                     } elseif ($jobOp === 'consolidate' && (string)($job['phase'] ?? '') !== '') {
                         // Forgejo #454: a home merge names its phase and moves its bar.
                         $pct = self::consolidateWritePercent((string)($job['entity'] ?? ''));

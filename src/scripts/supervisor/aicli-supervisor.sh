@@ -2424,6 +2424,79 @@ _op_backup_home() {
     declare -f _backup_delete_options >/dev/null 2>&1 && _backup_delete_options "$job_id"
 }
 
+# Op handler: historymove / historyback (docs/specs/BOOT_DISK_SPACE.md R6, #539).
+# Moves old conversation sessions of a home to a pool folder, or brings them
+# back. The work is in scripts/storage/history-move.php (HistoryJobService::run):
+# it reads the job options file, copies and checks each file, writes a progress
+# file and a result file that the Activity tray reads. This wrapper owns only
+# the job-ledger/work-state bookkeeping every op handler owns. Exit 0 = done,
+# any other exit = failed (the reason is in the result file). Never deferred.
+# ---------------------------------------------------------------------------
+_op_history() {
+    local op="${1:-historymove}"
+    local type="${2:-home}"
+    local id="${3:-}"
+    local reason="${4:-user_history}"
+    local job_id="${5:-}"
+
+    local entity="${type}/${id}"
+    _OP_EXIT=""
+    _OP_DEFER_REASON=""
+
+    local runner="${STORAGE_DIR:-}/history-move.php"
+    if [ -z "$id" ] || [ -z "$job_id" ] || [ ! -f "$runner" ] || ! command -v php >/dev/null 2>&1; then
+        log_error "History job for $entity cannot run: missing id, job id, runner or php"
+        _OP_EXIT=1
+        return 0
+    fi
+
+    local started_at
+    started_at=$(date +%s)
+    local max_dur="${HISTORY_MAX_DURATION_S:-21600}"
+
+    log_info "Starting $op: $entity (reason=$reason, job=$job_id)"
+    lifecycle_log "info" "supervisor" "${op}_start" \
+        "{\"entity\":\"$entity\",\"reason\":\"$reason\",\"job_id\":\"$job_id\"}" 2>/dev/null || true
+
+    # Background subshell, like _op_backup_home: the watchdog and _wait_op_child
+    # need a real PID, and the child must not hold the single-instance lock fd.
+    (
+        [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+        exec nice -n 10 php -d display_errors=0 "$runner" "$job_id"
+    ) &
+    local child_pid=$!
+
+    _CHILD_PID="$child_pid"
+    _CHILD_OP="$op"
+    _CHILD_ENTITY="$entity"
+    _CHILD_STARTED_AT="$started_at"
+    _CHILD_MAX_DURATION="$max_dur"
+
+    local qdepth
+    qdepth="$(queue_depth 2>/dev/null || echo 0)"
+    _atomic_json_write "$WORKFILE" "$(_running_work_json "$op" "$entity" "$child_pid" "$started_at" "$max_dur" "$qdepth")" || true
+    _atomic_json_write "$STATUSFILE" "$(_status_json running "$op" "$entity" "$qdepth" "$_LAST_COMPLETED_AT")" || true
+
+    _wait_op_child "$child_pid"
+    local exit_code="$_WAIT_OP_RC"
+    _OP_EXIT="$exit_code"
+
+    _CHILD_PID=""
+    _CHILD_OP=""
+    _CHILD_ENTITY=""
+    _LAST_COMPLETED_AT=$(date +%s)
+
+    if [ "$exit_code" -eq 0 ]; then
+        log_info "History job done: $op $entity"
+        lifecycle_log "info" "supervisor" "${op}_ok" "{\"entity\":\"$entity\",\"job_id\":\"$job_id\"}" 2>/dev/null || true
+    else
+        log_error "History job failed: $op $entity (exit=$exit_code)"
+        lifecycle_log "error" "supervisor" "${op}_failed" \
+            "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"exit_code\":$exit_code}" 2>/dev/null || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Op handler: restore (HOME_RESTORE.md). The heavy lifting (close/safety-
 # snapshot/rsync/verify/bake/relaunch) lives in the sourced backup_home.sh
 # function _restore_home_execute — this wrapper only owns the job-ledger/
@@ -4307,6 +4380,9 @@ _work_tick() {
                         ;;
                     backup)
                         _op_backup_home "$req_type" "$req_id" "$req_reason" "$req_job"
+                        ;;
+                    historymove|historyback)
+                        _op_history "$req_op" "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
                     restore)
                         _op_restore_home "$req_type" "$req_id" "$req_reason" "$req_job"

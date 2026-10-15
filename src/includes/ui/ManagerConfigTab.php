@@ -358,6 +358,18 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </div>
                         </dd>
 
+                        <?php /* BOOT_DISK_SPACE.md R6: the setting history_move_path. */ ?>
+                        <dt>Folder for moved sessions</dt>
+                        <dd>
+                            <input type="text" name="history_move_path" aria-label="Folder for moved sessions" data-testid="history-move-path"
+                                   value="<?=htmlspecialchars((string)($config['history_move_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                   placeholder="/mnt/pool/aicli-history" style="width: 100%;" <?=$autoSave?>>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                A folder on a pool, for example /mnt/cache/aicli-history. Storage, Boot disk space, Move old sessions puts old conversation sessions here to free the boot disk.
+                                Moved sessions cannot be resumed, and are not reachable while the array is stopped. Leave it empty until you move sessions.
+                            </div>
+                        </dd>
+
                         <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
                            only — stored in localStorage, never sent to the server on its own, and
                            never round-tripped through this form's own action=save. It travels only

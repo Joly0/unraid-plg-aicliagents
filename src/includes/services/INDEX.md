@@ -18,6 +18,9 @@ This directory contains the core business logic of the AICliAgents plugin, decom
 | `StorageMetricsService.php` | Provides status and usage statistics for agent and home storage. | < 150 lines. |
 | `StorageMigrationService.php` | Handles volume resizing and path migrations. | < 150 lines. |
 | `StorageTargetService.php` | S-11 (#1355): read-only ranked enumeration of persistence targets (pools/appdata/UD/array/user/flash via probeTarget) + shared per-kind preflight validation. | READ-ONLY; candidates capped at 12; AICLI_DISKS_INI/AICLI_SHARES_INI/AICLI_MNT_ROOT/AICLI_ITEST_MOUNTED_PATHS test hooks. |
+| `HistoryStoreService.php` | Boot disk space R6 (#539): where each registered agent keeps its conversation history, the size per agent, and the sessions older than N days. | READ-ONLY; one entry for each agent (a test fails for a new agent without one); skips links, files changed in 24 h and open files. |
+| `HistoryMoveService.php` | Boot disk space R6 (#539): move old sessions to a pool folder (copy, check size and SHA-256, then remove) and bring them back. | Write-ahead log `MOVED.wal`, list `MOVED.json`; never replaces a file in the home; refuses when the array is stopped. |
+| `HistoryJobService.php` | Boot disk space R6 (#539): the supervisor ops `historymove` and `historyback` (options, progress, result files; tray text). | State files in `/tmp/unraid-aicliagents/history` (`AICLI_HISTORY_STATE_DIR` in tests). |
 | `ValidationService.php` | Centralized input validation and sanitization. | < 150 lines. Pure validation, no I/O. |
 | `RedactionService.php` | Fail-closed layered redaction for the support bundle (R-08 #1371). | Verbatim value match (never regex); never logs values; AICLI_SECRETS_VAULT/DIR test hooks. |
 | `DiagnosticsService.php` | Redacted support bundle zip + ≤3KB share summary + known-issues match (R-08 #1371). | Allowlist-only sections; redaction self-test aborts the build; feed fetched only on explicit action. |

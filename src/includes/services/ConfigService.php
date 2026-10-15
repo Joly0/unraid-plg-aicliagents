@@ -144,6 +144,10 @@ class ConfigService {
             // NOTEBOOK_ANSWER_NOTIFY.md: tell the agent when a person answers in the Notebook (1 = on).
             'notebook_notify_agent'                => '1',
             'notebook_quiet_hours'                 => '',
+            // BOOT_DISK_SPACE.md R6: "Folder for moved sessions". Empty, or a folder under
+            // /mnt/<pool>. Old conversation sessions move there from the home (Storage tab,
+            // Boot disk space, Move old sessions).
+            'history_move_path'                    => '',
             // CONTINUE_ON_RESTART.md (2026-09-09): moved here from the Relay's
             // settings.json — this governs whether a WORKSPACE resumes its own
             // work after a restart, not Relay messaging. On by default, same as
