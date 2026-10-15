@@ -149,9 +149,24 @@ _hc_mkdir_owned() {
     return 0
 }
 
+# _hc_holders <dir> — "pid:name" of each process with its working folder or an
+# open file under <dir>, comma-separated (for the log).
+_hc_holders() {
+    local dir="${1%/}" scan="${AICLI_PROC_SCAN_DIR:-/proc}" d f out=""
+    for d in "$scan"/[0-9]*; do
+        [ -d "$d" ] || continue
+        for f in "$d/cwd" "$d"/fd/*; do
+            case "$(readlink "$f" 2>/dev/null)" in
+                "$dir"|"$dir"/*) out="$out${out:+,}${d##*/}:$(cat "$d/comm" 2>/dev/null)"; break ;;
+            esac
+        done
+    done
+    printf '%s' "${out:-unknown}"
+}
+
 # _hc_umount <target> <lazy_ok 0|1> — a real umount (3 tries). With lazy_ok a
-# target that stays busy is detached lazily and the holders are logged: used only
-# when the array stops, where a bind must never block the pool unmount.
+# target that stays busy is detached lazily: only stop-plugin.sh sets it (full
+# plugin stop or shutdown, where the home itself is detached the same way).
 _hc_umount() {
     local t="$1" lazy="${2:-0}" i
     mountpoint -q "$t" 2>/dev/null || return 0
@@ -293,7 +308,7 @@ _hc_ensure_tmpfs() {
 # home_cache_apply <id> <owner> <mnt> <persist> <location> <pool_path>
 # Bind each cache folder of the home to its source (RAM or pool). Idempotent: a
 # bind that already shows its source is left alone, so a second call stacks nothing.
-# HOME_CACHE_FORCE_LAZY=1 lets a busy old bind be detached lazily (array stop).
+# A busy old bind stays (never a lazy detach: #512); its holders are logged.
 # Returns 0 when the plan is applied (a folder that cannot be bound is logged and
 # stays on the boot disk).
 home_cache_apply() {
@@ -331,7 +346,7 @@ home_cache_apply() {
         if mountpoint -q "$tgt" 2>/dev/null; then
             a="$(stat -L -c '%d:%i' "$tgt" 2>/dev/null)"; b="$(stat -L -c '%d:%i' "$src" 2>/dev/null)"
             [ -n "$a" ] && [ "$a" = "$b" ] && continue
-            _hc_umount "$tgt" "${HOME_CACHE_FORCE_LAZY:-0}" || { cmn_log WARN home-cache "keep the old cache bind $tgt: busy"; continue; }
+            _hc_umount "$tgt" 0 || { cmn_log WARN home-cache "keep the old cache bind $tgt: busy ($(_hc_holders "$tgt"))"; continue; }
         fi
         if ! mount --bind "$src" "$tgt" 2>/dev/null; then
             cmn_log WARN home-cache "bind failed: $src -> $tgt (the cache stays on the boot disk)"
@@ -407,15 +422,17 @@ home_cache_reapply_all() {
 }
 
 # home_cache_repoint_ram_all — AT ARRAY STOP: each home whose caches are on a pool
-# gets RAM binds, so no cache bind holds the pool. A bind that stays busy is
-# detached lazily (the array stop must go on); its holders are logged.
+# gets RAM binds, so no cache bind holds the pool. A bind that stays busy (a
+# program has a file open in it) stays: a lazy detach would not free the pool
+# either, because the open file still holds it, and it would hide the holder
+# (#512). Its holders are logged; Unraid waits for them as for any open file.
 home_cache_repoint_ram_all() {
     local id owner mnt persist n=0
     for id in $(home_cache_state_ids); do
         [ "$(_hc_state_get "$id" location)" = "pool" ] || continue
         mnt="$(_hc_state_get "$id" mnt)"; owner="$(_hc_state_get "$id" owner)"; persist="$(_hc_state_get "$id" persist)"
         [ -n "$mnt" ] || continue
-        HOME_CACHE_FORCE_LAZY=1 home_cache_apply "$id" "$owner" "$mnt" "$persist" ram "" || true
+        home_cache_apply "$id" "$owner" "$mnt" "$persist" ram "" || true
         n=$((n + 1))
     done
     cmn_log INFO home-cache "array stop: moved the cache binds of $n home(s) to RAM"
