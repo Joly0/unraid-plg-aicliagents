@@ -27,9 +27,11 @@ class NpmSource implements AgentSource {
         $pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
         $versionSpec = $targetVersion ? "@$targetVersion" : "@latest";
 
+        // #549: a cache folder of its own, removed after the install (not ~/.npm in RAM).
+        $npmCache = UtilityService::npmCacheDir("install-$agentId");
         $cmd = "export PATH=$pluginDir/bin:\$PATH; cd " . escapeshellarg($agentDir)
              . " && npm install " . escapeshellarg($package . $versionSpec)
-             . " --no-audit --no-fund --loglevel info 2>&1";
+             . " --no-audit --no-fund --loglevel info --cache " . escapeshellarg($npmCache) . " 2>&1";
 
         $currentProgress = 20;
         $res = UtilityService::execStreaming($cmd, function($line, $isError) use (&$currentProgress, $progress) {
@@ -49,6 +51,7 @@ class NpmSource implements AgentSource {
                 usleep(100000);
             }
         });
+        UtilityService::removeNpmCacheDir($npmCache);
 
         if ($res !== 0) {
             LogService::log("NpmSource::fetch: npm install failed for $agentId (exit=$res)", LogService::LOG_ERROR, "NpmSource");

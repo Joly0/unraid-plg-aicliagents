@@ -147,6 +147,40 @@ class UtilityService {
     }
 
     /**
+     * #549: npm keeps its download cache in ~/.npm. For root on Unraid that is the
+     * RAM root disk, and nothing ever emptied it: every agent install, upgrade and
+     * version check added to it until the next reboot (1.9 GB on prod02 after one
+     * night of agent tests). Each npm call gets its own cache folder from here,
+     * and removes it with removeNpmCacheDir() when it ends. A folder that a killed
+     * call left behind is removed after a day. AICLI_NPM_CACHE_BASE moves the
+     * base folder (tests).
+     */
+    public static function npmCacheDir(string $tag): string {
+        $base = self::npmCacheBase();
+        @mkdir($base, 0700, true);
+        foreach ((array)@glob($base . '/*', GLOB_ONLYDIR) as $old) {
+            if (is_string($old) && @filemtime($old) < time() - 86400) self::removeNpmCacheDir($old);
+        }
+        $safe = preg_replace('/[^A-Za-z0-9_.-]/', '_', $tag);
+        $dir = $base . '/' . $safe . '-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        @mkdir($dir, 0700, true);
+        return $dir;
+    }
+
+    /** Removes a folder that npmCacheDir() gave; refuses any other path. */
+    public static function removeNpmCacheDir(string $dir): void {
+        $base = self::npmCacheBase();
+        $real = realpath($dir);
+        if ($real === false || strpos($real, rtrim((string)realpath($base), '/') . '/') !== 0) return;
+        exec('rm -rf ' . escapeshellarg($real));
+    }
+
+    private static function npmCacheBase(): string {
+        $env = getenv('AICLI_NPM_CACHE_BASE');
+        return rtrim(is_string($env) && $env !== '' ? $env : '/tmp/unraid-aicliagents/npm-cache', '/');
+    }
+
+    /**
      * Executes a command and streams output to a callback (real-time feedback).
      */
     public static function execStreaming($cmd, $callback) {

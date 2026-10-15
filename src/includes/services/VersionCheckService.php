@@ -127,9 +127,12 @@ class VersionCheckService {
 
                 LogService::log("Checking versions for $id ($pkg)...", LogService::LOG_DEBUG, "VersionCheck");
 
+                // #549: a cache folder of its own, removed after the call (not ~/.npm in RAM).
+                $npmCache = UtilityService::npmCacheDir("view-$id");
                 $cmd = "export PATH=$pluginDir/bin:\$PATH; timeout " . self::PER_AGENT_TIMEOUT
-                     . " npm view " . escapeshellarg($pkg) . " --json 2>/dev/null";
+                     . " npm view " . escapeshellarg($pkg) . " --json --cache " . escapeshellarg($npmCache) . " 2>/dev/null";
                 $output = shell_exec($cmd);
+                UtilityService::removeNpmCacheDir($npmCache);
 
                 if (empty($output)) {
                     LogService::log("Version check failed for $id: npm returned empty (timeout or registry unreachable).", LogService::LOG_WARN, "VersionCheck");

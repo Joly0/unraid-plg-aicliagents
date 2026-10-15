@@ -392,7 +392,9 @@ class InstallerService {
         );
 
         // Direct npm install — no SquashFS, no ZRAM overlay
-        $cmd = "export PATH=$pluginDir/bin:\$PATH; cd " . escapeshellarg($agentDir) . " && npm install " . escapeshellarg($package . "@$targetVersion") . " --no-audit --no-fund --loglevel info 2>&1";
+        // #549: a cache folder of its own, removed after the install (not ~/.npm in RAM).
+        $npmCache = UtilityService::npmCacheDir("emergency-$agentId");
+        $cmd = "export PATH=$pluginDir/bin:\$PATH; cd " . escapeshellarg($agentDir) . " && npm install " . escapeshellarg($package . "@$targetVersion") . " --no-audit --no-fund --loglevel info --cache " . escapeshellarg($npmCache) . " 2>&1";
 
         $currentProgress = 20;
         $res = UtilityService::execStreaming($cmd, function($line, $isError) use ($agentId, &$currentProgress) {
@@ -405,6 +407,7 @@ class InstallerService {
                 usleep(100000);
             }
         });
+        UtilityService::removeNpmCacheDir($npmCache);
 
         if ($res !== 0) {
             LogService::log("EMERGENCY INSTALL FAILED for $agentId (Exit: $res)", LogService::LOG_ERROR, "InstallerService");
