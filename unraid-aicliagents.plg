@@ -3,7 +3,7 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.15.03" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
-## 2026.10.15.02
+## 2026.10.15.03
 
 &gt; **The plugin is now open source under the MIT license.** The `LICENSE` file is at the top of the repository, and the licenses of the bundled libraries are in `THIRD_PARTY_NOTICES.md`. The public history now shows each change as its own commit, and `CONTRIBUTING.md` says how a pull request is handled. The Notebook hang warning from 2026.10.13.01 still applies: if an Unraid page hangs with the Notebook on, set **Notebook** to Off on the Configuration tab and tell us on GitHub.
 
@@ -19,6 +19,7 @@
 - **Fix: merging a home's layers works again on Unraid's mksquashfs 4.5** (reported on GitHub). The plugin checks what the installed mksquashfs supports before it asks for progress output. When a merge fails, the log now shows mksquashfs's own error message.
 - **Feat: a home kept in layers can be converted to plain folders** from its card on the Storage tab (**Convert to plain folders**). The home then needs no saves, merges or tidy-ups. Every workspace of the home closes and opens again, the Activity tray names each step, and the old layers are kept for 14 days. A conversion that fails rolls back cleanly.
 - **Fix: a removed agent layer frees its space on the flash at once,** and storage layers no longer stay attached after they are unmounted.
+- **Fix: installing, upgrading or checking agents for updates no longer fills your server's RAM.** npm kept every download in `/root/.npm`, which is in RAM on Unraid, until the next reboot. Each npm run now uses its own cache folder and removes it when it ends.
 
 **Terminals and workspaces**
 
