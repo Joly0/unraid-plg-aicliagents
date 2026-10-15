@@ -365,7 +365,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                    value="<?=htmlspecialchars((string)($config['history_move_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
                                    placeholder="/mnt/pool/aicli-history" style="width: 100%;" <?=$autoSave?>>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
-                                A folder on a pool, for example /mnt/cache/aicli-history. Storage, Boot disk space, Move old sessions puts old conversation sessions here to free the boot disk.
+                                A folder on a pool, for example /mnt/cache/aicli-history. Home Storage, Boot disk space, Move old sessions puts old conversation sessions here to free the boot disk.
                                 Moved sessions cannot be resumed, and are not reachable while the array is stopped. Leave it empty until you move sessions.
                             </div>
                         </dd>

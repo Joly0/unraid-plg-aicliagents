@@ -2285,7 +2285,7 @@ _op_graduate() {
                 "graduate_ok_${entity}" 3600
         elif [ "$closes_agent" -eq 1 ]; then
             _supervisor_notify "normal" "AICliAgents: Agent is now plain folders" \
-                "The agent $id is now plain folders. It starts faster and needs no merges. The old layers are kept for ${GRADUATED_RETENTION_DAYS} days; you can remove them sooner in Storage, Boot disk space." \
+                "The agent $id is now plain folders. It starts faster and needs no merges. The old layers are kept for ${GRADUATED_RETENTION_DAYS} days; you can remove them sooner in Home Storage, Boot disk space." \
                 "graduate_ok_${entity}" 3600
         else
             _supervisor_notify "normal" "AICliAgents: Storage graduated" \

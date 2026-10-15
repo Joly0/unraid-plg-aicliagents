@@ -1751,7 +1751,7 @@ class StorageHandler {
             $short = (int)substr($fits, strlen('no_room:'));
             return ['status' => 'error', 'reason' => 'no_room', 'shortfall_bytes' => $short,
                     'message' => 'There is not enough room. After the conversion at least 10% of the boot disk and 2 GB must stay free. About '
-                        . number_format($short / 1048576, 0) . ' MB are missing. Remove old versions or left-over files first (Storage, Boot disk space).'];
+                        . number_format($short / 1048576, 0) . ' MB are missing. Remove old versions or left-over files first (Home Storage, Boot disk space).'];
         }
         require_once __DIR__ . '/AgentHandler.php';
         $installBusy = $installBusy ?? [\AICliAgents\Handlers\AgentHandler::class, 'isInstallInProgress'];

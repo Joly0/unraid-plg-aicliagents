@@ -1032,7 +1032,7 @@ if [ "$cur_bytes" -eq 0 ]; then
     need_bytes=$(( _nf_mb * 1048576 ))
 fi
 if ! _layer_fits_space "$persist" "$need_bytes"; then
-    printf '[direct-stage] no space on the boot disk for the new version of %s: about %s MB needed, %s MB free — install not started. Open Storage, Boot disk space to see what uses the space; turn on Keep agents compressed (Configuration) to keep agents in compressed layers.\n' \
+    printf '[direct-stage] no space on the boot disk for the new version of %s: about %s MB needed, %s MB free — install not started. Open Home Storage, Boot disk space to see what uses the space; turn on Keep agents compressed (Configuration) to keep agents in compressed layers.\n' \
         "$id" "$_FIT_NEED_MB" "$_FIT_FREE_MB" >&2
     lifecycle_log "error" "stage" "direct_agent_stage_no_space" \
         "{\"id\":\"$id\",\"need_mb\":$_FIT_NEED_MB,\"free_mb\":\"$_FIT_FREE_MB\",\"current_bytes\":$cur_bytes}" 2>/dev/null || true
@@ -3659,7 +3659,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         _GR_NEED="$(( _GR_SRC_BYTES * 100 / _GR_RATIO ))"
         _GR_MODE="$(convert_plan_mode "$_GR_PERSIST_FREE" "$_GR_NEED" 134217728)"
         if [ "$_GR_MODE" != "direct" ]; then
-            _gr_reason "The boot disk has no room for the plain folder of this agent (about $(( _GR_NEED / 1048576 )) MB needed, $(( _GR_PERSIST_FREE / 1048576 )) MB free). Nothing was changed. Free some space (Storage, Boot disk space), then try again."
+            _gr_reason "The boot disk has no room for the plain folder of this agent (about $(( _GR_NEED / 1048576 )) MB needed, $(( _GR_PERSIST_FREE / 1048576 )) MB free). Nothing was changed. Free some space (Home Storage, Boot disk space), then try again."
             error "Agent $ID needs about $_GR_NEED bytes for its plain folder, only $_GR_PERSIST_FREE are free — refused."
             rm -rf "$_GR_META" 2>/dev/null || true
             rm -f "$_GR_CONVERT_LOCK" 2>/dev/null || true

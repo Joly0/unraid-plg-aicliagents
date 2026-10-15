@@ -387,7 +387,7 @@ When the boot disk is 85% full, the plugin sends an Unraid notification and show
 - Old agent versions are the biggest: "Remove old agent versions frees space."
 - The agents are the biggest: "The agents use most of it. Remove old agent versions to free space."
 
-Each warning ends with "Open Storage, Boot disk space." The notification is a link: a click opens the **Home Storage** tab at the card.
+Each warning ends with "Open Home Storage, Boot disk space." The notification is a link: a click opens the **Home Storage** tab at the card.
 
 ## Old agent versions
 
@@ -557,7 +557,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
-- **2026-10-16** — New: the card **Boot disk space** at the top of the **Home Storage** tab shows where the boot disk space goes, with one line and one button for each part, **Measure now**, and **Remove** for left-over items. The full-disk warning now names the biggest part and ends with "Open Storage, Boot disk space." Spec `docs/specs/BOOT_DISK_SPACE.md` (R1, R2), issues #538 and #531.
+- **2026-10-16** — New: the card **Boot disk space** at the top of the **Home Storage** tab shows where the boot disk space goes, with one line and one button for each part, **Measure now**, and **Remove** for left-over items. The full-disk warning now names the biggest part and ends with "Open Home Storage, Boot disk space." Spec `docs/specs/BOOT_DISK_SPACE.md` (R1, R2), issues #538 and #531.
 - **2026-10-16** — New setting **Keep the previous version for rollback** and the action **Remove old versions**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R4), issue #536.
 - **2026-10-16** — The caches of a plain-folder home live in RAM or on a pool, not on the boot disk: the fields **Cache location for plain-folder homes**, **Cache folder on a pool** and **RAM cache size per home**, the action **Clear caches**, and the Health warning for RAM caches. Spec `docs/specs/BOOT_DISK_SPACE.md`, issue #537.
 - **2026-10-16** — On an internal boot disk a new agent installs as plain folders unless **Keep agents compressed** is on, and the dialog **Convert agents to plain folders?** converts agents that have layers. Spec `docs/specs/BOOT_DISK_SPACE.md`, issue #535.

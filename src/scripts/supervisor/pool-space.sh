@@ -136,7 +136,7 @@ _pool_space_advice() {
         *)         a="" ;;
     esac
     [ -z "$a" ] || a+=" "
-    printf '%sOpen Storage, Boot disk space.' "$a"
+    printf '%sOpen Home Storage, Boot disk space.' "$a"
 }
 
 _pool_space_tick() {
