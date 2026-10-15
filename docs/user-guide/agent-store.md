@@ -218,6 +218,15 @@ Antigravity CLI is the case where the kept copy matters most. The vendor serves 
 
 The plugin does not delete kept copies by itself. They use space in your storage folder.
 
+## Remove old versions
+
+The storage line of an installed agent card has a link, **Remove old versions**. It frees space on the boot disk.
+
+1. Press **Remove old versions** on the card. Expect: a dialog lists the old versions, the space the removal frees, and the versions that stay because a workspace uses them.
+2. Press **Remove**. Expect: a second dialog says how much space you got back.
+
+The action removes old version folders, old storage layers and kept rollback copies. A version that a running workspace uses stays, and the dialog names the workspace. After the removal you cannot roll back to a removed version. The setting **Keep the previous version for rollback** in the **Configuration** tab decides whether the plugin keeps the last version by itself. See [Home and agent storage](storage.md).
+
 ## Uninstall
 
 1. Press **Uninstall** on the card.
@@ -408,3 +417,10 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 - [Home and agent storage](storage.md): where the agent layers live, and the layers of your homes.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Activity tray and the Debug Console.
 - [Settings reference](settings-reference.md): every setting on every tab.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-16** — The card has the link **Remove old versions**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R4), issue #536.
+
+</details>

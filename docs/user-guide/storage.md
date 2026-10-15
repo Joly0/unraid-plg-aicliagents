@@ -49,6 +49,7 @@ Open the **AI CLI Agents** page under Unraid's Settings menu. It has these tabs:
 | Choose the persistence engine | **Configuration** tab, field **Persistence engine** |
 | Choose how often the plugin saves | **Configuration** tab, field **Backup Interval** |
 | Choose when the plugin merges | **Configuration** tab, field **Consolidate Layer Ceiling** |
+| See where the boot disk space goes, and free it | **Home Storage** tab, card **Boot disk space** (at the top). See "Boot disk space" below. |
 | See, save, merge, repair or delete a home | **Home Storage** tab, section **User Home Persistence** |
 | See the size of an agent's files | The agent's card in the **Agent Store** tab. See [Agent Store](agent-store.md). |
 | See storage warnings | The Health dot near the top of the Settings page. See [Health, Activity and troubleshooting](health-and-troubleshooting.md). |
@@ -145,7 +146,7 @@ When the boot disk has no room for a new agent, the install stops and says "No s
 
 An agent that was installed with layers stays layered until you convert it. The conversion is offered on an internal boot disk while **Keep agents compressed** is off, and when at least one agent has layers. It is not offered on a USB boot stick.
 
-1. On the **Boot disk space** card, press **Convert to plain folders** on the line for the agent versions. Expect: a dialog **Convert agents to plain folders?**.
+1. On the **Boot disk space** card (see "Boot disk space" above), press **Convert to plain folders** on the line **Agents: current versions**. Expect: a dialog **Convert agents to plain folders?**.
 2. Read the dialog before you press anything. It lists each agent with **Size now** and **As plain folders**. Below the list it shows the extra space, the free space now and the free space after. The size as plain folders is an estimate: the unpacked size of the agent, divided by the compression of the boot disk. A note tells you when an agent could not be measured.
 3. Tick or untick agents. The totals change at once.
 4. Press **Convert**. Expect: "Conversion queued". Press **Cancel** to stop. Nothing changes then.
@@ -327,6 +328,102 @@ For a home that can change to plain folders, the notice offers the conversion in
 
 This field is in the **Configuration** tab. It names a folder on a pool or an array disk. Storage jobs use it for temporary copies when the boot disk has no room: a merge uses it for database copies, and a conversion to plain folders uses it for the copy of the home and the old layers. Leave it empty and the plugin chooses a folder by itself, in this order: the Docker appdata folder, the VM domains folder, a protected pool with the most free space, any other disk with room. The plugin never uses RAM, `/tmp` or the boot disk. A value that points there is not saved.
 
+### Caches of a plain-folder home
+
+A tool such as npm or pip keeps downloaded files in cache folders. In a home with plain folders, these folders do not use the boot disk. They live in RAM, or in a folder on a pool. A cache is only a copy that a tool downloads again, so you lose nothing when it is empty.
+
+The folders are `.npm`, `.cache`, `.bun/install/cache`, `.claude/cache`, `.claude/shell-snapshots`, `.claude/telemetry` and `tmp` in the home. The folder `.claude/plugins` is not a cache: it holds your installed Claude Code plugins, and it stays on the boot disk.
+
+Three fields in the **Configuration** tab control this:
+
+- **Cache location for plain-folder homes**: **RAM** (the default) or **A folder on a pool**.
+- **Cache folder on a pool**: the folder for the pool option, for example `/mnt/cache/aicli-caches`. Each home gets its own folder inside it. A user share (`/mnt/user`) is not accepted.
+- **RAM cache size per home**: the most RAM the caches of one home can use, from 256 to 8192 MB. The default is 1024 MB. The RAM is used only while the caches hold data. When a cache is full, the tool gets a "no space" error until you clear the caches.
+
+When the pool is not mounted, for example while the array is stopped, the caches use RAM. When you stop the array, the plugin moves the caches from the pool to RAM first. If a program still has a file open in a cache at that moment, Unraid waits for it to close, as for any other open file on the pool; the plugin log names the program. When the array starts again, the caches go back to the pool the next time the home starts.
+
+The first time a home starts after this feature is on, the plugin removes the old cache content from the boot disk once. It does this only while no workspace of that home runs. The Activity tray shows how much space it freed.
+
+**Clear caches** (on the line **Home** *name*: **caches** of the **Boot disk space** card; see "Boot disk space") empties the cache folders of a home. The dialog shows the size it frees. The button works only while no workspace of that home runs. A home with layers is not changed: the merge of layers already drops its caches.
+
+## Boot disk space
+
+The plugin keeps its homes and agents on the boot disk, because they must work while the array is stopped. A boot disk is small. The card **Boot disk space** at the top of the **Home Storage** tab shows where the space goes and what frees it.
+
+The card shows a bar with the size of the boot disk, how much is used and how much is free. Below the bar is one line for each part, the largest first. Each line has a bar, its size and, when there is something to do, a button. The sizes are the space really used on the disk, so compression is counted.
+
+The plugin measures the sizes in the background. A measure of several GB takes a few seconds, and the page never waits for it. The card shows the time of the last measure ("Measured at 14:05"). The plugin measures again when the last measure is more than 10 minutes old, and at once after an action on the card. Press **Measure now** to measure when you want. While a measure runs, the card says "measuring now" and updates by itself.
+
+A button is grey when the action cannot run now. Hold the mouse over it to read the reason, for example "No old version to remove." or "Agents on a USB boot stick keep compressed layers."
+
+### The lines
+
+| Line | What it counts | Button |
+| :-- | :-- | :-- |
+| **Home** *name*: **conversation history** | The sessions that the agents keep in the home. | **Move old sessions…**. After a move, **Bring back…** also shows. See "Move old conversation sessions". |
+| **Home** *name*: **caches** | The cache content that is still on the boot disk. A note says where the cache lives now (RAM or a pool). | **Clear caches**. A link **Cache setting** opens the field **Cache location for plain-folder homes**. See "Caches of a plain-folder home". |
+| **Home** *name*: **other** | The rest of the home: your own files and agent settings. | None. |
+| **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Consolidate (merge)". |
+| **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
+| **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
+| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), the layers of a home that no workspace uses, and the test homes that the smoke tests left. | **Remove**. |
+| **Plugin files** | The rest of the plugin folder: program files, saved copies of earlier versions, settings and state. | None. |
+
+A home in plain folders has the first three **Home** lines. A home with layers has the line **saved layers**.
+
+### Remove left-over items
+
+1. Press **Remove** on the line **Left over**. Expect: a dialog **Remove left-over items?** It names each item with its size, and the total space it frees.
+2. Press **Remove** to continue, or **Cancel** to stop. Expect: after **Remove**, a dialog says how much space you got back, and the card measures again.
+
+The plugin checks each item again just before it removes it. It removes only items that the last measure listed under **Left over**, and only inside its own persistence folder. It keeps an item that a mount or a program uses, and says so.
+
+### The warning when the boot disk is nearly full
+
+When the boot disk is 85% full, the plugin sends an Unraid notification and shows a notice in the Activity tray. The text names the biggest users, and the advice fits the biggest part:
+
+- Layers are the biggest: "Close all and tidy up merges the layers and frees space."
+- A home in plain folders is the biggest: "Conversation history and caches use most of it. Move old sessions or clear caches."
+- Old agent versions are the biggest: "Remove old agent versions frees space."
+- The agents are the biggest: "The agents use most of it. Remove old agent versions to free space."
+
+Each warning ends with "Open Storage, Boot disk space." The notification is a link: a click opens the **Home Storage** tab at the card.
+
+## Old agent versions
+
+Each agent keeps its last version so you can roll back. The old versions use space on the boot disk. The plugin removes the oldest ones by itself. You can also remove them at once.
+
+### The setting "Keep the previous version for rollback"
+
+This setting is in the **Configuration** tab, card **Global Configuration**. The default is **Yes**: each agent keeps its last version, so you can roll back. Choose **No** to keep only the version in use. The plugin then removes the previous version at its next clean-up, and you save space on the boot disk. A version that a running workspace uses always stays.
+
+### Remove old versions now
+
+Press **Remove old versions** in the storage line of an installed agent card in the **Agent Store** tab. The card **Boot disk space** shows the same action for all agents, on the line **Agents: old versions**. See "Boot disk space".
+
+1. Press **Remove old versions**. Expect: a dialog lists the old versions of the agent, the space the removal frees, and the versions that stay because a workspace uses them. The dialog names the workspace.
+2. Press **Remove** to continue, or **Cancel** to stop. Expect: after **Remove**, a second dialog says how much space you got back.
+
+The action removes old version folders, old storage layers and the kept rollback copies. When the setting above is **Yes**, the newest kept rollback copy stays. After the removal, you cannot roll back to a removed version. A version that a workspace uses is never removed. If a clean-up of that agent already runs, the plugin leaves that item and says so; press the link again later.
+
+## Move old conversation sessions
+
+Each agent keeps your conversations in your home on the boot disk. Old conversations can use a lot of space: on one test server, Codex used 2.1 GB and Claude Code 0.8 GB. You can move the old ones to a folder on a pool, and bring them back later.
+
+The line **Home** *name*: **conversation history** of the card **Boot disk space** (see "Boot disk space") has the button **Move old sessions…**. The button opens a dialog.
+
+1. Choose the agent, or **All agents that keep one file for each session**. An agent that keeps its history in a database (OpenCode, Kilo Code and Goose) is grey. The dialog shows its size and says that it cannot move.
+2. Enter the age in days. The default is 90. The dialog shows how many sessions are older, and how much space they use.
+3. Choose a pool and a folder name. The plugin remembers the folder in the setting **Folder for moved sessions**.
+4. Read the warning: "Moved sessions cannot be resumed, and are not reachable while the array is stopped."
+5. Select **Move sessions**. The Activity tray shows the progress, for example "Moving sessions: 12 of 140 files (3.0 GB)".
+
+The plugin copies each file, checks the copy, and only then removes the original. It never moves a file that a program has open or that changed in the last 24 hours. It never deletes a session. If the array is stopped, the dialog says "The array is stopped" and nothing moves.
+
+The folder you chose then holds `<user>/<agent>/…` with the moved files and a list, `MOVED.json`, with the size and the check value of each file.
+
+To get sessions back, select **Bring back…** on the same line. It shows after you moved sessions. The plugin copies the files into your home again, checks them, and removes them from the folder. It never replaces a file that is already in your home. Some agents (for example Codex and GitHub Copilot) keep an index of their sessions. The index stays, so a moved session can still be listed there but it does not open until you bring it back.
+
 ## What happens when the array stops or the server shuts down
 
 ### Stop the array
@@ -423,6 +520,10 @@ The text names the homes and gives the three ways out:
 
 The plugin never starts a merge by itself for this warning, because a merge closes your workspaces.
 
+### RAM caches use much of the RAM
+
+A third check covers the RAM caches of plain-folder homes. It warns when the **RAM cache size per home** of all such homes together is more than 25 percent of the RAM of the server. The text says how many homes it counts. Lower **RAM cache size per home**, or choose **A folder on a pool** for **Cache location for plain-folder homes**. The check only reads.
+
 ## What happens behind the scenes
 
 The plugin saves the writable layer with a method that keeps databases safe. Many agents keep a database that is spread over several files. A plain copy at the wrong moment would give a broken database. The plugin copies each such database with SQLite's own safe-copy feature, so the saved copy is complete. The plugin keeps a list of every layer and checks each layer when it mounts. That list is why the start-up check can tell you what is missing. For the full design, see C4 Component: Storage Management.
@@ -456,7 +557,11 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-16** — New: the card **Boot disk space** at the top of the **Home Storage** tab shows where the boot disk space goes, with one line and one button for each part, **Measure now**, and **Remove** for left-over items. The full-disk warning now names the biggest part and ends with "Open Storage, Boot disk space." Spec `docs/specs/BOOT_DISK_SPACE.md` (R1, R2), issues #538 and #531.
+- **2026-10-16** — New setting **Keep the previous version for rollback** and the action **Remove old versions**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R4), issue #536.
+- **2026-10-16** — The caches of a plain-folder home live in RAM or on a pool, not on the boot disk: the fields **Cache location for plain-folder homes**, **Cache folder on a pool** and **RAM cache size per home**, the action **Clear caches**, and the Health warning for RAM caches. Spec `docs/specs/BOOT_DISK_SPACE.md`, issue #537.
 - **2026-10-16** — On an internal boot disk a new agent installs as plain folders unless **Keep agents compressed** is on, and the dialog **Convert agents to plain folders?** converts agents that have layers. Spec `docs/specs/BOOT_DISK_SPACE.md`, issue #535.
+- **2026-10-16** — New: move old conversation sessions to a pool folder, and bring them back. Spec `docs/specs/BOOT_DISK_SPACE.md`, issue #539.
 - **2026-10-14** — A layered home on a boot disk that is not a USB flash drive can change to plain folders: the button **Convert to plain folders**, its dialog and tray steps, the conversion offer in the tidy-up notice and banner, the install notification, the card state **Plain folders**, and the field **Work folder for storage jobs**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #496.
 
 </details>
