@@ -46,6 +46,7 @@ require_once __DIR__ . '/services/StorageMountService.php';
 require_once __DIR__ . '/services/PoolPathService.php';
 require_once __DIR__ . '/services/StorageMetricsService.php';
 require_once __DIR__ . '/services/FileStorage.php';   // Epic #1310 — the storage facade (now consumed)
+require_once __DIR__ . '/services/AgentStorageService.php';   // BOOT_DISK_SPACE.md R3 — agent sizes and the convert-to-plain-folders estimate
 require_once __DIR__ . '/services/RepairService.php'; // #96 — fail-closed current-architecture repair
 require_once __DIR__ . '/services/StorageMigrationService.php';
 require_once __DIR__ . '/services/AgentVersionCleanupService.php';   // BOOT_DISK_SPACE.md R4 — remove old agent versions

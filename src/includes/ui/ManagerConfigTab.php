@@ -34,6 +34,16 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">One setting applies to every installed agent and home. Changing it migrates all existing storage. Plain directories write directly to the selected path; removable/USB targets require an acknowledgement and SquashFS + zram is recommended to reduce wear.</div>
                         </dd>
 
+                        <?php // BOOT_DISK_SPACE.md R3 ?>
+                        <dt>Keep agents compressed</dt>
+                        <dd>
+                            <select name="keep_agents_compressed" aria-label="Keep agents compressed" data-testid="keep-agents-compressed" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['keep_agents_compressed'] ?? '0', '0', _('No: new agents use plain folders on an internal boot disk'))?>
+                                <?=mk_option($config['keep_agents_compressed'] ?? '0', '1', _('Yes: keep new agents in compressed layers'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">On an internal boot disk, new agents use plain folders. Turn this on to keep them in compressed layers, which use less space on a small boot disk.</div>
+                        </dd>
+
                         <dt>Writable layer for homes</dt>
                         <dd>
                             <select name="storage_upper_mode" aria-label="Writable layer for homes" data-testid="storage-upper-mode" style="width: 100%;" <?=$autoSave?>>

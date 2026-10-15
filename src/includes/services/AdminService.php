@@ -555,6 +555,7 @@ class AdminService {
             // ---- storage paths ----
             'home_storage_path'    => ['group' => 'storage', 'description' => "Where the plugin stores each user's persistent home data."],
             'agent_storage_path'   => ['group' => 'storage', 'description' => "Where the plugin stores each agent's persistent install data."],
+            'keep_agents_compressed' => ['group' => 'storage', 'description' => 'On an internal boot disk new agents use plain folders. 1 keeps new installs and updates in compressed layers, which use less space on a small boot disk. 0 is the default.'],
             'write_protect_agents' => ['group' => 'storage', 'description' => 'Keeps installed agent files read-only between upgrades.'],
             // BOOT_DISK_SPACE.md R4
             'keep_previous_version' => ['group' => 'storage', 'description' => 'Each agent keeps its last version so you can roll back. Turn this off to keep only the version in use and save space on the boot disk.'],

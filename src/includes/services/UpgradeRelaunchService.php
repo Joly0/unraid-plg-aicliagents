@@ -14,6 +14,13 @@ namespace AICliAgents\Services;
 
 class UpgradeRelaunchService
 {
+    /**
+     * The workspace-lifecycle reason (WORKSPACE_LIFECYCLE_EVENTS.md) for a zombie session that
+     * the conversion relaunch tears down. A storage conversion closes sessions the way an
+     * upgrade does, so it reports the same documented reason.
+     */
+    private const CONVERT_STOP_REASON = 'upgrade';
+
     private static function baseDir(): string
     {
         $base = getenv('AICLI_TMP_BASE');
@@ -504,6 +511,185 @@ class UpgradeRelaunchService
             $needMount[] = $agentId;
         }
         return $needMount;
+    }
+
+    // --- Per-AGENT storage-conversion manifest (BOOT_DISK_SPACE.md R3) ----
+    // Converting one layered agent to plain folders closes only the sessions of
+    // that agent and opens them again afterwards. This manifest is NOT the
+    // upgrade manifest above: that one is an upgrade barrier (the supervisor
+    // relaunches its sessions as soon as the agent mounts), and a conversion must
+    // keep its sessions closed until the plain folder is live.
+
+    public static function convertManifestPath(string $agentId): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
+        $safe = preg_replace('/\.{2,}/', '_', $safe);
+        return self::baseDir() . "/convert-relaunch-agent-$safe.json";
+    }
+
+    public static function writeConvertManifest(string $agentId, array $closed): bool
+    {
+        @mkdir(self::baseDir(), 0755, true);
+        $payload = [
+            'agentId'    => $agentId,
+            'written_at' => time(),
+            'closed'     => array_values($closed),
+        ];
+        return @file_put_contents(self::convertManifestPath($agentId), json_encode($payload)) !== false;
+    }
+
+    public static function readConvertManifest(string $agentId): array
+    {
+        $f = self::convertManifestPath($agentId);
+        if (!is_file($f)) return [];
+        $data = json_decode((string)@file_get_contents($f), true);
+        return is_array($data) ? $data : [];
+    }
+
+    public static function deleteConvertManifest(string $agentId): void
+    {
+        @unlink(self::convertManifestPath($agentId));
+    }
+
+    /**
+     * Close the sessions of ONE agent for its conversion to plain folders and
+     * record them (with the readiness class "working" or "idle" from the pane
+     * classifier, as closeHomeSet does). The manifest is written BEFORE the close,
+     * so a crash between the two still leaves a recoverable set. When no session
+     * of the agent is open (a retry after the first close) the existing manifest
+     * stays as it is.
+     *
+     * @param callable|null $listSessions fn(string $agentId): array  default TerminalService::listActiveSessionsForAgent
+     * @param callable|null $paneReady    fn(string $agentId, string $sessionId): array{ready:bool,reason:string}
+     * @param callable|null $closer       fn(string $agentId): mixed   default AgentHandler::closeSessionsForConvert
+     * @return array<int,array<string,mixed>> the manifest entries written, or [] when nothing was closed
+     */
+    public static function closeAgentSetForConvert(
+        string $agentId,
+        ?callable $listSessions = null,
+        ?callable $paneReady = null,
+        ?callable $closer = null
+    ): array {
+        if ($listSessions === null) {
+            require_once __DIR__ . '/TerminalService.php';
+            $listSessions = ['\AICliAgents\Services\TerminalService', 'listActiveSessionsForAgent'];
+        }
+        if ($paneReady === null) {
+            require_once __DIR__ . '/TmuxService.php';
+            $paneReady = ['\AICliAgents\Services\TmuxService', 'paneAcceptsInput'];
+        }
+        if ($closer === null) {
+            require_once __DIR__ . '/../handlers/AgentHandler.php';
+            $closer = ['\AICliAgents\Handlers\AgentHandler', 'closeSessionsForConvert'];
+        }
+        $sessions = $listSessions($agentId);
+        if (!is_array($sessions) || $sessions === []) {
+            return [];
+        }
+        $manifest = [];
+        foreach ($sessions as $s) {
+            if (!is_array($s)) continue;
+            $sid  = trim((string)($s['id']   ?? ''));
+            $path = trim((string)($s['path'] ?? ''));
+            if ($sid === '' || $path === '') continue;
+            $ready       = $paneReady($agentId, $sid);
+            $readyReason = (string)($ready['reason'] ?? '');
+            $unreadable  = in_array($readyReason, ['no-session', 'no-live-agent', 'capture-failed'], true);
+            $working     = !$unreadable && (($ready['ready'] ?? true) === false);
+            $manifest[] = [
+                'sessionId'     => $sid,
+                'workspacePath' => $path,
+                'agentId'       => $agentId,
+                'hadResume'     => true,
+                'working'       => $working,
+            ];
+        }
+        if ($manifest === []) {
+            return [];
+        }
+        // A retry that finds more sessions (a person opened one) adds them to the set.
+        $prev = self::readConvertManifest($agentId)['closed'] ?? [];
+        if (is_array($prev)) {
+            $have = [];
+            foreach ($manifest as $m) $have[(string)$m['sessionId']] = true;
+            foreach ($prev as $p) {
+                if (is_array($p) && !isset($have[(string)($p['sessionId'] ?? '')])) $manifest[] = $p;
+            }
+        }
+        if (self::writeConvertManifest($agentId, $manifest) === false) {
+            return [];
+        }
+        $closer($agentId);
+        return $manifest;
+    }
+
+    /**
+     * Open again exactly the sessions closed for $agentId's conversion, with the
+     * same self-healing skip logic as the other relaunch paths (relaunchOne), and
+     * the optional Continue nudge for a session that was working. Deletes the
+     * manifest, so a repeat supervisor call is a no-op.
+     *
+     * @return array{relaunched:int,skipped:int,nudged:int}
+     */
+    public static function relaunchConvertSet(
+        string $agentId,
+        ?callable $starter = null,
+        ?callable $isRunning = null,
+        ?callable $isHealthy = null,
+        ?callable $stopper = null,
+        ?callable $nudger = null,
+        ?callable $paneReady = null,
+        ?callable $sleeper = null,
+        string $origin = 'convert_relaunch'
+    ): array {
+        $m = self::readConvertManifest($agentId);
+        $closed = $m['closed'] ?? [];
+        if (empty($closed) || !is_array($closed)) {
+            self::deleteConvertManifest($agentId);
+            return ['relaunched' => 0, 'skipped' => 0, 'nudged' => 0];
+        }
+        if ($starter === null) {
+            require_once __DIR__ . '/TerminalService.php';
+            require_once __DIR__ . '/ProcessManager.php';
+            $starter = ['\AICliAgents\Services\TerminalService', 'startTerminal'];
+        }
+        $pmAvailable = class_exists('\AICliAgents\Services\ProcessManager');
+        if ($isRunning === null) {
+            $isRunning = $pmAvailable
+                ? ['\AICliAgents\Services\ProcessManager', 'isRunning']
+                : static fn(string $sid): bool => false;
+        }
+        if ($isHealthy === null) {
+            $isHealthy = $pmAvailable
+                ? ['\AICliAgents\Services\ProcessManager', 'tmuxSessionHasLiveAgent']
+                : static fn(string $sid): bool => false;
+        }
+        if ($stopper === null) {
+            $stopper = $pmAvailable
+                ? static function (string $sid): void {
+                    \AICliAgents\Services\ProcessManager::stopTerminal($sid, true, self::CONVERT_STOP_REASON);
+                }
+                : static function (string $sid): void {};
+        }
+        if ($sleeper === null) {
+            $sleeper = static function (int $seconds): void { sleep($seconds); };
+        }
+        $relaunched = 0; $skipped = 0; $nudged = 0;
+        foreach ($closed as $s) {
+            $entry = is_array($s) ? $s : [];
+            $entry['agentId'] = $agentId;
+            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper, $origin);
+            if ($r === 'relaunched') $relaunched++; else $skipped++;
+            if ($r === 'relaunched' && $nudger !== null && !empty($entry['working'])) {
+                $sid = (string)($entry['sessionId'] ?? '');
+                if ($sid !== '' && self::waitPaneReady($agentId, $sid, $paneReady, $sleeper)) {
+                    $nudger($agentId, $sid);
+                    $nudged++;
+                }
+            }
+        }
+        self::deleteConvertManifest($agentId);
+        return ['relaunched' => $relaunched, 'skipped' => $skipped, 'nudged' => $nudged];
     }
 
     // --- Per-USER home manifest (approach B) -----------------------------

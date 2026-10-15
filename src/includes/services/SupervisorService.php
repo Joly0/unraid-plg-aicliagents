@@ -804,7 +804,7 @@ class SupervisorService {
      *
      * @param array{done:int,total:int,pct:int,rate:string,eta_s:int}|null $copy
      */
-    public static function graduatePhaseStep(string $phase, ?array $copy = null): string {
+    public static function graduatePhaseStep(string $phase, ?array $copy = null, string $entity = ''): string {
         $labels = [
             'closing'      => 'Closing workspaces',
             'checking'     => 'Finding databases and measuring the home (can take several minutes)',
@@ -814,6 +814,14 @@ class SupervisorService {
             'switching'    => 'Switching to plain folders',
             'relaunching'  => 'Opening workspaces again',
         ];
+        if (strpos($entity, 'agent/') === 0) {
+            // BOOT_DISK_SPACE.md R3: the same steps for one agent, in agent words.
+            $labels['closing']  = 'Closing the workspaces of this agent';
+            $labels['checking'] = 'Measuring the agent';
+            $labels['copying']  = 'Copying the agent to a plain folder';
+            $labels['freeing']  = 'Moving the old layers aside';
+            $labels['switching'] = 'Switching the agent to plain folders';
+        }
         $label = $labels[$phase] ?? 'Running';
         if (($phase === 'copying' || $phase === 'copying-back') && $copy !== null) {
             $gb = static fn(int $b): string => number_format($b / 1073741824, 1);
@@ -832,7 +840,9 @@ class SupervisorService {
                 $label .= ', about ' . $min . ' min left';
             }
         } elseif ($phase === 'copying' || $phase === 'copying-back') {
-            $label .= ' (can take a long time for a large home)';
+            $label .= strpos($entity, 'agent/') === 0
+                ? ' (can take a few minutes)'
+                : ' (can take a long time for a large home)';
         }
         return $label;
     }
@@ -1095,6 +1105,9 @@ class SupervisorService {
                         } elseif ($op === 'graduate' && strpos($entity, 'home/') === 0) {
                             // #496: say what changed; the home needs no tidy-ups from now on.
                             $step = 'The home now uses plain folders. It needs no more tidy-ups.';
+                        } elseif ($op === 'graduate' && strpos($entity, 'agent/') === 0) {
+                            // BOOT_DISK_SPACE.md R3: the agent now starts from a plain folder.
+                            $step = 'This agent now uses a plain folder. The old layers stay for a while and can be removed in Storage.';
                         } elseif (
                             ($op === 'bake' || $op === 'consolidate') &&
                             strpos($entity, 'home/') === 0
@@ -1161,7 +1174,7 @@ class SupervisorService {
                         // R14: the copies show rsync's own progress.
                         $copy = ($phase === 'copying' || $phase === 'copying-back')
                             ? self::graduateCopyProgress((string)($job['entity'] ?? '')) : null;
-                        $step = self::graduatePhaseStep($phase, $copy);
+                        $step = self::graduatePhaseStep($phase, $copy, (string)($job['entity'] ?? ''));
                         $progress = self::graduatePhaseProgress($phase, $copy['pct'] ?? null);
                     } else {
                         $step = 'Running';

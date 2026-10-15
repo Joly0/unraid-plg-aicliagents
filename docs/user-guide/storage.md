@@ -6,7 +6,7 @@
 
 ## In plain words
 
-The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. On a boot disk that is not a USB flash drive, a home does not need layers: it can be **plain folders**, an ordinary folder with no saves and no tidy-ups. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
+The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. On a boot disk that is not a USB flash drive, a home does not need layers: it can be **plain folders**, an ordinary folder with no saves and no tidy-ups. On an internal boot disk, a new agent also installs as plain folders unless you turn on **Keep agents compressed**. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
 
 ## The basics
 
@@ -131,9 +131,30 @@ When a home has layers and its folder is not on a USB flash drive, the home card
 
 The plugin copies the home with every workspace closed. It does not save or merge first, so it needs no extra room for a new layer. When the boot disk has no room for the copy, the plugin copies the home to a work folder on another disk first. It then moves the old layers to that work folder, which frees the boot disk, and copies the home back. If a step fails, the plugin puts the old layers back, and the home is exactly as before. The work folder is the setting **Work folder for storage jobs**. See "The field "Work folder for storage jobs"" below. A conversion that needs the work folder does not start while the array is stopped.
 
-The home stays on the boot disk, so the plugin works while the array is stopped. Backups work as before. A home on a USB flash drive is never offered the conversion; use **Move off USB flash drive** for that. Agent files keep their layers.
+The home stays on the boot disk, so the plugin works while the array is stopped. Backups work as before. A home on a USB flash drive is never offered the conversion; use **Move off USB flash drive** for that. Agents have their own conversion. See "Convert agents to plain folders" below.
 
 You can also start the conversion from the notice in the Activity tray (see "The notice to close workspaces") or from the Unraid notification "AICliAgents: homes can move to plain folders". That notification comes once after a plugin install or update when one or more homes can convert. It comes again only when that set of homes changes. Its link opens this dialog for the first such home.
+
+### Agents on an internal boot disk
+
+The program files of an agent follow the same rule as a home. On a USB boot stick, every agent keeps compressed layers. On an internal boot disk (for example a small ZFS mirror), a new agent installs as **plain folders**. Plain folders start faster and need no merges. They also use more space on the boot disk, because a layer is compressed more than a folder is. Open **Configuration** and look at **Keep agents compressed**. Choose **Yes: keep new agents in compressed layers** when your boot disk is small. Then new installs and updates use layers again. The setting does not move an agent that is installed.
+
+When the boot disk has no room for a new agent, the install stops and says "No space on the boot disk". The message names the **Boot disk space** card on the Storage tab and the setting **Keep agents compressed**. The version in use stays.
+
+### Convert agents to plain folders
+
+An agent that was installed with layers stays layered until you convert it. The conversion is offered on an internal boot disk while **Keep agents compressed** is off, and when at least one agent has layers. It is not offered on a USB boot stick.
+
+1. On the **Boot disk space** card, press **Convert to plain folders** on the line for the agent versions. Expect: a dialog **Convert agents to plain folders?**.
+2. Read the dialog before you press anything. It lists each agent with **Size now** and **As plain folders**. Below the list it shows the extra space, the free space now and the free space after. The size as plain folders is an estimate: the unpacked size of the agent, divided by the compression of the boot disk. A note tells you when an agent could not be measured.
+3. Tick or untick agents. The totals change at once.
+4. Press **Convert**. Expect: "Conversion queued". Press **Cancel** to stop. Nothing changes then.
+
+The dialog refuses when less than 10% of the boot disk, or less than 2 GB, would stay free after the conversion. It says how many MB are missing, and the button **Convert** stays off. Remove old versions or left-over files first, then open the dialog again.
+
+The plugin converts one agent at a time. It closes only the workspaces that run this agent, copies the agent, checks the copy, and switches. The workspaces open again by themselves. The Activity tray names each step: "Closing the workspaces of this agent", "Measuring the agent", "Copying the agent to a plain folder", "Moving the old layers aside", "Switching the agent to plain folders", "Opening workspaces again". If a step fails, the plugin puts the old layers back and the agent is as before.
+
+The old layers move to a backup folder. They stay for 14 days, then the plugin removes them. They use space until then. You can remove them sooner with **Remove** on the **Left over** line.
 
 ## The setting "Writable layer for homes"
 
@@ -435,6 +456,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-16** — On an internal boot disk a new agent installs as plain folders unless **Keep agents compressed** is on, and the dialog **Convert agents to plain folders?** converts agents that have layers. Spec `docs/specs/BOOT_DISK_SPACE.md`, issue #535.
 - **2026-10-14** — A layered home on a boot disk that is not a USB flash drive can change to plain folders: the button **Convert to plain folders**, its dialog and tray steps, the conversion offer in the tidy-up notice and banner, the install notification, the card state **Plain folders**, and the field **Work folder for storage jobs**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #496.
 
 </details>

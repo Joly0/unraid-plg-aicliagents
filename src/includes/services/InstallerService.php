@@ -163,8 +163,8 @@ class InstallerService {
                 // new version. Installing into the live tree instead would fill
                 // it half way (on .4 that failed the vendor's extraction and the
                 // settings saves too). Fail clearly; the version in use stays.
-                $reason = 'Not enough free space on the drive that holds the agents for the new version. '
-                    . 'The version in use is kept. Free some space (or let old versions be cleaned up), then try again.';
+                $reason = 'No space on the boot disk for the new version. The version in use is kept. '
+                    . 'Open Storage, Boot disk space, or turn on Keep agents compressed. Then try again.';
                 LogService::log("Install of $agentId not started: $reason", LogService::LOG_ERROR, "InstallerService");
                 setInstallStatus("Install failed", 0, $agentId, $reason);
                 return ['status' => 'error', 'message' => $reason];

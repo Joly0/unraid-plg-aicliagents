@@ -37,6 +37,10 @@ class ConfigService {
             // zram is the safe default on the boot device and removable media;
             // changing this setting runs an explicit all-entity migration.
             'storage_backend_mode' => 'layering',
+            // BOOT_DISK_SPACE.md R3: on an internal boot disk a new agent install uses plain
+            // folders. '1' keeps new installs and updates in compressed layers (they use less
+            // space). A USB boot stick always uses layers. Existing agents are not moved.
+            'keep_agents_compressed' => '0',
             // #456: where a home's writable layer lives under the layering engine:
             // 'zram' (RAM, lost on a crash until saved) or 'disk' (durable, uses
             // space on the persistence drive). Changing it runs UpperPlacementService.
@@ -356,6 +360,10 @@ class ConfigService {
         if (array_key_exists('home_cache_path', $newConfig)) {
             $newConfig['home_cache_path'] = HomeCacheService::normalisePath(
                 $newConfig['home_cache_path'], (string)(self::getConfig()['home_cache_path'] ?? ''));
+        }
+        // BOOT_DISK_SPACE.md R3
+        if (isset($newConfig['keep_agents_compressed'])) {
+            $newConfig['keep_agents_compressed'] = ((string)$newConfig['keep_agents_compressed'] === '1') ? '1' : '0';
         }
 
         if (isset($newConfig['storage_upper_mode'])) {

@@ -1140,8 +1140,11 @@ _op_reconcile() {
                 _gr_mode="$(printf '%s' "$_intent_json" | grep -oE '"mode":"[a-z]+"' | cut -d'"' -f4)"
                 if [ -n "$_gr_mode" ]; then
                     _gr_field() { printf '%s' "$_intent_json" | grep -oE "\"$1\":\"[^\"]*\"" | head -1 | cut -d'"' -f4; }
-                    local _gr_r _gr_u _gr_c _gr_ver
+                    local _gr_r _gr_u _gr_c _gr_ver _gr_p
                     _gr_r="$(_gr_field retire)"; [ -n "$_gr_r" ] && _gr_retire_dir="$_gr_r"
+                    # BOOT_DISK_SPACE.md R3: an agent conversion keeps its plain copy in
+                    # a version folder (.versions/<id>/<gen>), not at passthrough/agents/<id>.
+                    _gr_p="$(_gr_field pt_dir)"; [ -n "$_gr_p" ] && _gr_pt_dir="$_gr_p"
                     _gr_u="$(_gr_field upper)"; _gr_c="$(_gr_field copy)"
                     _gr_ver="${persist_path%/}/.graduate_verified_${type}_${_gr_safe_id}"
                     if [ "$_gr_missing" -eq 0 ]; then
@@ -1171,6 +1174,11 @@ _op_reconcile() {
                         ( source "${AICLI_STORAGE_COMMON_SH:-${STORAGE_DIR}/common.sh}" >/dev/null 2>&1 \
                             && convert_rollback "$persist_path" "$_gr_pt_dir" "$_gr_retire_dir" "$_gr_u" ) || _gr_rb=$?
                         if [ "$_gr_rb" -eq 0 ]; then
+                            if [ "$type" = "agent" ]; then
+                                # Drop the stable link of the plain layout the conversion made.
+                                ( source "${AICLI_STORAGE_COMMON_SH:-${STORAGE_DIR}/common.sh}" >/dev/null 2>&1 \
+                                    && agent_convert_unlink_layout "$persist_path" "$id" "$(basename "$_gr_pt_dir")" ) || true
+                            fi
                             rm -f "$_intent_file" "${persist_path%/}/.graduate_staging_${type}_${_gr_safe_id}" 2>/dev/null || true
                             lifecycle_log "warn" "supervisor" "graduate_intent_rolled_back" "{\"entity\":\"$entity\",\"mode\":\"$_gr_mode\"}" 2>/dev/null || true
                         else
@@ -2208,6 +2216,15 @@ _op_graduate() {
         [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "closing" 2>/dev/null
         _close_home_for_consolidate "$id"
     fi
+    # BOOT_DISK_SPACE.md R3: "Convert agents to plain folders" closes only the
+    # sessions of this one agent and opens them again afterwards.
+    local closes_agent=0
+    if [ "$type" = "agent" ] && [ "$reason" = "user_convert" ]; then
+        closes_agent=1
+        log_info "Convert close phase: closing sessions for agent/$id"
+        [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "closing" 2>/dev/null
+        _close_agent_for_convert "$id"
+    fi
     # The child sets its own phases (checking, copying, freeing, copying-back,
     # switching) through this job id.
     export AICLI_JOB_ID="${_CURRENT_JOB_ID:-}"
@@ -2216,7 +2233,7 @@ _op_graduate() {
     # (Bug #757); see _op_bake.
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
-        exec bash "${STORAGE_DIR}/storagectl.sh" graduate --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
+        AICLI_GRADUATE_REASON="$reason" exec bash "${STORAGE_DIR}/storagectl.sh" graduate --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
 
@@ -2261,6 +2278,10 @@ _op_graduate() {
             _supervisor_notify "normal" "AICliAgents: Home is now plain folders" \
                 "The home of $id is now plain folders. It no longer needs tidy-ups. The old layers are kept for ${GRADUATED_RETENTION_DAYS} days." \
                 "graduate_ok_${entity}" 3600
+        elif [ "$closes_agent" -eq 1 ]; then
+            _supervisor_notify "normal" "AICliAgents: Agent is now plain folders" \
+                "The agent $id is now plain folders. It starts faster and needs no merges. The old layers are kept for ${GRADUATED_RETENTION_DAYS} days; you can remove them sooner in Storage, Boot disk space." \
+                "graduate_ok_${entity}" 3600
         else
             _supervisor_notify "normal" "AICliAgents: Storage graduated" \
                 "$entity has moved off the layering engine onto the passthrough backend. Old layers are retained in .graduated/ for ${GRADUATED_RETENTION_DAYS} days." \
@@ -2269,6 +2290,10 @@ _op_graduate() {
         if [ "$closes_home" -eq 1 ]; then
             [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "relaunching" 2>/dev/null
             _relaunch_home_sessions "$id" "$_CURRENT_JOB_ID"
+        fi
+        if [ "$closes_agent" -eq 1 ]; then
+            [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "relaunching" 2>/dev/null
+            _relaunch_agent_convert_set "$id"
         fi
     elif [ "$exit_code" -eq 2 ]; then
         log_info "Graduate deferred: $entity (reason=${_OP_DEFER_REASON:-unknown})"
@@ -2282,6 +2307,12 @@ _op_graduate() {
             _supervisor_notify "warning" "AICliAgents: Home not converted" \
                 "The home of $id was not converted to plain folders (${_OP_DEFER_REASON:-precondition}). Nothing was changed. The debug log has the details." \
                 "graduate_refused_${entity}" 3600
+        fi
+        if [ "$closes_agent" -eq 1 ]; then
+            _supervisor_notify "warning" "AICliAgents: Agent not converted" \
+                "The agent $id was not converted to plain folders (${_OP_DEFER_REASON:-precondition}). Nothing was changed. Its workspaces open again." \
+                "graduate_refused_${entity}" 3600
+            _relaunch_agent_convert_set "$id"
         fi
     fi
     # Refused: the home was not changed and will not be. Open its sessions again.
@@ -2301,6 +2332,9 @@ _op_graduate() {
         # A failed conversion put the layers back or never touched them: let the
         # user start sessions again, the same as a failed user tidy-up.
         [ "$closes_home" -eq 1 ] && _clear_home_consolidating "$id" "$_CURRENT_JOB_ID"
+        # A failed agent conversion put the layers back or never touched them:
+        # open its workspaces again.
+        [ "$closes_agent" -eq 1 ] && _relaunch_agent_convert_set "$id"
         _supervisor_notify "warning" "AICliAgents: Storage graduation failed" \
             "Converting $entity to plain folders failed (exit $exit_code). The layers are in place, as before. The debug log has the details." \
             "graduate_failed_${entity}" 3600
@@ -2587,6 +2621,7 @@ _job_finalize() {
                 lifecycle_log "warn" "supervisor" "graduate_job_wait_exhausted" \
                     "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"elapsed_s\":$g_elapsed,\"cap_s\":$g_cap,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
                 [ "$type" = "home" ] && _relaunch_home_sessions "$id" "$job_id"
+                [ "$type" = "agent" ] && _relaunch_agent_convert_set "$id"
             elif [ "$g_elapsed" -ge "$g_cap" ]; then
                 state="failed"
                 log_warn "Graduate job $job_id for $entity exhausted its 24 h wait budget (${g_elapsed}s >= ${g_cap}s) — failing"
@@ -3432,6 +3467,48 @@ _close_home_for_consolidate() {
             \AICliAgents\Services\TerminalService::forceCloseHome((string)getenv("AICLI_CLOSE_USER"));
         }
     ' || true
+}
+
+# _close_agent_for_convert <agent_id> — BOOT_DISK_SPACE.md R3: close the sessions of
+# ONE agent for its conversion to plain folders and record them in the conversion
+# manifest (UpgradeRelaunchService::closeAgentSetForConvert). The id travels via env,
+# never spliced into the php script. Best-effort; never aborts the tick.
+_close_agent_for_convert() {
+    local agent_id="$1"
+    case "$agent_id" in ''|*[!a-z0-9-]*) return 0 ;; esac
+    [ "$(command -v php)" ] || return 0
+    AICLI_CONVERT_AGENT="$agent_id" php -d display_errors=1 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        $th="/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/TerminalHandler.php";
+        if (file_exists($th)) { require_once $th; }
+        \AICliAgents\Services\UpgradeRelaunchService::closeAgentSetForConvert((string)getenv("AICLI_CONVERT_AGENT"));
+    ' || true
+}
+
+# _relaunch_agent_convert_set <agent_id> — open the sessions closed for the agent's
+# conversion again (resumed), with the Continue nudge for a session that was
+# working. relaunchConvertSet deletes the manifest, so a repeat call is a no-op.
+# Runs in a subshell without the supervisor lock fd (see _relaunch_home_sessions).
+_relaunch_agent_convert_set() {
+    local agent_id="$1"
+    case "$agent_id" in ''|*[!a-z0-9-]*) return 0 ;; esac
+    [ "$(command -v php)" ] || return 0
+    ( [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+      AICLI_RELAUNCH_AGENT="$agent_id" php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        $nudger = null; $ready = null;
+        $cfg = function_exists("getAICliConfig") ? getAICliConfig() : [];
+        $continueOn = ((string)($cfg["auto_continue_on_restart"] ?? "1")) !== "0";
+        if ($continueOn && class_exists("\AICliAgents\Services\TmuxService")) {
+            $nudger = ["\AICliAgents\Services\TmuxService", "submitContinueNudge"];
+            $ready  = ["\AICliAgents\Services\TmuxService", "paneAcceptsInput"];
+        }
+        \AICliAgents\Services\UpgradeRelaunchService::relaunchConvertSet(
+            (string)getenv("AICLI_RELAUNCH_AGENT"), null, null, null, null, $nudger, $ready
+        );
+    ' ) 2>/dev/null || true
 }
 
 # _clear_home_consolidating <user> [job_id] — clear the HOME_CONSOLIDATE_INPROGRESS_GUARD

@@ -71,6 +71,8 @@ class StorageHandler {
             case 'remove_old_versions':         $result = self::removeOldVersionsAction(); break;
             case 'clear_home_caches':           $result = self::clearHomeCaches(); break; // BOOT_DISK_SPACE.md R5: empty the caches of a plain home
             case 'get_home_cache_status':       return self::homeCacheStatus();    // BOOT_DISK_SPACE.md R5: read-only
+            case 'agent_convert_estimate':      return self::agentConvertEstimate(); // BOOT_DISK_SPACE.md R3: read-only, no Nchan publish
+            case 'convert_agents':              $result = self::convertAgentsAction(); break; // BOOT_DISK_SPACE.md R3: layered agents → plain folders
             case 'get_home_sessions':            return self::getHomeSessions();    // R1: read-only, list open sessions for home consolidate warning
             case 'backup_home':                 $result = self::backupHomeAction(); break; // HOME_BACKUP.md
             case 'backup_status':               return self::backupStatusAction();  // HOME_BACKUP.md: read-only, no Nchan publish
@@ -110,7 +112,7 @@ class StorageHandler {
                 'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'preflight_storage_backend', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
-                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
+                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
@@ -1679,6 +1681,100 @@ class StorageHandler {
 
         return ['status' => 'queued', 'job_id' => (string)$jobId,
                 'message' => 'Conversion queued. Workspaces of this home close and open again when it is done. Watch the activity tray for progress.'];
+    }
+
+    /**
+     * BOOT_DISK_SPACE.md R3, AJAX `agent_convert_estimate` (read-only): the numbers the
+     * "Convert agents to plain folders" dialog shows, from AgentStorageService.
+     * Response: { status:'ok', estimate:{offered, reason, disk_bytes, free_bytes, ratio,
+     * agents:[{id,name,now_bytes,plain_bytes}], extra_bytes, fits, retained_bytes, estimated} }.
+     */
+    private static function agentConvertEstimate(): array {
+        try {
+            return ['status' => 'ok', 'estimate' => \AICliAgents\Services\AgentStorageService::convertEstimate()];
+        } catch (\Throwable $e) {
+            aicli_log("agent_convert_estimate failed: " . $e->getMessage(), AICLI_LOG_WARN);
+            return ['status' => 'error', 'message' => 'The sizes could not be measured. Try again.'];
+        }
+    }
+
+    /** AJAX `convert_agents` (BOOT_DISK_SPACE.md R3): POST agents=<JSON list of ids> or "all". */
+    private static function convertAgentsAction(): array {
+        $raw = (string)($_REQUEST['agents'] ?? '');
+        $requested = $raw === 'all' ? 'all' : json_decode($raw, true);
+        if ($requested !== 'all' && !is_array($requested)) {
+            return ['status' => 'error', 'message' => 'Choose which agents to convert.'];
+        }
+        return self::convertAgents($requested);
+    }
+
+    /**
+     * BOOT_DISK_SPACE.md R3: queue the conversion of layered agents to plain folders,
+     * one supervisor job for each agent (op `graduate`, reason `user_convert`). The
+     * supervisor closes only the workspaces of that agent, copies the merged view into
+     * the versioned layout, switches, and opens the workspaces again. The jobs run one
+     * after another in the queue.
+     *
+     * Refused with no side effect when the dialog is not offered (USB boot, "Keep
+     * agents compressed" on, no layered agent), when the free space after the
+     * conversion would be below 10% of the disk or 2 GiB (the shortfall is named),
+     * when an agent is not layered, or when an install of the agent is running.
+     *
+     * $estimate and $installBusy are test seams.
+     *
+     * @param string[]|'all' $requested
+     */
+    public static function convertAgents($requested, ?array $estimate = null, ?callable $installBusy = null): array {
+        require_once __DIR__ . '/../services/AgentStorageService.php';
+        $estimate = $estimate ?? \AICliAgents\Services\AgentStorageService::convertEstimate();
+        if (empty($estimate['offered'])) {
+            $why = [
+                'usb_boot' => 'Agents on a USB boot stick keep compressed layers.',
+                'keep_agents_compressed' => 'Keep agents compressed is on. Turn it off to convert agents.',
+                'no_layered_agents' => 'No agent uses compressed layers.',
+                'not_boot_disk' => 'The agents are not on the boot disk.',
+            ][(string)($estimate['reason'] ?? '')] ?? 'Agents cannot be converted now.';
+            return ['status' => 'error', 'message' => $why, 'reason' => (string)($estimate['reason'] ?? '')];
+        }
+        $sel = \AICliAgents\Services\AgentStorageService::selectConvertible($requested, $estimate);
+        if ($sel['agents'] === []) {
+            return ['status' => 'error', 'message' => 'None of the chosen agents can be converted.', 'refused' => $sel['refused']];
+        }
+        // The room check names the shortfall. It covers the chosen agents only.
+        $chosenExtra = 0;
+        foreach ($estimate['agents'] as $a) {
+            if (in_array($a['id'], $sel['agents'], true)) $chosenExtra += (int)$a['plain_bytes'] - (int)$a['now_bytes'];
+        }
+        $fits = \AICliAgents\Services\AgentStorageService::convertFits(
+            (int)$estimate['free_bytes'], (int)$estimate['disk_bytes'], max(0, $chosenExtra));
+        if ($fits !== 'ok') {
+            $short = (int)substr($fits, strlen('no_room:'));
+            return ['status' => 'error', 'reason' => 'no_room', 'shortfall_bytes' => $short,
+                    'message' => 'There is not enough room. After the conversion at least 10% of the boot disk and 2 GB must stay free. About '
+                        . number_format($short / 1048576, 0) . ' MB are missing. Remove old versions or left-over files first (Storage, Boot disk space).'];
+        }
+        require_once __DIR__ . '/AgentHandler.php';
+        $installBusy = $installBusy ?? [\AICliAgents\Handlers\AgentHandler::class, 'isInstallInProgress'];
+        $queued = []; $skipped = $sel['refused'];
+        foreach ($sel['agents'] as $id) {
+            if ($installBusy($id)) { $skipped[$id] = 'install_running'; continue; }
+            $jobId = \AICliAgents\Services\SupervisorService::enqueueJob('agent', $id, 'graduate', 'user_convert', 5);
+            if ($jobId === null) {
+                \AICliAgents\Services\SupervisorService::enqueue('agent', $id, 'graduate', 'user_convert', 5);
+            }
+            self::trackJobActivity($jobId, "Converting agent " . self::trayAgentName($id) . " to plain folders");
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+                'storage', 'storage_convert_agent_queued', ['type' => 'agent', 'id' => $id, 'job_id' => $jobId]
+            );
+            $queued[] = ['id' => $id, 'job_id' => (string)$jobId];
+        }
+        if ($queued === []) {
+            return ['status' => 'error', 'message' => 'None of the chosen agents can be converted now.', 'skipped' => $skipped];
+        }
+        \AICliAgents\Services\SupervisorService::wake();
+        return ['status' => 'queued', 'queued' => $queued, 'skipped' => $skipped,
+                'message' => 'Conversion queued for ' . count($queued) . ' agent(s). The workspaces of each agent close and open again when it is done. Watch the activity tray for progress.'];
     }
 
     /**

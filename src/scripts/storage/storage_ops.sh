@@ -376,9 +376,10 @@ guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed va
 # starts on it writes into a writable layer the conversion is moving. Every mount
 # (page load, workspace start, supervisor) comes through here. Deferred, not
 # failed: the caller retries, and the mount works once the conversion ends.
-if [ "$TYPE" = "home" ] && [ "${AICLI_CONVERT_SELF:-0}" != "1" ]; then
+# BOOT_DISK_SPACE.md R3: the same holds for an agent that is being converted.
+if { [ "$TYPE" = "home" ] || [ "$TYPE" = "agent" ]; } && [ "${AICLI_CONVERT_SELF:-0}" != "1" ]; then
     if _CONV_WHY="$(convert_mount_blocked "$PERSIST_PATH" "$TYPE" "$ID")"; then
-        error "Home $ID is being converted to plain folders ($_CONV_WHY) — mount refused until it ends."
+        error "$TYPE $ID is being converted to plain folders ($_CONV_WHY) — mount refused until it ends."
         _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_convert_running" "convert_running" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
     fi
@@ -1018,12 +1019,21 @@ current="$(readlink -f "$stable" 2>/dev/null || true)"
 # persist drive. Never START a stage that cannot fit — a write that fills the
 # flash failed antigravity's extraction and the settings saves with it.
 # Estimate: twice the version in service (the copy + the new version).
-local cur_bytes
+local cur_bytes need_bytes
 cur_bytes="$(du -sb "$current" 2>/dev/null | awk '{print $1}')"
 case "$cur_bytes" in ''|*[!0-9]*) cur_bytes=0 ;; esac
-if ! _layer_fits_space "$persist" "$(( cur_bytes * 2 ))"; then
-    printf '[direct-stage] not enough room on %s for the new version of %s: about %s MB needed, %s MB free — install not started\n' \
-        "$persist" "$id" "$_FIT_NEED_MB" "$_FIT_FREE_MB" >&2
+need_bytes=$(( cur_bytes * 2 ))
+# BOOT_DISK_SPACE.md R3: a FIRST install has no version in service to measure
+# (cur_bytes 0), and on an internal boot it now lands in plain folders. An agent
+# unpacks to 100 to 450 MB: never start one with less than this floor free.
+if [ "$cur_bytes" -eq 0 ]; then
+    _nf_mb="${AICLI_NEW_AGENT_MIN_MB:-300}"
+    case "$_nf_mb" in ''|*[!0-9]*) _nf_mb=300 ;; esac
+    need_bytes=$(( _nf_mb * 1048576 ))
+fi
+if ! _layer_fits_space "$persist" "$need_bytes"; then
+    printf '[direct-stage] no space on the boot disk for the new version of %s: about %s MB needed, %s MB free — install not started. Open Storage, Boot disk space to see what uses the space; turn on Keep agents compressed (Configuration) to keep agents in compressed layers.\n' \
+        "$id" "$_FIT_NEED_MB" "$_FIT_FREE_MB" >&2
     lifecycle_log "error" "stage" "direct_agent_stage_no_space" \
         "{\"id\":\"$id\",\"need_mb\":$_FIT_NEED_MB,\"free_mb\":\"$_FIT_FREE_MB\",\"current_bytes\":$cur_bytes}" 2>/dev/null || true
     write_defer_reason agent "$id" "no_space"
@@ -3500,7 +3510,20 @@ lifecycle_log "info" "graduate" "graduate_start" \
 #            (this frees the boot disk), copy back, verify, flip. A failure after
 #            the move puts everything back (R5); the supervisor finishes or rolls
 #            back an interrupted run from the intent (R8).
-if [ "$TYPE" = "home" ]; then
+# BOOT_DISK_SPACE.md R3: ONE layered agent becomes plain folders in the versioned
+# layout (passthrough/agents/.versions/<id>/<gen> + the stable link). The supervisor
+# sets AICLI_GRADUATE_REASON=user_convert for this run. It uses the home flow below:
+# copy the merged view, verify, move the layers to .graduated/, flip, bind. The
+# global policy migration (FORCE_DIRECT=1) and the older agent steps further down
+# stay as they were.
+_GR_AGENT=0
+if [ "$TYPE" = "agent" ] && [ "${AICLI_GRADUATE_REASON:-}" = "user_convert" ] && [ "$FORCE_DIRECT" != "1" ]; then
+    _GR_AGENT=1
+    if [ "$(_keep_agents_compressed)" = "1" ]; then
+        _gr_precondition_refuse "keep_agents_compressed"
+    fi
+fi
+if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     _gr_phase() {
         [ -n "${AICLI_JOB_ID:-}" ] || return 0
         if ! declare -f job_ledger_set_phase >/dev/null 2>&1; then
@@ -3549,10 +3572,23 @@ if [ "$TYPE" = "home" ]; then
     _gr_wait="${AICLI_CONVERT_IDLE_WAIT_S:-60}"
     case "$_gr_wait" in ''|*[!0-9]*) _gr_wait=60 ;; esac
     _gr_waited=0
-    while home_mount_in_use "$MNT_POINT" && [ "$_gr_waited" -lt "$_gr_wait" ]; do
+    # An agent is busy while a process holds a file of its mounted versions
+    # (a session of another agent that runs this agent's tool, for example).
+    _gr_in_use() {
+        if [ "$_GR_AGENT" != "1" ]; then home_mount_in_use "$MNT_POINT"; return; fi
+        local _d
+        command -v fuser >/dev/null 2>&1 || return 0
+        for _d in "$(agent_versions_dir "$ID")"/*/ "$_GR_VIEW"; do
+            _d="${_d%/}"
+            [ -d "$_d" ] && mountpoint -q "$_d" 2>/dev/null || continue
+            fuser -m "$_d" >/dev/null 2>&1 && return 0
+        done
+        return 1
+    }
+    while _gr_in_use && [ "$_gr_waited" -lt "$_gr_wait" ]; do
         sleep 2; _gr_waited=$((_gr_waited + 2))
     done
-    if home_mount_in_use "$MNT_POINT"; then
+    if _gr_in_use; then
         log "Home is still busy after ${_gr_waited}s (a process holds it) — deferring the conversion."
         _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "mount_busy" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$MNT_POINT\"}"
@@ -3581,7 +3617,23 @@ if [ "$TYPE" = "home" ]; then
     _GR_PT_DIR="$PERSIST_PATH/passthrough/${TYPE}s/$ID"
     _GR_STAGING_MARKER="$PERSIST_PATH/.graduate_staging_${TYPE}_${_GR_LOCK_ID}"
     _GR_VERIFIED_MARKER="$PERSIST_PATH/.graduate_verified_${TYPE}_${_GR_LOCK_ID}"
-    if [ -d "$_GR_PT_DIR" ] && [ -n "$(find "$_GR_PT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] \
+    _GR_AGENT_GEN=""
+    if [ "$_GR_AGENT" = "1" ]; then
+        # The version folder name is kept in the staging marker, so a retry after
+        # a deferral copies into the same folder and converges.
+        if [ -f "$_GR_STAGING_MARKER" ]; then
+            _GR_AGENT_GEN="$(head -1 "$_GR_STAGING_MARKER" 2>/dev/null | tr -cd 'a-zA-Z0-9_-')"
+        fi
+        agent_convert_layout_paths "$PERSIST_PATH" "$ID"
+        if [ -z "$_GR_AGENT_GEN" ]; then
+            if _gr_why="$(agent_convert_occupied "$PERSIST_PATH" "$ID")"; then
+                log "Plain folder of $ID is in the way: $_gr_why."
+                _gr_precondition_refuse "pt_dir_occupied"
+            fi
+            _GR_AGENT_GEN="$(agent_convert_gen_name)"
+        fi
+        _GR_PT_DIR="$AGC_VERSIONS/$_GR_AGENT_GEN"
+    elif [ -d "$_GR_PT_DIR" ] && [ -n "$(find "$_GR_PT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] \
         && [ ! -f "$_GR_STAGING_MARKER" ] && [ ! -f "$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")" ]; then
         _gr_precondition_refuse "pt_dir_occupied"
     fi
@@ -3590,6 +3642,8 @@ if [ "$TYPE" = "home" ]; then
     _GR_META="/tmp/unraid-aicliagents/.convert_${TYPE}_${_GR_LOCK_ID}_$$"
     mkdir -p "$_GR_META"
     _GR_EXCLUDES="$_GR_META/excludes"
+    # An agent tree holds no cache folders to drop: copy every file.
+    [ "$_GR_AGENT" = "1" ] && export CONVERT_NO_CACHE_EXCLUDES=1
     # shellcheck disable=SC2086
     convert_write_excludes "$_GR_EXCLUDES" "$_GR_VIEW" $_GR_SQLITE_DBS || { error "Cannot write the exclude list."; exit 1; }
 
@@ -3597,7 +3651,23 @@ if [ "$TYPE" = "home" ]; then
     # The whole view, caches included: a slight overestimate is the safe side.
     _GR_SRC_BYTES="$(_gr_bytes "$(du -sb "$_GR_VIEW" 2>/dev/null | awk '{print $1}')")"
     _GR_PERSIST_FREE="$(_gr_bytes "$(df -P -B1 "$PERSIST_PATH" 2>/dev/null | awk 'NR==2 {print $4}')")"
-    _GR_MODE="$(convert_plan_mode "$_GR_PERSIST_FREE" "$_GR_SRC_BYTES")"
+    if [ "$_GR_AGENT" = "1" ]; then
+        # The plain copy is as big as the unpacked agent, scaled by the file
+        # system's compression (ZFS compressratio; 100 = none). The old layers
+        # stay beside it until the retention window ends, so the copy needs room now.
+        _GR_RATIO="$(convert_fs_ratio "$PERSIST_PATH")"
+        _GR_NEED="$(( _GR_SRC_BYTES * 100 / _GR_RATIO ))"
+        _GR_MODE="$(convert_plan_mode "$_GR_PERSIST_FREE" "$_GR_NEED" 134217728)"
+        if [ "$_GR_MODE" != "direct" ]; then
+            _gr_reason "The boot disk has no room for the plain folder of this agent (about $(( _GR_NEED / 1048576 )) MB needed, $(( _GR_PERSIST_FREE / 1048576 )) MB free). Nothing was changed. Free some space (Storage, Boot disk space), then try again."
+            error "Agent $ID needs about $_GR_NEED bytes for its plain folder, only $_GR_PERSIST_FREE are free — refused."
+            rm -rf "$_GR_META" 2>/dev/null || true
+            rm -f "$_GR_CONVERT_LOCK" 2>/dev/null || true
+            _gr_precondition_refuse "boot_disk_too_small"
+        fi
+    else
+        _GR_MODE="$(convert_plan_mode "$_GR_PERSIST_FREE" "$_GR_SRC_BYTES")"
+    fi
     log "Home: $_GR_SRC_BYTES bytes to copy; boot disk free $_GR_PERSIST_FREE; layers $_GR_LAYERS_BYTES; writable layer $_GR_UPPER_BYTES (same disk: $_GR_UPPER_SAME_FS) — mode $_GR_MODE."
 
     _GR_WORK=""
@@ -3624,12 +3694,24 @@ if [ "$TYPE" = "home" ]; then
 
     # ---- copy + verify (nothing destructive yet) ----
     _gr_phase "copying"
-    : > "$_GR_STAGING_MARKER" 2>/dev/null || true
-    log "Copying the home to $_GR_COPY..."
+    if [ "$_GR_AGENT" = "1" ]; then
+        printf '%s\n' "$_GR_AGENT_GEN" > "$_GR_STAGING_MARKER" 2>/dev/null || true
+        mkdir -p "$AGC_VERSIONS" 2>/dev/null || true
+    else
+        : > "$_GR_STAGING_MARKER" 2>/dev/null || true
+    fi
+    # A failure before anything moved: the agent's partial version folder goes
+    # away (a home keeps its partial copy for a retry to converge over).
+    _gr_fail_cleanup() {
+        [ "$_GR_AGENT" = "1" ] || return 0
+        rm -rf "${_GR_PT_DIR:?}" "$_GR_STAGING_MARKER" 2>/dev/null || true
+        rmdir "$AGC_VERSIONS" 2>/dev/null || true
+    }
+    log "Copying to $_GR_COPY..."
     if ! convert_copy_tree "$_GR_VIEW" "$_GR_COPY" "$_GR_EXCLUDES" "$_GR_PROG" 2>>"$DEBUG_LOG"; then
-        _gr_reason "Copying the home failed (disk full or a read error). Nothing was changed."
-        error "Copy of the home failed — layers untouched."
-        _gr_cleanup_meta; exit 1
+        _gr_reason "Copying failed (disk full or a read error). Nothing was changed."
+        error "Copy failed — layers untouched."
+        _gr_fail_cleanup; _gr_cleanup_meta; exit 1
     fi
     if [ -n "$_GR_SQLITE_DBS" ]; then
         _gr_sba=0
@@ -3638,7 +3720,7 @@ if [ "$TYPE" = "home" ]; then
         if [ "$_gr_sba" -ne 0 ]; then
             _gr_reason "A database could not be copied (${SQLITE_BACKUP_FAILED_DB:-a database}). Nothing was changed."
             error "SQLite copy of ${SQLITE_BACKUP_FAILED_DB:-a database} failed: ${SQLITE_BACKUP_ERROR:-no message} — layers untouched."
-            _gr_cleanup_meta; exit 1
+            _gr_fail_cleanup; _gr_cleanup_meta; exit 1
         fi
     fi
     # #502: the plugin's own services (Relay, hub, resume records) keep writing
@@ -3646,13 +3728,13 @@ if [ "$TYPE" = "home" ]; then
     if ! _gr_why="$(convert_sync_until_clean "$_GR_VIEW" "$_GR_COPY" "$_GR_EXCLUDES" 5 2>>"$DEBUG_LOG")"; then
         _gr_reason "Files in the home kept changing during the copy. Nothing was changed; try again."
         error "Copy verify failed: files kept changing during the copy ($_gr_why) — layers untouched."
-        _gr_cleanup_meta; exit 1
+        _gr_fail_cleanup; _gr_cleanup_meta; exit 1
     fi
     # shellcheck disable=SC2086
     if ! _gr_why="$(convert_verify_dbs "$_GR_VIEW" "$_GR_COPY" $_GR_SQLITE_DBS)"; then
         _gr_reason "A database copy is missing. Nothing was changed."
         error "Copy verify failed: $_gr_why — layers untouched."
-        _gr_cleanup_meta; exit 1
+        _gr_fail_cleanup; _gr_cleanup_meta; exit 1
     fi
     log "Copy verified."
 
@@ -3693,9 +3775,21 @@ if [ "$TYPE" = "home" ]; then
         exit 1
     fi
     log "Final pass done: the copy matches the home."
-    if _mount_teardown_arbiter "$MNT_POINT"; then :; else
+    # An agent has one mount for each version it served (agents/.versions/<id>/<gen>):
+    # release them all. A home has one.
+    _gr_teardown() {
+        if [ "$_GR_AGENT" != "1" ]; then _mount_teardown_arbiter "$MNT_POINT"; return; fi
+        local _d _rc=0
+        for _d in "$(agent_versions_dir "$ID")"/*/; do
+            _d="${_d%/}"
+            [ -d "$_d" ] && mountpoint -q "$_d" 2>/dev/null || continue
+            _mount_teardown_arbiter "$_d" || { _rc=$?; return "$_rc"; }
+        done
+        _mount_teardown_arbiter "$_GR_VIEW"
+    }
+    if _gr_teardown; then :; else
         _gr_cleanup_meta
-        log "The home view is still busy — deferring (nothing changed)."
+        log "The view is still busy — deferring (nothing changed)."
         _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "mount_busy" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
     fi
@@ -3721,6 +3815,14 @@ if [ "$TYPE" = "home" ]; then
         exit 1
     fi
 
+    # The stable link goes in BEFORE the intent: a crash after the manifest flip
+    # then finds a complete plain layout. While layers exist the entity stays
+    # layered, so the link is inert until the flip.
+    if [ "$_GR_AGENT" = "1" ] && ! agent_convert_link_layout "$PERSIST_PATH" "$ID" "$_GR_AGENT_GEN"; then
+        _gr_reason "The stable link of the plain folder could not be made. Nothing was changed."
+        error "Cannot link $AGC_STABLE to the version folder $_GR_AGENT_GEN."
+        _gr_fail_cleanup; _gr_cleanup_meta; exit 1
+    fi
     write_intent "$PERSIST_PATH" "$TYPE" "$ID" \
         "{\"op\":\"graduate\",\"mode\":\"$_GR_MODE\",\"keep\":\"\",\"pt_dir\":\"$_GR_PT_DIR\",\"copy\":\"$_GR_COPY\",\"retire\":\"$_GR_RETIRE\",\"upper\":\"$UPPER_DIR\",\"delete\":[$_GR_LAYER_NAMES]}"
     _itest_sigkill_window "graduate_after_intent"
@@ -3747,6 +3849,7 @@ if [ "$TYPE" = "home" ]; then
                 "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"rc\":$_rb_rc,\"retire\":\"$_GR_RETIRE\"}" 2>/dev/null || true
             return 0
         fi
+        [ "$_GR_AGENT" = "1" ] && agent_convert_unlink_layout "$PERSIST_PATH" "$ID" "$_GR_AGENT_GEN"
         clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
         rm -f "$_GR_STAGING_MARKER" 2>/dev/null || true
         lifecycle_log "warn" "graduate" "convert_rolled_back" \
@@ -3812,7 +3915,26 @@ if [ "$TYPE" = "home" ]; then
 
     lifecycle_log "info" "graduate" "graduate_ok" \
         "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mode\":\"$_GR_MODE\",\"pt_dir\":\"$_GR_PT_DIR\",\"retired\":\"$_GR_RETIRE\",\"bytes\":$_GR_SRC_BYTES}" 2>/dev/null || true
-    log "Conversion complete: home $ID is plain folders at $_GR_PT_DIR (old layers kept in $_GR_RETIRE)."
+    log "Conversion complete: $TYPE $ID is plain folders at $_GR_PT_DIR (old layers kept in $_GR_RETIRE)."
+
+    if [ "$_GR_AGENT" = "1" ]; then
+        # Bind the new version at its own path and point the stable mount name at
+        # it, as _pt_mount_versioned does. Not fatal: the next mount does the same.
+        # The layered versions are gone: drop their state records (RAM) so the card
+        # does not count generations that no longer exist.
+        rm -f "$(agent_generation_state_dir "$ID")"/*.env 2>/dev/null || true
+        _gr_target="$(agent_versioned_mount "$ID" "$_GR_AGENT_GEN")"
+        mkdir -p "$_gr_target" 2>/dev/null || true
+        if mount --bind "$_GR_PT_DIR" "$_gr_target" 2>/dev/null \
+            && agent_activate_stable_symlink "$ID" "$_GR_AGENT_GEN" "$_gr_target"; then
+            lifecycle_log "info" "storagectl" "passthrough_generation_activated" \
+                "{\"type\":\"agent\",\"id\":\"$ID\",\"generation\":\"$_GR_AGENT_GEN\"}" 2>/dev/null || true
+            log "Plain version $_GR_AGENT_GEN of $ID is bound at $_gr_target."
+        else
+            log "Binding the plain version failed (non-fatal) — the next mount binds it."
+        fi
+        exit 0
+    fi
 
     [ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"
     mkdir -p "$MNT_POINT" 2>/dev/null

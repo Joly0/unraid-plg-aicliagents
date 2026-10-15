@@ -311,6 +311,85 @@ _entity_manifest_expects_layers() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# BOOT_DISK_SPACE.md R3: agents in plain folders on an internal boot.
+# On an internal boot disk (not a USB stick) a NEW agent install uses plain
+# folders unless the person turned on "Keep agents compressed". A USB boot
+# keeps compressed layers. An agent that already has layers stays layered
+# (effective_backend keeps its "layers pin it" rule); only the person converts it.
+
+# agent_storage_choice <engine_policy> <keep_compressed> <device_class> -> layers|plain
+#   engine_policy    layering | passthrough | "" (the storage_backend_mode setting)
+#   keep_compressed  1 = the setting "Keep agents compressed" is on, else 0
+#   device_class     usb | internal (where the plugin keeps its agents)
+# Pure (no subprocess). passthrough policy is plain for every device; a USB
+# device or an unknown device class is layers (err toward layers, as the rest of
+# this file errs toward flash); an internal boot is plain unless kept compressed.
+agent_storage_choice() {
+    local policy="${1:-}" keep="${2:-0}" class="${3:-}"
+    if [ "$policy" = "passthrough" ]; then printf 'plain'; return 0; fi
+    if [ "$class" = "internal" ] && [ "$keep" != "1" ]; then printf 'plain'; return 0; fi
+    printf 'layers'
+}
+
+# agent_convert_fits <free_bytes> <disk_bytes> <extra_bytes> -> ok | no_room:<shortfall_bytes>
+# Pure. The rule of the "Convert agents to plain folders" dialog: after the
+# conversion at least 10% of the disk AND 2 GiB must stay free. The shortfall is
+# the bytes that are missing to reach the larger of the two reserves.
+agent_convert_fits() {
+    local free="${1:-0}" disk="${2:-0}" extra="${3:-0}" reserve pct after
+    case "$free$disk$extra" in ''|*[!0-9]*) printf 'no_room:0'; return 0 ;; esac
+    pct=$(( disk / 10 ))
+    reserve=2147483648
+    [ "$pct" -gt "$reserve" ] && reserve="$pct"
+    after=$(( free - extra ))
+    if [ "$after" -ge "$reserve" ]; then printf 'ok'; else printf 'no_room:%s' "$(( reserve - after ))"; fi
+}
+
+# _keep_agents_compressed -> 1|0. AICLI_KEEP_AGENTS_COMPRESSED wins (tests); else
+# the keep_agents_compressed setting in the cfg file (default 0).
+_keep_agents_compressed() {
+    local v
+    if [ -n "${AICLI_KEEP_AGENTS_COMPRESSED:-}" ]; then
+        v="$AICLI_KEEP_AGENTS_COMPRESSED"
+    elif declare -f _rp_read_cfg >/dev/null 2>&1; then
+        v="$(_rp_read_cfg keep_agents_compressed 2>/dev/null || true)"
+    else
+        local _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+        v=""
+        [ -f "$_cfg" ] && v="$(grep -oP '^keep_agents_compressed="?\K[^"]*(?="?$)' "$_cfg" 2>/dev/null | head -1)"
+    fi
+    [ "$v" = "1" ] && printf '1' || printf '0'
+}
+
+# _agent_device_class <persist> -> usb | internal | other
+# Where the agents' persistence folder lives. usb / internal are the two boot
+# disk kinds (mount_class_for: boot_usb, boot_internal). Any other place (a pool,
+# an array disk) is "other": the R3 rule is about the boot disk only, so those
+# keep the older device rules.
+_agent_device_class() {
+    local path="${1:-/}" cf cls=""
+    # The boot disk does not change while the server runs, and this runs for every
+    # agent on each status poll: remember a boot answer in RAM (never with the
+    # test hook, which forces the class).
+    if [ -z "${AICLI_ITEST_MOUNT_CLASS:-}" ]; then
+        cf="${AICLI_TMP_BASE:-/tmp/unraid-aicliagents}/.agent_device_class_${path//[^a-zA-Z0-9]/_}"
+        if [ -r "$cf" ]; then
+            read -r cls < "$cf" 2>/dev/null || cls=""
+            case "$cls" in usb|internal) printf '%s' "$cls"; return 0 ;; esac
+        fi
+    fi
+    case "$(mount_class_for "$path" 2>/dev/null)" in
+        boot_internal) cls='internal' ;;
+        boot_usb)      cls='usb' ;;
+        *)             cls='other' ;;
+    esac
+    if [ -z "${AICLI_ITEST_MOUNT_CLASS:-}" ] && [ "$cls" != "other" ] && [ -d "${cf%/*}" ]; then
+        printf '%s\n' "$cls" > "$cf" 2>/dev/null || true
+    fi
+    printf '%s' "$cls"
+}
+
 # effective_backend <type> <id> <persist> -> flash|passthrough.
 # Test hook: AICLI_ITEST_BACKEND forces the DEVICE verdict (harness only, honoured
 # regardless of the real device so the L3.5 passthrough case can run on any box).
@@ -335,6 +414,15 @@ effective_backend() {
             && [ -n "$(find "$persist/passthrough/${type}s/$id/" -mindepth 1 -print -quit 2>/dev/null)" ]; then
             printf 'passthrough'; return 0
         fi
+        # BOOT_DISK_SPACE.md R3: a NEW agent (no layers, nothing recorded in the
+        # manifest) on an internal boot disk uses plain folders, unless the person
+        # keeps agents compressed. Homes keep this policy's rule (flash).
+        if [ "$type" = "agent" ] && [ -z "${AICLI_ITEST_BACKEND:-}" ] \
+            && [ "$(_entity_has_layers "$persist" "$type" "$id")" != "1" ] \
+            && [ "$(_entity_manifest_expects_layers "$type" "$id")" != "1" ] \
+            && [ "$(agent_storage_choice "$_policy" "$(_keep_agents_compressed)" "$(_agent_device_class "$persist")")" = "plain" ]; then
+            printf 'passthrough'; return 0
+        fi
         printf 'flash'; return 0
     fi
     # F9 (WP#1332): a layered entity is ALWAYS flash (the data lives in the layers) —
@@ -350,6 +438,14 @@ effective_backend() {
     # layers were not converted yet must remain on the layering engine. This is
     # the same layers-first invariant as the legacy device path above.
     if [ "$_policy" = "passthrough" ]; then printf 'passthrough'; return 0; fi
+
+    # BOOT_DISK_SPACE.md R3: with no engine policy set, "Keep agents compressed"
+    # still decides for a new agent on an internal boot disk.
+    if [ "$type" = "agent" ] && [ -z "${AICLI_ITEST_BACKEND:-}" ] \
+        && [ "$(_agent_device_class "$persist")" = "internal" ] \
+        && [ "$(agent_storage_choice "$_policy" "$(_keep_agents_compressed)" internal)" = "layers" ]; then
+        printf 'flash'; return 0
+    fi
 
     dev="${AICLI_ITEST_BACKEND:-$(backend_for "$persist")}"
     # F2 (WP#1326): the on-disk glob reads 0 layers for a FLASH entity whose .sqsh

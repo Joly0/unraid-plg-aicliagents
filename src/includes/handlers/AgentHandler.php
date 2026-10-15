@@ -552,7 +552,7 @@ class AgentHandler {
      *      memory/feedback_kill_patterns_vm_safety.md - a loose agent-name
      *      regex killed a VM whose cmdline happened to contain the word).
      */
-    private static function _closeSessionsForUpgrade(string $agentId): array
+    private static function _closeSessionsForUpgrade(string $agentId, bool $writeManifest = true): array
     {
         $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId);
         if (empty($sessions)) return [];
@@ -659,6 +659,13 @@ class AgentHandler {
         // back precisely these sessions (resumed), independent of the
         // per-workspace autoLaunch flag. Source of truth for relaunchClosedSet().
         require_once __DIR__ . '/../services/UpgradeRelaunchService.php';
+        if (!$writeManifest) {
+            // BOOT_DISK_SPACE.md R3: a storage conversion keeps its own closed-set
+            // manifest (UpgradeRelaunchService::writeConvertManifest). The upgrade
+            // manifest is an upgrade barrier: writing it here would make the
+            // supervisor relaunch the sessions onto the old layers mid-conversion.
+            return $sessions;
+        }
         $closedSet = [];
         $cfgUser = (getAICliConfig()['user'] ?? 'root') ?: 'root';
         foreach ($sessions as $s) {
@@ -675,6 +682,18 @@ class AgentHandler {
         }
 
         return $sessions;
+    }
+
+    /**
+     * BOOT_DISK_SPACE.md R3: close every session of $agentId the way an upgrade does
+     * (graceful quit, resume ids saved, pane and survivors reaped) but do NOT write
+     * the upgrade closed-set manifest. The storage conversion records its own.
+     *
+     * @return array<int,array<string,mixed>> the sessions that were closed
+     */
+    public static function closeSessionsForConvert(string $agentId): array
+    {
+        return self::_closeSessionsForUpgrade($agentId, false);
     }
 
     /**

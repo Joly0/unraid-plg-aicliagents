@@ -1418,7 +1418,11 @@ convert_write_excludes() {
     local out="$1" root="${2%/}"; shift 2
     local p db rel
     : > "$out" || return 1
-    for p in $CONVERT_CACHE_EXCLUDES; do printf '%s\n' "$p" >> "$out"; done
+    # An agent tree holds no cache to drop (BOOT_DISK_SPACE.md R3): its
+    # conversion sets CONVERT_NO_CACHE_EXCLUDES=1 and copies every file.
+    if [ "${CONVERT_NO_CACHE_EXCLUDES:-0}" != "1" ]; then
+        for p in $CONVERT_CACHE_EXCLUDES; do printf '%s\n' "$p" >> "$out"; done
+    fi
     for db in "$@"; do
         [ -n "$db" ] || continue
         rel="${db#"$root"/}"
@@ -1666,6 +1670,93 @@ convert_rollback() {
     fi
     [ "$rc" -eq 0 ] && rmdir "$retire" 2>/dev/null
     return "$rc"
+}
+
+# ----------------------------------------------------------------------------
+# BOOT_DISK_SPACE.md R3: convert ONE layered agent to plain folders in the
+# versioned layout the new plain installs use:
+#   <persist>/passthrough/agents/.versions/<id>/<gen>   the plain version folder
+#   <persist>/passthrough/agents/<id>  ->  .versions/<id>/<gen>   the stable link
+# These helpers work on plain folders only (no mounts), so the unit tests drive
+# them in a temp persist folder. op_graduate uses them for an agent.
+# ----------------------------------------------------------------------------
+
+# convert_fs_ratio <path> -> the compression ratio of the file system that holds
+# <path>, times 100, as a whole number (181 = 1.81x). ZFS gives its compressratio;
+# every other file system, or any doubt, gives 100 (no compression). Never below 100.
+convert_fs_ratio() {
+    local src fst r
+    fst="$(findmnt -no FSTYPE -T "$1" 2>/dev/null | head -1)"
+    if [ "$fst" = "zfs" ] && command -v zfs >/dev/null 2>&1; then
+        src="$(findmnt -no SOURCE -T "$1" 2>/dev/null | head -1)"
+        r="$(zfs get -H -p -o value compressratio "$src" 2>/dev/null | tr -d 'x')"
+        case "$r" in
+            [0-9]*.[0-9]*|[0-9]*) awk -v r="$r" 'BEGIN { v = int(r * 100 + 0.5); if (v < 100) v = 100; print v }'; return 0 ;;
+        esac
+    fi
+    printf '100'
+}
+
+# agent_convert_gen_name -> a new version folder name, "direct-<UTC time>-<pid>"
+# (the name the plain installs give a version; the clean-up reads its time stamp).
+agent_convert_gen_name() {
+    printf 'direct-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$"
+}
+
+# agent_convert_layout_paths <persist> <id> — sets AGC_STABLE (the stable link)
+# and AGC_VERSIONS (the folder that holds every plain version of the agent).
+agent_convert_layout_paths() {
+    AGC_STABLE="${1%/}/passthrough/agents/$2"
+    AGC_VERSIONS="${1%/}/passthrough/agents/.versions/$2"
+}
+
+# agent_convert_occupied <persist> <id> — 0 (and a reason) when the agent already
+# has plain-folder content that a conversion must not overwrite: a stable link or
+# folder with files in it, or any version folder. A conversion that left its own
+# staging marker is not "occupied": the caller checks the marker first.
+agent_convert_occupied() {
+    agent_convert_layout_paths "$1" "$2"
+    if [ -L "$AGC_STABLE" ]; then printf 'a stable link exists'; return 0; fi
+    if [ -d "$AGC_STABLE" ] && [ -n "$(find "$AGC_STABLE" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        printf 'the plain folder has files'; return 0
+    fi
+    if [ -d "$AGC_VERSIONS" ] && [ -n "$(find "$AGC_VERSIONS" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+        printf 'a plain version folder exists'; return 0
+    fi
+    return 1
+}
+
+# agent_convert_link_layout <persist> <id> <gen> — point the stable name at the
+# version folder <gen> (it must exist). An empty folder at the stable name is
+# replaced; a folder with files is refused (rc 1). The link is switched with one
+# atomic rename.
+agent_convert_link_layout() {
+    local persist="$1" id="$2" gen="$3" tmp
+    agent_convert_layout_paths "$persist" "$id"
+    [ -d "$AGC_VERSIONS/$gen" ] || return 1
+    mkdir -p "$(dirname "$AGC_STABLE")" || return 1
+    if [ -d "$AGC_STABLE" ] && [ ! -L "$AGC_STABLE" ]; then
+        rmdir "$AGC_STABLE" 2>/dev/null || return 1
+    fi
+    tmp="${AGC_STABLE}.next.$$"
+    rm -f "$tmp" 2>/dev/null || true
+    ln -s ".versions/$id/$gen" "$tmp" || return 1
+    mv -Tf "$tmp" "$AGC_STABLE" || { rm -f "$tmp"; return 1; }
+}
+
+# agent_convert_unlink_layout <persist> <id> <gen> — undo agent_convert_link_layout
+# and drop the version folder <gen> (rollback). Only a link that names <gen> is
+# removed; anything else stays.
+agent_convert_unlink_layout() {
+    local persist="$1" id="$2" gen="$3"
+    agent_convert_layout_paths "$persist" "$id"
+    if [ -L "$AGC_STABLE" ] && [ "$(readlink "$AGC_STABLE" 2>/dev/null)" = ".versions/$id/$gen" ]; then
+        rm -f "$AGC_STABLE"
+    fi
+    case "$gen" in ''|.*|*/*) return 0 ;; esac
+    rm -rf "${AGC_VERSIONS:?}/${gen:?}" 2>/dev/null || true
+    rmdir "$AGC_VERSIONS" 2>/dev/null || true
+    return 0
 }
 
 # ----------------------------------------------------------------------------
