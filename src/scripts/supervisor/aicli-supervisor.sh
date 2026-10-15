@@ -357,6 +357,7 @@ _supervisor_notify() {
     local message="${3:-}"
     local rate_key="${4:-}"         # unique key for per-boot rate-limit
     local rate_limit_seconds="${5:-3600}"  # default: 1 per hour
+    local link="${6:-}"             # optional page address: a click on the notice opens it (notify -l)
 
     mkdir -p "$_NOTIFIED_DIR" 2>/dev/null || true
 
@@ -379,7 +380,11 @@ _supervisor_notify() {
     fi
 
     if [ -x "$NOTIFY_SCRIPT" ]; then
-        "$NOTIFY_SCRIPT" -e "AICliAgents" -s "$subject" -d "$message" -i "$severity" 2>/dev/null || true
+        if [ -n "$link" ]; then
+            "$NOTIFY_SCRIPT" -e "AICliAgents" -s "$subject" -d "$message" -i "$severity" -l "$link" 2>/dev/null || true
+        else
+            "$NOTIFY_SCRIPT" -e "AICliAgents" -s "$subject" -d "$message" -i "$severity" 2>/dev/null || true
+        fi
     fi
 
     lifecycle_log "info" "supervisor" "notification_fired" \

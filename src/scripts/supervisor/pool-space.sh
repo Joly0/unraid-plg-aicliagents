@@ -14,7 +14,7 @@
 #
 # Test overrides (environment): AICLI_POOL_PERSIST_PATH, AICLI_POOL_STATE_DIR,
 # AICLI_POOL_NOW (epoch seconds), AICLI_POOL_DF_CMD (replaces df),
-# AICLI_POOL_WARN_PCT, AICLI_POOL_CLEAR_PCT, AICLI_POOL_INTERVAL.
+# AICLI_POOL_WARN_PCT, AICLI_POOL_CLEAR_PCT, AICLI_POOL_INTERVAL, AICLI_BOOT_SPACE_FILE.
 
 _POOL_SPACE_LAST=0   # epoch of the last check in this process
 
@@ -55,31 +55,88 @@ _pool_space_dir_mb() {
     printf '%s\n' "$out"
 }
 
-# _pool_space_users <persist dir> — one line, the biggest users, largest first,
-# like "writable layer 4200 MB, home layers 900 MB". Empty when unknown.
-_pool_space_users() {
-    local p="$1" mb lines="" f
+# _pool_space_cached_old_mb <persist dir> — MB of old agent versions from the last
+# measurement of the Boot disk space card (BOOT_DISK_SPACE.md R1), when that file is
+# fresh (under one hour old). Empty when the file is missing, old or damaged. The
+# check reads the file with grep and sed, so it needs no jq and no php.
+_pool_space_cached_old_mb() {
+    local f="${AICLI_BOOT_SPACE_FILE:-/tmp/unraid-aicliagents/.boot_space.json}" now at b
+    [ -f "$f" ] || return 0
+    now="${AICLI_POOL_NOW:-$(date +%s)}"
+    at="$(grep -o '"measured_at":[0-9]*' "$f" 2>/dev/null | head -n 1 | sed 's/[^0-9]//g')"
+    case "$at" in ''|*[!0-9]*) return 0 ;; esac
+    [ $(( now - at )) -lt 3600 ] || return 0
+    b="$(grep -o '"key":"agents:old"[^}]*' "$f" 2>/dev/null | head -n 1 | grep -o '"bytes":[0-9]*' | head -n 1 | sed 's/[^0-9]//g')"
+    case "$b" in ''|*[!0-9]*) return 0 ;; esac
+    printf '%s\n' $(( b / 1048576 ))
+}
+
+# _pool_space_scan <persist dir> — measure the biggest users. It sets two variables:
+#   _POOL_USERS  one line, largest first, like "the plain-folder homes 4200 MB, the home layers 900 MB"
+#   _POOL_TOP    the kind of the biggest user: layers | plainhome | oldagents | agents | "" (unknown)
+# It reports homes in plain folders and agents in plain folders as two lines (#531).
+# When the card's last measurement is fresh, the agents split into current and old versions.
+_pool_space_scan() {
+    local p="$1" mb lines="" f old plain_ag=0 layer_ag=0 sum_ag cur
     local -a files
+    _POOL_USERS=""; _POOL_TOP=""
     if [ -d "$p/_upper" ]; then
         mb="$(_pool_space_dir_mb "$p/_upper")"
-        [ -z "$mb" ] || lines+="$mb|the writable layer"$'\n'
+        [ -z "$mb" ] || lines+="$mb|the writable layer|layers"$'\n'
     fi
     files=(); for f in "$p"/home_*.sqsh; do [ -e "$f" ] && files+=("$f"); done
     if [ "${#files[@]}" -gt 0 ]; then
         mb="$(_pool_space_dir_mb "${files[@]}")"
-        [ -z "$mb" ] || lines+="$mb|the home layers"$'\n'
+        [ -z "$mb" ] || lines+="$mb|the home layers|layers"$'\n'
+    fi
+    if [ -d "$p/passthrough/homes" ]; then
+        mb="$(_pool_space_dir_mb "$p/passthrough/homes")"
+        [ -z "$mb" ] || lines+="$mb|the homes in plain folders|plainhome"$'\n'
+    fi
+    if [ -d "$p/passthrough/agents" ]; then
+        mb="$(_pool_space_dir_mb "$p/passthrough/agents")"
+        case "$mb" in ''|*[!0-9]*) : ;; *) plain_ag="$mb" ;; esac
     fi
     files=(); for f in "$p"/agent_*.sqsh; do [ -e "$f" ] && files+=("$f"); done
     if [ "${#files[@]}" -gt 0 ]; then
         mb="$(_pool_space_dir_mb "${files[@]}")"
-        [ -z "$mb" ] || lines+="$mb|the agent layers"$'\n'
+        case "$mb" in ''|*[!0-9]*) : ;; *) layer_ag="$mb" ;; esac
     fi
-    if [ -d "$p/passthrough" ]; then
-        mb="$(_pool_space_dir_mb "$p/passthrough")"
-        [ -z "$mb" ] || lines+="$mb|the uncompressed agents"$'\n'
+    sum_ag=$(( plain_ag + layer_ag ))
+    old="$(_pool_space_cached_old_mb "$p")"
+    if [ -n "$old" ] && [ "$old" -gt 0 ] && [ "$old" -le "$sum_ag" ]; then
+        cur=$(( sum_ag - old ))
+        [ "$cur" -le 0 ] || lines+="$cur|the current agent versions|agents"$'\n'
+        lines+="$old|the old agent versions|oldagents"$'\n'
+    else
+        [ "$plain_ag" -le 0 ] || lines+="$plain_ag|the agents in plain folders|agents"$'\n'
+        [ "$layer_ag" -le 0 ] || lines+="$layer_ag|the agent layers|agents"$'\n'
     fi
     [ -n "$lines" ] || return 0
-    printf '%s' "$lines" | sort -t'|' -k1,1nr | awk -F'|' 'NF==2 { printf "%s%s %s MB", (n++ ? ", " : ""), $2, $1 } END { print "" }'
+    lines="$(printf '%s' "$lines" | sort -t'|' -k1,1nr)"
+    _POOL_TOP="$(printf '%s\n' "$lines" | head -n 1 | awk -F'|' '{print $3}')"
+    _POOL_USERS="$(printf '%s\n' "$lines" | awk -F'|' 'NF==3 { printf "%s%s %s MB", (n++ ? ", " : ""), $2, $1 } END { print "" }')"
+}
+
+# _pool_space_users <persist dir> — print the biggest users (see _pool_space_scan).
+_pool_space_users() {
+    _pool_space_scan "$1"
+    printf '%s\n' "$_POOL_USERS"
+}
+
+# _pool_space_advice <kind> — the sentence that fits the biggest user, then the pointer to
+# the card. The kind comes from _POOL_TOP. Every warning ends with the pointer (#531).
+_pool_space_advice() {
+    local a
+    case "${1:-}" in
+        layers)    a="Close all and tidy up merges the layers and frees space." ;;
+        plainhome) a="Conversation history and caches use most of it. Move old sessions or clear caches." ;;
+        oldagents) a="Remove old agent versions frees space." ;;
+        agents)    a="The agents use most of it. Remove old agent versions to free space." ;;
+        *)         a="" ;;
+    esac
+    [ -z "$a" ] || a+=" "
+    printf '%sOpen Storage, Boot disk space.' "$a"
 }
 
 _pool_space_tick() {
@@ -93,7 +150,7 @@ _pool_space_tick() {
     local state="${AICLI_POOL_STATE_DIR:-/tmp/unraid-aicliagents}"
     local interval="${AICLI_POOL_INTERVAL:-300}"
     local warn="${AICLI_POOL_WARN_PCT:-85}" clear="${AICLI_POOL_CLEAR_PCT:-80}"
-    local now line size used avail mount pct free_mb safe op marker last_pct users msg label d
+    local now line size used avail mount pct free_mb safe op marker last_pct users msg label d advice
     now="${AICLI_POOL_NOW:-$(date +%s)}"
     case "$interval" in ''|*[!0-9]*) interval=300 ;; esac
     case "$warn" in ''|*[!0-9]*) warn=85 ;; esac
@@ -122,10 +179,12 @@ _pool_space_tick() {
     marker="$state/.${op}.tray"
 
     if [ "$pct" -ge "$warn" ]; then
-        users="$(_pool_space_users "$persist")"
+        _pool_space_scan "$persist"
+        users="$_POOL_USERS"
+        advice="$(_pool_space_advice "$_POOL_TOP")"
         msg="The boot disk is ${pct}% full and only ${free_mb} MB is free."
         [ -z "$users" ] || msg+=" The biggest users are: ${users}."
-        msg+=" The Close all and tidy up notice in the Activity tray merges the saved layers and frees space."
+        msg+=" ${advice}"
         # One warning per 6 hours. Our own stamp makes this testable; the
         # supervisor rate key is a second guard.
         d="$state/.${op}.notified"
@@ -134,13 +193,13 @@ _pool_space_tick() {
         if [ $(( now - last_pct )) -ge 21600 ]; then
             echo "$now" > "$d" 2>/dev/null || true
             if declare -f _supervisor_notify >/dev/null 2>&1; then
-                _supervisor_notify "warning" "AICliAgents: the boot disk is ${pct}% full" "$msg" "$op" 21600 || true
+                _supervisor_notify "warning" "AICliAgents: the boot disk is ${pct}% full" "$msg" "$op" 21600 "/AICliAgentsManager#boot-space" || true
             fi
         fi
         # Tray entry: made once, text refreshed when the percent moves 2+ points.
         label="The boot disk is ${pct}% full (${free_mb} MB free)."
         [ -z "$users" ] || label+=" Biggest users: ${users}."
-        label+=" Close all and tidy up merges the layers."
+        label+=" ${advice}"
         last_pct=""; [ -f "$marker" ] && read -r last_pct < "$marker" 2>/dev/null
         case "$last_pct" in
             ''|*[!0-9]*)

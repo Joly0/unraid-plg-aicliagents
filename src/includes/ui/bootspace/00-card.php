@@ -1,0 +1,217 @@
+<?php
+/**
+ * <module_context>
+ * Description: The Boot disk space card on the Storage tab (docs/specs/BOOT_DISK_SPACE.md R1, #538).
+ *   It fills <div id="aicli-boot-space-card">. It reads the last measurement with the AJAX action
+ *   get_boot_space (read-only) and shows the disk bar (size, used, free) and one line per part,
+ *   largest first, with a size bar, the size, and the action button of the line. A button that
+ *   cannot run now is greyed and its tooltip gives the reason. The sizes come from a background
+ *   job, never from the page request: while the answer says measuring:true, the card asks again
+ *   every 3 seconds. "Measure now" starts a new measure (POST measure_boot_space).
+ *   It defines aicliBootSpace.refresh(): every action of the card calls it when it ends, so the
+ *   numbers update at once.
+ *   Deep link: the page address with #boot-space opens the Storage tab and scrolls to the card.
+ * Dependencies: jQuery, CommonLogging.php (aicliAjax, aicliTraceId), ManagerScripts.php (switchMainTab).
+ * Constraints: Atomic UI fragment. The lines come from the server (parts); the card has no list of
+ *   its own. An action id with no registered dialog shows a plain "not available" message.
+ * </module_context>
+ */
+?>
+<script>
+(function () {
+    var reg = window.aicliBootSpace = window.aicliBootSpace || { actions: {} };
+    var COLORS = { home: '#ff8c00', agents: '#2196F3', leftover: '#e53935', plugin: '#78909c' };
+    var state = { data: null, pollTimer: null, loadedAt: 0, loading: false };
+
+    function esc(s) {
+        if (typeof window.escapeHtml === 'function') return window.escapeHtml(String(s == null ? '' : s));
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
+    // Pure: "340 MB" / "1.2 GB" / "12 KB".
+    function human(bytes) {
+        var b = Math.max(0, Number(bytes) || 0);
+        if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+        if (b >= 1048576) return Math.round(b / 1048576) + ' MB';
+        if (b >= 1024) return Math.round(b / 1024) + ' KB';
+        return b + ' B';
+    }
+
+    // Pure: "14:05" from an epoch in seconds.
+    function clock(epoch) {
+        var d = new Date((Number(epoch) || 0) * 1000);
+        function p(n) { return (n < 10 ? '0' : '') + n; }
+        return p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+
+    // Pure: the HTML of the disk bar.
+    function diskHtml(disk) {
+        if (!disk || !disk.size) return '<div data-testid="boot-space-disk" style="font-size:11px; opacity:0.6;">The disk size is not known yet.</div>';
+        var pct = Math.max(0, Math.min(100, Math.round((disk.used / disk.size) * 100)));
+        var color = pct >= 95 ? '#e53935' : (pct >= 85 ? '#ff8c00' : '#4caf50');
+        var where = [disk.mount, disk.fstype].filter(Boolean).join(', ');
+        return '<div data-testid="boot-space-disk" style="padding:10px; background:rgba(255,255,255,0.02); border-radius:4px; margin-bottom:12px;">' +
+            '<div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px; font-size:11px; margin-bottom:4px; opacity:0.85;">' +
+                '<span>Boot disk' + (where ? ' (' + esc(where) + ')' : '') + '</span>' +
+                '<span><b>' + human(disk.used) + '</b> used of ' + human(disk.size) + ' &middot; <b>' + human(disk.free) + '</b> free</span>' +
+            '</div>' +
+            '<div class="stat-bar-wrap"><div class="stat-bar-fill" style="width:' + pct + '%; background:' + color + ';"></div>' +
+            '<div class="stat-bar-text">' + pct + '%</div></div></div>';
+    }
+
+    // Pure: the button of one action. A disabled action keeps its reason in the tooltip.
+    function buttonHtml(part, a) {
+        var off = !a.enabled;
+        return '<button type="button" class="aicli-bs-act" data-testid="boot-space-action" data-action-id="' + esc(a.id) + '" data-part-key="' + esc(part.key) + '"' +
+            (off ? ' aria-disabled="true" title="' + esc(a.reason || 'Not available now.') + '"' : ' title="' + esc(a.label) + '"') +
+            ' style="font-size:11px; padding:3px 10px; white-space:nowrap; margin:0; ' + (off ? 'opacity:0.4; cursor:not-allowed;' : '') + '">' + esc(a.label) + '</button>';
+    }
+
+    // Pure: the HTML of one line.
+    function lineHtml(part, maxBytes) {
+        var w = maxBytes > 0 ? Math.max(part.bytes > 0 ? 2 : 0, Math.round((part.bytes / maxBytes) * 100)) : 0;
+        var color = COLORS[part.group] || '#999';
+        var acts = '';
+        if (part.action) acts += buttonHtml(part, part.action);
+        (part.extra_actions || []).forEach(function (a) { acts += ' ' + buttonHtml(part, a); });
+        var note = part.note ? '<div style="font-size:10px; opacity:0.6; margin-top:1px;">' + esc(part.note) + '</div>' : '';
+        var link = part.setting_link
+            ? ' <a href="#" class="aicli-bs-setting" data-setting="' + esc(part.setting_link) + '" data-testid="boot-space-setting-link" style="font-size:10px;">Cache setting</a>' : '';
+        return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; padding:7px 0; border-top:1px solid var(--border-color, #333);">' +
+            '<div style="flex:1 1 220px; min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + link + note + '</div>' +
+            '<div style="flex:1 1 140px; min-width:100px;"><div class="stat-bar-wrap" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
+            '<div data-testid="boot-space-size" style="flex:0 0 70px; text-align:right; font-size:12px; font-weight:700;">' + human(part.bytes) + '</div>' +
+            '<div style="flex:0 0 auto; min-width:150px; text-align:right;">' + acts + '</div>' +
+        '</div>';
+    }
+
+    // Pure: the whole card body. `data` is the answer of get_boot_space.
+    function cardHtml(data) {
+        var parts = (data && data.parts) || [];
+        var max = 0;
+        parts.forEach(function (p) { if (p.bytes > max) max = p.bytes; });
+        var measuring = !!(data && data.measuring);
+        var stamp;
+        if (data && data.has_data) stamp = 'Measured at <b data-testid="boot-space-measured">' + clock(data.measured_at) + '</b>';
+        else stamp = '<span data-testid="boot-space-measured">Not measured yet.</span>';
+        if (measuring) stamp += ' &middot; <i class="fa fa-spinner fa-spin"></i> measuring now&hellip;';
+        var rows = parts.length
+            ? parts.map(function (p) { return lineHtml(p, max); }).join('')
+            : '<div style="font-size:12px; opacity:0.7; padding:8px 0;">' + (measuring ? 'The sizes are being measured. This takes a few seconds.' : 'No sizes yet. Press Measure now.') + '</div>';
+        return '<div class="aicli-card" data-testid="boot-space-card" id="boot-space">' +
+            '<div class="aicli-card-header"><i class="fa fa-hdd-o text-orange-500"></i> Boot disk space</div>' +
+            '<div class="aicli-card-body">' +
+                '<p style="margin:0 0 10px; font-size:12px; opacity:0.75;">Where the space on the boot disk goes. The sizes are the space really used on disk, so compression is counted. The largest part is first.</p>' +
+                diskHtml(data && data.disk) +
+                rows +
+                '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px; font-size:11px; opacity:0.85;">' +
+                    '<span>' + stamp + '</span>' +
+                    '<button type="button" id="aicli-bs-measure" data-testid="boot-space-measure-now" style="font-size:11px; padding:3px 10px; margin:0;"' + (measuring ? ' disabled' : '') + '>Measure now</button>' +
+                '</div>' +
+            '</div></div>';
+    }
+
+    function draw(data) {
+        state.data = data;
+        var el = document.getElementById('aicli-boot-space-card');
+        if (el) el.innerHTML = cardHtml(data);
+    }
+
+    function stopPoll() { if (state.pollTimer) { clearTimeout(state.pollTimer); state.pollTimer = null; } }
+
+    function load() {
+        if (state.loading) return;
+        state.loading = true;
+        aicliAjax('get_boot_space', {}, function (r) {
+            state.loading = false;
+            state.loadedAt = Date.now();
+            if (!r || r.status !== 'ok') return;
+            draw(r);
+            stopPoll();
+            if (r.measuring) state.pollTimer = setTimeout(load, 3000);
+        }).fail(function () { state.loading = false; });
+    }
+
+    // A POST with the CSRF token in the query, like the other changing actions of this page.
+    function post(action, params, done) {
+        var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+        var qs = $.param(Object.assign({ action: action, csrf_token: token }, params || {}));
+        var headers = {};
+        if (typeof aicliTraceId === 'function') headers['X-Aicli-Trace'] = aicliTraceId();
+        var xhr = $.ajax({ url: '/plugins/unraid-aicliagents/AICliAjax.php?' + qs, method: 'POST', dataType: 'json', headers: headers });
+        if (done) xhr.done(done);
+        return xhr;
+    }
+    reg.post = post;
+
+    // Every action of the card calls this when it ends: a new measure starts at once.
+    reg.refresh = function () {
+        post('measure_boot_space', {}, function () { stopPoll(); setTimeout(load, 400); });
+    };
+
+    function storageTabVisible() {
+        var t = document.getElementById('tab-storage');
+        return !!t && t.classList.contains('active');
+    }
+
+    function maybeLoad() {
+        if (!storageTabVisible()) return;
+        if (Date.now() - state.loadedAt < 30000 && state.data) return;
+        load();
+    }
+
+    $(document).on('click', '#aicli-bs-measure', function () {
+        $(this).prop('disabled', true);
+        reg.refresh();
+    });
+
+    $(document).on('click', '#aicli-boot-space-card .aicli-bs-act', function () {
+        if (this.getAttribute('aria-disabled') === 'true') return;
+        var key = this.getAttribute('data-part-key');
+        var id = this.getAttribute('data-action-id');
+        var part = null;
+        ((state.data && state.data.parts) || []).forEach(function (p) { if (p.key === key) part = p; });
+        if (!part) return;
+        var fn = reg.actions[id];
+        if (typeof fn !== 'function') {
+            if (typeof window.swal === 'function') swal('Not available', 'This action is not available on this page.', 'info');
+            return;
+        }
+        fn(part);
+    });
+
+    $(document).on('click', '#aicli-boot-space-card .aicli-bs-setting', function (e) {
+        e.preventDefault();
+        var name = this.getAttribute('data-setting');
+        var btn = $('.aicli-tab-btn[onclick*="\'config\'"]');
+        if (btn.length && typeof switchMainTab === 'function') switchMainTab('config', btn[0]);
+        setTimeout(function () {
+            var f = document.querySelector('[name="' + name + '"]');
+            if (f && f.scrollIntoView) { f.scrollIntoView({ block: 'center' }); if (f.focus) f.focus(); }
+        }, 100);
+    });
+
+    // Test seams.
+    reg.cardHtml = cardHtml;
+    reg.human = human;
+    reg.load = load;
+
+    $(function () {
+        $(document).on('click', '.aicli-tab-btn', function () { setTimeout(maybeLoad, 60); });
+        maybeLoad();
+        setInterval(function () { if (storageTabVisible() && !document.hidden) load(); }, 60000);
+        // Deep link from the warning: #boot-space opens the Storage tab at this card.
+        if (window.location.hash === '#boot-space') {
+            setTimeout(function () {
+                var btn = $('.aicli-tab-btn[onclick*="\'storage\'"]');
+                if (btn.length && typeof switchMainTab === 'function') switchMainTab('storage', btn[0]);
+                load();
+                var el = document.getElementById('aicli-boot-space-card');
+                if (el && el.scrollIntoView) el.scrollIntoView();
+            }, 400);
+        }
+    });
+})();
+</script>
