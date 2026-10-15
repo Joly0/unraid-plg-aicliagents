@@ -48,6 +48,7 @@ require_once __DIR__ . '/services/StorageMetricsService.php';
 require_once __DIR__ . '/services/FileStorage.php';   // Epic #1310 — the storage facade (now consumed)
 require_once __DIR__ . '/services/RepairService.php'; // #96 — fail-closed current-architecture repair
 require_once __DIR__ . '/services/StorageMigrationService.php';
+require_once __DIR__ . '/services/AgentVersionCleanupService.php';   // BOOT_DISK_SPACE.md R4 — remove old agent versions
 require_once __DIR__ . '/services/StorageTargetService.php';   // S-11 #1355 — target picker enumeration
 require_once __DIR__ . '/services/TaskService.php';
 require_once __DIR__ . '/services/InstallerService.php';

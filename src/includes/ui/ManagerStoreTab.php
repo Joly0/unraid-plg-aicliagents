@@ -598,6 +598,8 @@ function av2_secrets_schema(array $agent): array {
                         <div class="av2-foot">
                             <span class="av2-meta">
                                 <?=htmlspecialchars($sourceLabel ?: '', ENT_QUOTES, 'UTF-8')?><?php if ($agentSizeMB > 0): ?><span class="av2-meta-size" data-agent="<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>" title="On-storage footprint of this agent's SquashFS layer (WP #748 J — single layer per agent).">&nbsp;·&nbsp;<?=$agentSizeMB?>&nbsp;MB</span><?php endif; ?>
+                                <?php /* BOOT_DISK_SPACE.md R4: drop the old versions of this agent. */ ?>
+                                <?php if ($agent['is_installed']): ?>&nbsp;·&nbsp;<a href="#" class="av2-remove-old" data-agent="<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>" onclick="if (window.aicliRemoveOldVersions) { aicliRemoveOldVersions(this.getAttribute('data-agent')); } return false;" title="Remove the old versions of this agent to free space on the boot disk. A version in use stays.">Remove old versions</a><?php endif; ?>
                             </span>
                             <div class="av2-actions">
                                 <div class="av2-buttons" id="buttons-<?=$id?>" style="display:flex; gap:8px; <?=$isInstalling ? 'visibility:hidden; pointer-events:none;' : ''?>">

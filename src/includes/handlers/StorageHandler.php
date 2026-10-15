@@ -66,6 +66,9 @@ class StorageHandler {
             case 'persist_home':                $result = self::persistHomeAction(); break;
             case 'consolidate_storage':         $result = self::consolidate(); break;
             case 'convert_storage':             $result = self::convertAction(); break; // #496: layered home → plain folders
+            // BOOT_DISK_SPACE.md R4: old agent versions
+            case 'agent_old_versions':          return self::agentOldVersions();      // read-only, no Nchan publish
+            case 'remove_old_versions':         $result = self::removeOldVersionsAction(); break;
             case 'get_home_sessions':            return self::getHomeSessions();    // R1: read-only, list open sessions for home consolidate warning
             case 'backup_home':                 $result = self::backupHomeAction(); break; // HOME_BACKUP.md
             case 'backup_status':               return self::backupStatusAction();  // HOME_BACKUP.md: read-only, no Nchan publish
@@ -105,7 +108,7 @@ class StorageHandler {
                 'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'preflight_storage_backend', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
-                'consolidate_storage', 'convert_storage', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
+                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
@@ -1542,6 +1545,33 @@ class StorageHandler {
             ? "Consolidation queued. Sessions will be closed and automatically resumed on completion. Watch the activity tray for progress."
             : "Consolidation queued. It runs on the next storage cycle. Watch the activity tray for progress.";
         return ['status' => 'queued', 'job_id' => (string)$jobId, 'message' => $msg];
+    }
+
+    /**
+     * AJAX `agent_old_versions` (BOOT_DISK_SPACE.md R4): GET agent=<id>|all (default all).
+     * Read-only. Lists what Remove old versions removes, how much space it frees
+     * and what stays because a workspace uses it.
+     */
+    private static function agentOldVersions(): array {
+        $agent = (string)($_REQUEST['agent'] ?? 'all');
+        try {
+            $r = \AICliAgents\Services\AgentVersionCleanupService::oldVersions($agent);
+        } catch (\InvalidArgumentException $e) {
+            return ['status' => 'error', 'message' => 'invalid_agent'];
+        }
+        return ['status' => 'ok', 'agent' => $agent === '' ? 'all' : $agent,
+                'keep_previous' => \AICliAgents\Services\AgentVersionCleanupService::keepPrevious()] + $r;
+    }
+
+    /** AJAX `remove_old_versions` (BOOT_DISK_SPACE.md R4): POST agent=<id>|all. Removes now; keeps what is in use. */
+    private static function removeOldVersionsAction(): array {
+        $agent = (string)($_REQUEST['agent'] ?? 'all');
+        aicli_log("AJAX Request: Remove old versions of $agent", AICLI_LOG_INFO);
+        try {
+            return \AICliAgents\Services\AgentVersionCleanupService::removeOldVersions($agent);
+        } catch (\InvalidArgumentException $e) {
+            return ['status' => 'error', 'message' => 'invalid_agent'];
+        }
     }
 
     /** AJAX `convert_storage` (#496): GET/POST type=home, id=<user>, optional continue_after=0. */

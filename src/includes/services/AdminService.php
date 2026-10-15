@@ -556,6 +556,8 @@ class AdminService {
             'home_storage_path'    => ['group' => 'storage', 'description' => "Where the plugin stores each user's persistent home data."],
             'agent_storage_path'   => ['group' => 'storage', 'description' => "Where the plugin stores each agent's persistent install data."],
             'write_protect_agents' => ['group' => 'storage', 'description' => 'Keeps installed agent files read-only between upgrades.'],
+            // BOOT_DISK_SPACE.md R4
+            'keep_previous_version' => ['group' => 'storage', 'description' => 'Each agent keeps its last version so you can roll back. Turn this off to keep only the version in use and save space on the boot disk.'],
             'storage_opt_last_run' => ['group' => 'storage', 'description' => 'Timestamp of the last storage optimization pass.'],
 
             // ---- schedules ----

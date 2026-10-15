@@ -43,6 +43,16 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Where each home keeps what you change between saves. Changing it moves the data: open workspaces are closed, the changes are saved into a verified layer, and the home is mounted again on the new placement. You are shown what will happen before anything moves.</div>
                         </dd>
 
+                        <?php /* BOOT_DISK_SPACE.md R4 */ ?>
+                        <dt>Keep the previous version for rollback</dt>
+                        <dd>
+                            <select name="keep_previous_version" aria-label="Keep the previous version for rollback" data-testid="keep-previous-version" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['keep_previous_version'] ?? '1', '1', _('Yes'))?>
+                                <?=mk_option($config['keep_previous_version'] ?? '1', '0', _('No'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Each agent keeps its last version so you can roll back. Turn this off to keep only the version in use and save space on the boot disk.</div>
+                        </dd>
+
                         <dt>Logging Level</dt>
                         <dd>
                             <select name="log_level" aria-label="Logging Level" style="width: 100%;" <?=$autoSave?>>

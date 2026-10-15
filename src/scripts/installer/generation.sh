@@ -578,6 +578,59 @@ _aicli_in_set() {
     return 1
 }
 
+# aicli_keep_previous_version
+# 1 when each agent keeps its previous version for rollback, 0 when only the
+# version in use stays (docs/specs/BOOT_DISK_SPACE.md R4). AICLI_KEEP_PREVIOUS
+# overrides the setting (the Remove old versions action sets it to 0). The
+# setting `keep_previous_version` defaults to 1. Anything but 0 means 1.
+aicli_keep_previous_version() {
+    local v="${AICLI_KEEP_PREVIOUS:-}"
+    if [ -z "$v" ] && declare -f _rp_read_cfg >/dev/null 2>&1; then
+        v="$(_rp_read_cfg keep_previous_version 2>/dev/null || true)"
+    fi
+    case "$v" in 0|false|no|off) printf '0\n' ;; *) printf '1\n' ;; esac
+}
+
+# _aicli_pt_prune_plan <agent_id> <persist> [scan_dir]
+# Decide which plain-folder versions of one agent may go. Removes nothing.
+# Sets _PT_STATUS (ok, or why nothing may be decided: no_versions, retired,
+# not_link, bad_link, active_missing, scan_untrustworthy), _PT_LINK, _PT_ACTIVE,
+# _PT_PREV (empty when the previous version is not kept), _PT_REFS (named by a
+# live process), _PT_KEEP (referenced or bound) and _PT_DELETE (newline list).
+_aicli_pt_prune_plan() {
+    local id="$1" persist="$2" scan_dir="${3:-/proc}" versions stable bound
+    _PT_STATUS=""; _PT_LINK=""; _PT_ACTIVE=""; _PT_PREV=""; _PT_REFS=""; _PT_KEEP=""; _PT_DELETE=""
+    versions="$persist/passthrough/agents/.versions/$id"
+    stable="$persist/passthrough/agents/$id"
+    [ -d "$versions" ] || { _PT_STATUS="no_versions"; return 0; }
+    [ -e "$stable" ] || { _PT_STATUS="retired"; return 0; }
+    # The active generation must be KNOWN. A stable name that is not a
+    # versioned symlink (a real directory) means this cannot tell which
+    # version is in service: remove nothing.
+    [ -L "$stable" ] || { _PT_STATUS="not_link"; return 0; }
+    _PT_LINK="$(readlink "$stable" 2>/dev/null || true)"
+    case "$_PT_LINK" in
+        .versions/"$id"/*) _PT_ACTIVE="${_PT_LINK#.versions/$id/}" ;;
+        *) _PT_STATUS="bad_link"; return 0 ;;
+    esac
+    if [ -z "$_PT_ACTIVE" ] || [ ! -d "$versions/$_PT_ACTIVE" ]; then
+        _PT_STATUS="active_missing"; return 0
+    fi
+    _PT_REFS="$(aicli_agent_referenced_generations "$id" "$scan_dir")"
+    if [ -z "$_PT_REFS" ] && aicli_agent_has_live_processes "$id" "$scan_dir"; then
+        _PT_STATUS="scan_untrustworthy"; return 0
+    fi
+    bound="$(aicli_passthrough_agent_bound_generations "$id" "$persist")"
+    _PT_KEEP="$(printf '%s\n%s\n' "$_PT_REFS" "$bound" | grep . | sort -u || true)"
+    if [ "$(aicli_keep_previous_version)" = "1" ]; then
+        _PT_PREV="$(aicli_passthrough_agent_generations "$id" "$persist" | grep -vxF -- "$_PT_ACTIVE" | head -1 || true)"
+    fi
+    _PT_DELETE="$(aicli_passthrough_agent_generations "$id" "$persist" \
+                    | aicli_select_passthrough_prune "$_PT_ACTIVE" "$_PT_PREV" "$_PT_KEEP")"
+    _PT_STATUS="ok"
+    return 0
+}
+
 # aicli_gc_passthrough_agent_generations <agent_id> <persist> [scan_dir]
 # Remove the durable plain-directory generations of one agent that the keep
 # rule does not protect. Keep: the active one, the previous one, every one a
@@ -589,43 +642,35 @@ _aicli_in_set() {
 aicli_gc_passthrough_agent_generations() {
     local id="$1" persist="$2" scan_dir="${3:-/proc}"
     [ -n "$id" ] && [ -n "$persist" ] || return 0
-    local versions stable link active previous referenced bound keep gen removed=0 lock_dir lock_id lock_fd
+    local versions stable active previous keep gen removed=0 lock_dir lock_id lock_fd
     versions="$persist/passthrough/agents/.versions/$id"
-    [ -d "$versions" ] || return 0
     stable="$persist/passthrough/agents/$id"
-    # 2026-09-26 (#324): no plain-folder version is in service any more (the
-    # stable name is gone, or a link to a folder that is gone): the agent left
-    # the plain-folder engine. Its own rule decides — never the keep rule below,
-    # which needs an active plain-folder version and so removed nothing forever.
-    if [ ! -e "$stable" ]; then
-        aicli_gc_retired_passthrough_agent_generations "$id" "$persist" "$scan_dir"
-        return 0
-    fi
-    # The active generation must be KNOWN. A stable name that is not a
-    # versioned symlink (missing, or a real directory) means this cannot tell
-    # which version is in service: remove nothing.
-    if [ ! -L "$stable" ]; then
-        printf 'gc_passthrough_generations(%s): stable name is not a version link — nothing removed\n' "$id"
-        return 0
-    fi
-    link="$(readlink "$stable" 2>/dev/null || true)"
-    case "$link" in
-        .versions/"$id"/*) active="${link#.versions/$id/}" ;;
-        *) printf 'gc_passthrough_generations(%s): unexpected stable link %s — nothing removed\n' "$id" "$link"; return 0 ;;
+    # The decision. The same function lists what Remove old versions will free
+    # (aicli_agent_old_versions), so the list and the clean-up cannot differ.
+    _aicli_pt_prune_plan "$id" "$persist" "$scan_dir"
+    case "$_PT_STATUS" in
+        no_versions) return 0 ;;
+        retired)
+            # 2026-09-26 (#324): no plain-folder version is in service any more
+            # (the stable name is gone, or a link to a folder that is gone): the
+            # agent left the plain-folder engine. Its own rule decides — never
+            # the keep rule below, which needs an active plain-folder version.
+            aicli_gc_retired_passthrough_agent_generations "$id" "$persist" "$scan_dir"
+            return 0 ;;
+        not_link)
+            printf 'gc_passthrough_generations(%s): stable name is not a version link — nothing removed\n' "$id"
+            return 0 ;;
+        bad_link)
+            printf 'gc_passthrough_generations(%s): unexpected stable link %s — nothing removed\n' "$id" "$_PT_LINK"
+            return 0 ;;
+        active_missing)
+            printf 'gc_passthrough_generations(%s): active generation %s is missing — nothing removed\n' "$id" "$_PT_ACTIVE"
+            return 0 ;;
+        scan_untrustworthy)
+            printf 'gc_passthrough_generations(%s): ABORT — 0 referenced generations found but this agent is in use; refusing to remove\n' "$id" >&2
+            return 0 ;;
     esac
-    if [ -z "$active" ] || [ ! -d "$versions/$active" ]; then
-        printf 'gc_passthrough_generations(%s): active generation %s is missing — nothing removed\n' "$id" "$active"
-        return 0
-    fi
-
-    referenced="$(aicli_agent_referenced_generations "$id" "$scan_dir")"
-    if [ -z "$referenced" ] && aicli_agent_has_live_processes "$id" "$scan_dir"; then
-        printf 'gc_passthrough_generations(%s): ABORT — 0 referenced generations found but this agent is in use; refusing to remove\n' "$id" >&2
-        return 0
-    fi
-    bound="$(aicli_passthrough_agent_bound_generations "$id" "$persist")"
-    keep="$(printf '%s\n%s\n' "$referenced" "$bound" | grep . | sort -u || true)"
-    previous="$(aicli_passthrough_agent_generations "$id" "$persist" | grep -vxF -- "$active" | head -1 || true)"
+    active="$_PT_ACTIVE"; previous="$_PT_PREV"; keep="$_PT_KEEP"
 
     # The promote (op_promote_passthrough_stage) moves a new directory in and
     # flips the link under this lock. Never decide while one runs.
@@ -1180,11 +1225,15 @@ _aicli_agent_layer_plan() {
     # K2: listed in a mounted overlay's lowerdir
     kernel="$(aicli_agent_layers_in_overlays "$id")"
     keep="$keep$kernel"$'\n'
-    # K4: the previous generation, skipping what a rebase of this base replaced
-    base="$(printf '%s\n' "$names" | aicli_layer_stack_of "$top" | tail -1)"
-    skip="$(_aicli_rebase_intent_layers "$persist" "$id" "$base")"
-    prev="$(printf '%s\n' "$names" | aicli_layer_previous_top "$base" "$skip")"
-    [ -n "$prev" ] && keep="$keep$(printf '%s\n' "$names" | aicli_layer_stack_of "$prev")"$'\n'
+    # K4: the previous generation, skipping what a rebase of this base replaced.
+    # Not kept when the setting "Keep the previous version for rollback" is off
+    # (docs/specs/BOOT_DISK_SPACE.md R4): K1, K2 and K3 stay.
+    if [ "$(aicli_keep_previous_version)" = "1" ]; then
+        base="$(printf '%s\n' "$names" | aicli_layer_stack_of "$top" | tail -1)"
+        skip="$(_aicli_rebase_intent_layers "$persist" "$id" "$base")"
+        prev="$(printf '%s\n' "$names" | aicli_layer_previous_top "$base" "$skip")"
+        [ -n "$prev" ] && keep="$keep$(printf '%s\n' "$names" | aicli_layer_stack_of "$prev")"$'\n'
+    fi
 
     _LP_KEEP="$(printf '%s\n' "$keep" | grep . | sort -u || true)"
     _LP_DELETE="$(printf '%s\n' "$names" | aicli_select_agent_layer_prune "$id" "$_LP_KEEP")"
@@ -1331,5 +1380,177 @@ aicli_agent_rebase_wanted() {
     if [ -f "$marker" ] && [ -n "$(find "$marker" -mmin -360 2>/dev/null)" ]; then
         echo "failed_recently"; return 1
     fi
+    return 0
+}
+
+# ---- Remove old versions (docs/specs/BOOT_DISK_SPACE.md R4, epic #534) -------
+# The list below is read-only. It uses the SAME plan functions as the two
+# clean-ups (_aicli_pt_prune_plan, _aicli_agent_layer_plan), so the list shows
+# exactly what the clean-up removes. There is no second copy of the keep rules.
+
+# _aicli_path_bytes <path> — the size of a file or folder in bytes (0 if absent).
+_aicli_path_bytes() {
+    local n
+    if [ -d "$1" ]; then n="$(du -sb -- "$1" 2>/dev/null | cut -f1)"
+    else n="$(stat -c %s -- "$1" 2>/dev/null || true)"; fi
+    printf '%s\n' "${n:-0}"
+}
+
+# _aicli_gen_holders <agent_id> <generation_id> [scan_dir]
+# Who runs from this generation: "workspace <session id>" or "process <pid>",
+# one per line. The candidate files come from one grep; each candidate is then
+# read through tr first, like every other /proc scan in this file.
+_aicli_gen_holders() {
+    local id="$1" gen="$2" scan_dir="${3:-/proc}" f pid sid seen=" "
+    [ -n "$id" ] && [ -n "$gen" ] || return 0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        pid="$(basename -- "$(dirname -- "$f")")"
+        case "$seen" in *" $pid "*) continue ;; esac
+        tr '\0' '\n' < "$f" 2>/dev/null | grep -qE "\.versions/${id}/${gen}([^A-Za-z0-9._@-]|\$)" || continue
+        seen="$seen$pid "
+        sid="$(tr '\0' '\n' < "$scan_dir/$pid/environ" 2>/dev/null | sed -n 's/^AICLI_SESSION_ID=//p' | head -1)"
+        if [ -n "$sid" ]; then printf 'workspace %s\n' "$sid"; else printf 'process %s\n' "$pid"; fi
+    done < <(grep -l -a -F -- ".versions/${id}/${gen}" "$scan_dir"/[0-9]*/cmdline "$scan_dir"/[0-9]*/environ 2>/dev/null || true)
+}
+
+# _aicli_holders_text <agent_id> <generation_id> <scan_dir> — one line, or "".
+_aicli_holders_text() {
+    local out
+    out="$(_aicli_gen_holders "$1" "$2" "$3" | sort -u | paste -sd, - | sed 's/,/, /g')"
+    [ -n "$out" ] && printf 'in use by %s\n' "$out"
+    return 0
+}
+
+# _aicli_rollback_copies <agent_id> <persist> <keep_previous>
+# Print the rollback copy folders that may go, one per line:
+# <persist>/aicli-rollback/<agent>/<version>_<YYYYmmddTHHMMSSZ>/. With
+# keep_previous=1 the newest copy stays. With 0 every copy goes.
+_aicli_rollback_copies() {
+    local id="$1" persist="$2" keep_prev="${3:-1}" d n=0
+    local root="$persist/aicli-rollback/$id"
+    [ -d "$root" ] || return 0
+    case "$id" in ''|*/*|.*) return 0 ;; esac
+    # Newest first by the time stamp at the end of the folder name.
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        n=$((n + 1))
+        [ "$keep_prev" = "1" ] && [ "$n" -le 1 ] && continue
+        printf '%s\n' "$d"
+    done < <(for d in "$root"/*/; do
+                 [ -d "$d" ] || continue
+                 d="${d%/}"
+                 printf '%s\t%s\n' "${d##*_}" "$d"
+             done | LC_ALL=C sort -r | cut -f2-)
+}
+
+# aicli_agent_old_versions <agent_id> <persist> <keep_previous> [keep_rollback]
+# Print one line for each old version the clean-up removes now:
+#   <kind>\t<bytes>\t<path>      kind: plain | layer | rollback
+# <keep_previous> (0/1) is the keep flag of the plain-folder and layer rules.
+# [keep_rollback] (0/1) is the same flag for rollback copies; it defaults to
+# <keep_previous>. Reads only; changes nothing.
+aicli_agent_old_versions() {
+    local id="$1" persist="$2" keep_prev="${3:-1}" keep_rb="${4:-}" scan_dir="${AICLI_PROC_SCAN_DIR:-/proc}" gen bn d
+    [ -n "$id" ] && [ -n "$persist" ] || return 0
+    [ -n "$keep_rb" ] || keep_rb="$keep_prev"
+    local AICLI_KEEP_PREVIOUS="$keep_prev"
+    _aicli_pt_prune_plan "$id" "$persist" "$scan_dir"
+    if [ "$_PT_STATUS" = "ok" ]; then
+        while IFS= read -r gen; do
+            [ -n "$gen" ] || continue
+            d="$persist/passthrough/agents/.versions/$id/$gen"
+            printf 'plain\t%s\t%s\n' "$(_aicli_path_bytes "$d")" "$d"
+        done <<< "$_PT_DELETE"
+    fi
+    _aicli_agent_layer_plan "$id" "$persist" "$scan_dir"
+    if [ "$_LP_STATUS" = "ok" ]; then
+        while IFS= read -r bn; do
+            [ -n "$bn" ] || continue
+            _aicli_layer_strict "$id" "$bn" || continue
+            printf 'layer\t%s\t%s\n' "$(_aicli_path_bytes "$persist/$bn")" "$persist/$bn"
+        done <<< "$_LP_DELETE"
+    fi
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        printf 'rollback\t%s\t%s\n' "$(_aicli_path_bytes "$d")" "$d"
+    done < <(_aicli_rollback_copies "$id" "$persist" "$keep_rb")
+    return 0
+}
+
+# aicli_agent_in_use_versions <agent_id> <persist>
+# Print one line for each old version that stays because something uses it, and
+# one line when the clean-up cannot decide at all:
+#   <path>\t<reason>      reason: "in use by workspace X", "bound to a mount", ...
+# The active version is not listed. Reads only; changes nothing.
+aicli_agent_in_use_versions() {
+    local id="$1" persist="$2" scan_dir="${AICLI_PROC_SCAN_DIR:-/proc}" gen bn why refs top live seen=" "
+    [ -n "$id" ] && [ -n "$persist" ] || return 0
+    _aicli_pt_prune_plan "$id" "$persist" "$scan_dir"
+    case "$_PT_STATUS" in
+        ok)
+            while IFS= read -r gen; do
+                [ -n "$gen" ] || continue
+                [ "$gen" = "$_PT_ACTIVE" ] && continue
+                why="$(_aicli_holders_text "$id" "$gen" "$scan_dir")"
+                printf '%s\t%s\n' "$persist/passthrough/agents/.versions/$id/$gen" "${why:-bound to a mount}"
+            done <<< "$_PT_KEEP" ;;
+        not_link|bad_link|active_missing)
+            printf '%s\t%s\n' "$persist/passthrough/agents/.versions/$id" "the active version cannot be told, so nothing is removed" ;;
+        scan_untrustworthy)
+            printf '%s\t%s\n' "$persist/passthrough/agents/.versions/$id" "a process uses this agent but its version cannot be read, so nothing is removed" ;;
+    esac
+    _aicli_agent_layer_plan "$id" "$persist" "$scan_dir"
+    case "$_LP_STATUS" in
+        ok)
+            live="$(aicli_agent_layer_names "$id" "$persist" | aicli_layer_stack_of "$_LP_ACTIVE")"
+            refs="$(aicli_agent_referenced_generations "$id" "$scan_dir")"
+            while IFS= read -r gen; do
+                [ -n "$gen" ] || continue
+                top="$(aicli_agent_generation_top "$gen" 2>/dev/null || true)"
+                [ -n "$top" ] || continue
+                why="$(_aicli_holders_text "$id" "$gen" "$scan_dir")"
+                while IFS= read -r bn; do
+                    [ -n "$bn" ] || continue
+                    _aicli_in_set "$bn" "$live" && continue
+                    case "$seen" in *" $bn "*) continue ;; esac
+                    seen="$seen$bn "
+                    printf '%s\t%s\n' "$persist/$bn" "${why:-in use by a workspace}"
+                done <<< "$(aicli_agent_layer_names "$id" "$persist" | aicli_layer_stack_of "$top")"
+            done <<< "$refs"
+            while IFS= read -r bn; do
+                [ -n "$bn" ] || continue
+                _aicli_in_set "$bn" "$live" && continue
+                case "$seen" in *" $bn "*) continue ;; esac
+                seen="$seen$bn "
+                printf '%s\t%s\n' "$persist/$bn" "mounted in a running workspace"
+            done <<< "$(aicli_agent_layers_in_overlays "$id")" ;;
+        no_layers|not_versioned|active_not_layered) : ;;
+        scan_untrustworthy)
+            printf '%s\t%s\n' "$persist" "a process uses $id but its version cannot be read, so no layer is removed" ;;
+        *)
+            printf '%s\t%s\n' "$persist" "layers of $id are kept now ($_LP_STATUS)" ;;
+    esac
+    return 0
+}
+
+# aicli_agent_remove_old_versions <agent_id> <persist> <keep_rollback>
+# Run the two clean-ups for one agent now with the previous version NOT kept,
+# then remove the rollback copies by the same rule the list uses. Each clean-up
+# takes its own lock without waiting and keeps every version in use. Prints the
+# clean-up summaries. Always returns 0.
+aicli_agent_remove_old_versions() {
+    local id="$1" persist="$2" keep_rb="${3:-1}" scan_dir="${AICLI_PROC_SCAN_DIR:-/proc}" d
+    [ -n "$id" ] && [ -n "$persist" ] || return 0
+    case "$id" in */*|.*) return 0 ;; esac
+    # The full sweep: release unused version mounts, then the plain folders,
+    # then the layers (the order the mount-time sweep uses).
+    AICLI_KEEP_PREVIOUS=0 aicli_gc_agent_generations "$id" "$persist" 0 "$scan_dir"
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        case "$d" in "$persist/aicli-rollback/$id/"*) : ;; *) continue ;; esac
+        rm -rf -- "${d:?}" 2>/dev/null || true
+        [ -e "$d" ] || printf 'removed rollback copy %s\n' "$d"
+    done < <(_aicli_rollback_copies "$id" "$persist" "$keep_rb")
     return 0
 }

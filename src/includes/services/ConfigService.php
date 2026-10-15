@@ -39,6 +39,9 @@ class ConfigService {
             // 'zram' (RAM, lost on a crash until saved) or 'disk' (durable, uses
             // space on the persistence drive). Changing it runs UpperPlacementService.
             'storage_upper_mode' => 'zram',
+            // BOOT_DISK_SPACE.md R4: 1 = each agent keeps its previous version for rollback;
+            // 0 = only the version in use stays (saves space on the boot disk).
+            'keep_previous_version' => '1',
             // #461 (RELAY_NOTICE_WORDING.md): the wording of the notices the plugin types into an
             // agent for the Relay: full | short | minimal | custom. The custom text is validated
             // by RelayNoticeWording::validateCustom (an invalid one falls back to short).
@@ -338,6 +341,11 @@ class ConfigService {
 
         if (isset($newConfig['storage_upper_mode'])) {
             $newConfig['storage_upper_mode'] = ((string)$newConfig['storage_upper_mode'] === 'disk') ? 'disk' : 'zram';
+        }
+
+        // BOOT_DISK_SPACE.md R4: keep_previous_version is 0 or 1.
+        if (isset($newConfig['keep_previous_version'])) {
+            $newConfig['keep_previous_version'] = ((string)$newConfig['keep_previous_version'] === '0') ? '0' : '1';
         }
 
         if (isset($newConfig['relay_notice_style'])) {
