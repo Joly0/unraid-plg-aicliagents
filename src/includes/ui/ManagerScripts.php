@@ -262,7 +262,13 @@ function saveAICliAgentsManager(form, silent = false) {
     var originalUser = ($('#aicli-original-user').val() || 'root');
     var newUser = ($(form).find('[name="user"]').val() || 'root');
     var userChanged = (originalUser !== newUser);
-    $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=' + csrf, params, function() {
+    $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=' + csrf, params, function(r) {
+        // AGENT_TEMP_FOLDER.md R2: the server refused one setting (for example a folder under /mnt/user, or the boot disk on a
+        // USB stick). The rest was saved. Show the reason, then reload the form so it shows the stored value.
+        if (r && r.status === 'error' && r.message) {
+            swal({ title: "Not saved", text: r.message, type: "error" }, function() { safeReload(); });
+            return;
+        }
         if (userChanged) {
             // Always reload on a Terminal User switch -- silent or not. The new
             // user's workspaces.json + args files live in a different home

@@ -370,6 +370,59 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </div>
                         </dd>
 
+                        <?php /* RESPONSIVE_PRIORITY.md: the setting responsive_priority. */ ?>
+                        <dt>Keep the terminal responsive</dt>
+                        <dd>
+                            <select name="responsive_priority" aria-label="Keep the terminal responsive" data-testid="responsive-priority" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['responsive_priority'] ?? '0', '1', _('On'))?>
+                                <?=mk_option($config['responsive_priority'] ?? '0', '0', _('Off (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Gives the Unraid web page and the terminals a higher priority than other programs, and the plugin's own background work a lower one. Typing in a terminal then stays quick when the server is busy.
+                                Docker containers, virtual machines and array services are not changed. Agents keep the normal priority. Off puts everything back at once.
+                            </div>
+                        </dd>
+
+                        <?php /* AGENT_TEMP_FOLDER.md R2: the settings agent_tmp_location, agent_tmp_path and agent_tmp_warn_mb.
+                           The choice "boot" shows only when the boot device is an internal disk (not a USB stick). */
+                        $aicliTmpBootOk = false;
+                        try { $aicliTmpBootOk = \AICliAgents\Services\AgentTempService::bootAllowed(); } catch (\Throwable $e) { $aicliTmpBootOk = false; } ?>
+                        <dt>Agent temporary folder</dt>
+                        <dd>
+                            <select name="agent_tmp_location" aria-label="Agent temporary folder" data-testid="agent-tmp-location" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'ram', _('RAM (default)'))?>
+                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'pool', _('A folder on a pool'))?>
+                                <?php if ($aicliTmpBootOk): ?>
+                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'boot', _('The internal boot disk'))?>
+                                <?php endif; ?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Where agents keep their temporary files, for example the git clones of an offline session. RAM is the default and is fast, but a large temporary folder uses the memory of the server and can make typing slow.
+                                A new session uses the new place. Sessions that already run keep the old one. If the folder is not ready when a session starts, the session uses RAM.
+                            </div>
+                        </dd>
+                        <dt>Agent temporary folder on a pool</dt>
+                        <dd>
+                            <input type="text" name="agent_tmp_path" aria-label="Agent temporary folder on a pool" data-testid="agent-tmp-path"
+                                   value="<?=htmlspecialchars((string)($config['agent_tmp_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                   placeholder="/mnt/cache/agent-tmp" style="width: 100%;" <?=$autoSave?>>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Used when the temporary folder is "A folder on a pool". Give a full path under a mounted pool or disk, for example /mnt/cache/agent-tmp. A path under /mnt/user or /mnt/user0 is not accepted. Each user gets a folder of their own inside it.
+                            </div>
+                        </dd>
+                        <dt>Warn when agent temporary files in RAM pass</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="agent_tmp_warn_mb" aria-label="Warn when agent temporary files in RAM pass" data-testid="agent-tmp-warn-mb"
+                                       value="<?=htmlspecialchars((string)($config['agent_tmp_warn_mb'] ?? '1024'), ENT_QUOTES, 'UTF-8')?>"
+                                       min="64" max="1048576" step="64" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">MB</span>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                The Boot disk space card on the Storage tab then shows a warning with a button that removes the temporary files of closed sessions. Default 1024 MB.
+                            </div>
+                        </dd>
+
                         <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
                            only — stored in localStorage, never sent to the server on its own, and
                            never round-tripped through this form's own action=save. It travels only

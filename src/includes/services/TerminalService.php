@@ -542,6 +542,8 @@ class TerminalService {
                     @chmod($sock, 0666);
                     @chown($sock, 'nobody');
                     @chgrp($sock, 'users');
+                    // RESPONSIVE_PRIORITY.md R5: raise the new ttyd (and its tmux server) when "Keep the terminal responsive" is on.
+                    ConfigService::runResponsivePriority('auto');
                     LogService::log("Successfully established terminal socket and launched session for $id.", LogService::LOG_INFO, "TerminalService");
                     // Done from PHP's perspective — the agent itself cold-starts
                     // inside tmux; AICLI_TTYD_READY covers that last leg in the UI.

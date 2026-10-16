@@ -597,6 +597,14 @@ class AdminService {
             // BOOT_DISK_SPACE.md R6
             'history_move_path'                 => ['group' => 'consolidate', 'description' => 'Folder for moved sessions: a folder under a pool (/mnt/<pool>/...) that receives old conversation sessions moved out of a home. Empty means none is chosen yet. Moved sessions cannot be resumed, and are not reachable while the array is stopped.'],
 
+            // RESPONSIVE_PRIORITY.md
+            'responsive_priority'               => ['group' => 'general', 'description' => 'Keep the terminal responsive: 1 gives the Unraid web page (nginx, php-fpm, emhttpd) and the plugin terminals (ttyd, tmux) a higher priority, and the plugin background work a lower one. 0 is off (default) and puts every changed process back. Docker containers, virtual machines and array services are never changed. Changes only on the Settings page — an agent cannot change it.'],
+
+            // AGENT_TEMP_FOLDER.md
+            'agent_tmp_location'               => ['group' => 'general', 'description' => 'Agent temporary folder: where agent sessions keep temporary files. ram (default) is /tmp, which is memory on Unraid. pool uses the folder agent_tmp_path on a mounted pool or disk (never under /mnt/user). boot uses a folder on the boot disk and only works when the boot disk is internal, not a USB stick. Changes only on the Settings page — an agent cannot change it.'],
+            'agent_tmp_path'                   => ['group' => 'general', 'description' => 'Agent temporary folder on a pool: a full path under a mounted pool or disk, for example /mnt/cache/agent-tmp. Used when agent_tmp_location is pool. A path under /mnt/user or /mnt/user0 is refused.'],
+            'agent_tmp_warn_mb'                => ['group' => 'general', 'description' => 'Warn when agent temporary files in RAM pass this size, in MB (default 1024). The Boot disk space card then shows a warning with a clean-up button.'],
+
             // ---- boot integrity ----
             'boot_integrity_strict' => ['group' => 'boot_integrity', 'description' => 'Blocks boot when a storage integrity check fails, instead of only warning.'],
             'verify_sha256_on_boot' => ['group' => 'boot_integrity', 'description' => 'Checks file hashes on every boot, instead of only file size and time.'],

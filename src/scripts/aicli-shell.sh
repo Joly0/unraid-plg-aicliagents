@@ -501,6 +501,34 @@ perf_log() {
 }
 FUNCOEF
 
+    # RESPONSIVE_PRIORITY.md R4: the tmux server may run at nice -5 (setting "Keep the
+    # terminal responsive"). The agent must not inherit that. Put it back to nice 0 and
+    # ionice best-effort 4 before anything else runs. Harmless when the nice value is
+    # already 0 or higher: the block then does nothing.
+    cat << 'PRIOEOF' >> "$RUN_SCRIPT"
+# RESPONSIVE_PRIORITY begin
+_aicli_nice="$(nice 2>/dev/null)"
+case "$_aicli_nice" in
+    -*) renice -n 0 -p $$ >/dev/null 2>&1; ionice -c2 -n4 -p $$ >/dev/null 2>&1 ;;
+esac
+unset _aicli_nice
+# RESPONSIVE_PRIORITY end
+PRIOEOF
+
+    # AGENT_TEMP_FOLDER.md R3: when the setting "Agent temporary folder" is not RAM, the agent
+    # keeps its temporary files in <folder>/<user>. agent-tmp.sh prints that folder, or prints
+    # nothing (and logs one warning) when the folder is not ready. A launch never waits for it.
+    # AGENT_TMP begin
+    _agent_tmp_dir=""
+    if [ -f "$PLUGIN_SRC/scripts/agent-tmp.sh" ]; then
+        _agent_tmp_dir="$(bash "$PLUGIN_SRC/scripts/agent-tmp.sh" resolve "${TARGET_USER:-root}" 2>/dev/null)"
+    fi
+    if [ -n "$_agent_tmp_dir" ]; then
+        printf 'export TMPDIR=%q\n' "$_agent_tmp_dir" >> "$RUN_SCRIPT"
+        printf 'export CLAUDE_CODE_TMPDIR=%q\n' "$_agent_tmp_dir" >> "$RUN_SCRIPT"
+    fi
+    # AGENT_TMP end
+
     printf 'export AICLI_SESSION_ID=%q\n' "$ID" >> "$RUN_SCRIPT"
     # Relay's MCP child is launched by the agent from this generated script,
     # not from the original ttyd command. Preserve the launch-bound command
@@ -1618,6 +1646,11 @@ EOF
     # from an agent that simply exited.
     tmux set-hook -g session-closed "run-shell -b '$PLUGIN_SRC/scripts/tmux-session-closed.sh #{hook_session_name} $DEBUG_LOG'" 2>/dev/null
     tmux display-message -p '#{pid}' > "${TMUX_TMPDIR:-/tmp/unraid-aicliagents/tmux/s-$ID}/server.pid" 2>/dev/null
+    # RESPONSIVE_PRIORITY.md R5: a new tmux server starts at nice 0. When the setting is on,
+    # raise it now. The script reads the setting itself and does nothing when it is off.
+    if [ -f "$PLUGIN_SRC/scripts/priority.sh" ]; then
+        bash "$PLUGIN_SRC/scripts/priority.sh" auto >/dev/null 2>&1 </dev/null &
+    fi
 fi
 
 log_aicli "DEBUG" 3 "Attaching to tmux session $SESSION..."

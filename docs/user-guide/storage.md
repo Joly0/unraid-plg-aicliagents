@@ -391,6 +391,19 @@ When the boot disk is 85% full, the plugin sends an Unraid notification and show
 
 Each warning ends with "Open Home Storage, Boot disk space." The notification is a link: a click opens the **Home Storage** tab at the card.
 
+## Temporary files of agents in RAM
+
+Agents write temporary files, for example git clones, to a temporary folder. On Unraid that folder is RAM. A large temporary folder uses the memory of the server and can make typing slow.
+
+When the temporary files of agents in RAM pass the limit, the card **Boot disk space** shows an orange warning. The limit is the setting **Warn when agent temporary files in RAM pass** (default 1024 MB). The warning names the size and how much of it belongs to sessions that no longer run.
+
+1. Press **Clean up temporary files of closed sessions**. Expect: a dialog names the size it frees and the age of the numbers.
+2. Press **Clean up** to continue, or **Cancel** to stop. Expect: a message says that the clean-up is queued. The Activity tray shows the steps ("Looking for closed sessions", "Removing temporary files of closed sessions") and the result.
+
+The clean-up removes only the temporary files of sessions that ended at least a day ago: nothing in them changed for 24 hours. A session that runs stays. The whole temporary folder of a project stays while a program works in that project, or a workspace of the plugin uses it, even when one session in it is idle. Your projects and your home are not touched.
+
+To keep new sessions from filling RAM, set **Agent temporary folder** on the **Configuration** tab to **A folder on a pool**. A new session then keeps its temporary files there.
+
 ## Old agent versions
 
 Each agent keeps its last version so you can roll back. The old versions use space on the boot disk. The plugin removes the oldest ones by itself. You can also remove them at once.
@@ -559,6 +572,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-16** — The Boot disk space card warns when agent temporary files in RAM are large, and offers **Clean up temporary files of closed sessions**. Spec `docs/specs/AGENT_TEMP_FOLDER.md`, issue #554.
 - **2026-10-16** — The dialogs of the card **Boot disk space** show the time of the numbers they use and offer **Measure now** when the numbers are old. They no longer measure the disk. **Remove old versions** runs as a job with steps in the Activity tray. The measure has a time limit of 5 minutes. Spec `docs/specs/BOOT_DISK_SPACE.md` (Implementation notes #552), issue #552.
 - **2026-10-16** — New: the card **Boot disk space** at the top of the **Home Storage** tab shows where the boot disk space goes, with one line and one button for each part, **Measure now**, and **Remove** for left-over items. The full-disk warning now names the biggest part and ends with "Open Home Storage, Boot disk space." Spec `docs/specs/BOOT_DISK_SPACE.md` (R1, R2), issues #538 and #531.
 - **2026-10-16** — New setting **Keep the previous version for rollback** and the action **Remove old versions**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R4), issue #536.

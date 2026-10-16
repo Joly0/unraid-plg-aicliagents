@@ -990,6 +990,12 @@ class SupervisorService {
         return OldVersionsJobService::isOp($op);
     }
 
+    /** AGENT_TEMP_FOLDER.md R5: op cleantmp (Clean up temporary files of closed sessions). */
+    private static function isCleanTmpOp(string $op): bool {
+        require_once __DIR__ . '/TempCleanupJobService.php';
+        return TempCleanupJobService::isOp($op);
+    }
+
     /** BOOT_DISK_SPACE.md R6: ops historymove and historyback. */
     private static function isHistoryOp(string $op): bool {
         require_once __DIR__ . '/HistoryJobService.php';
@@ -1118,6 +1124,10 @@ class SupervisorService {
                             // BOOT_DISK_SPACE.md R4 (#552): say how much the removal freed.
                             $step = OldVersionsJobService::doneStep($jobId);
                             OldVersionsJobService::cleanup($jobId);
+                        } elseif (self::isCleanTmpOp($op)) {
+                            // AGENT_TEMP_FOLDER.md R5: say how much the clean-up freed.
+                            $step = TempCleanupJobService::doneStep($jobId);
+                            TempCleanupJobService::cleanup($jobId);
                         } elseif (self::isHistoryOp($op)) {
                             // BOOT_DISK_SPACE.md R6: say how many files moved and how many stayed.
                             $step = HistoryJobService::doneStep($jobId);
@@ -1155,6 +1165,9 @@ class SupervisorService {
                         } elseif (self::isRemoveOldOp((string)($job['op'] ?? '')) && ($oldReason = OldVersionsJobService::failureReason($jobId)) !== '') {
                             $err = $oldReason;
                             OldVersionsJobService::cleanup($jobId);
+                        } elseif (self::isCleanTmpOp((string)($job['op'] ?? '')) && ($tmpReason = TempCleanupJobService::failureReason($jobId)) !== '') {
+                            $err = $tmpReason;
+                            TempCleanupJobService::cleanup($jobId);
                         } elseif (self::isHistoryOp((string)($job['op'] ?? '')) && ($historyReason = HistoryJobService::failureReason($jobId)) !== '') {
                             // BOOT_DISK_SPACE.md R6: the job wrote its reason ("The array is stopped...").
                             $err = $historyReason;
@@ -1193,6 +1206,10 @@ class SupervisorService {
                         // BOOT_DISK_SPACE.md R4 (#552): the step from the progress file of the job.
                         $step = OldVersionsJobService::runningStep($jobId);
                         $progress = OldVersionsJobService::runningProgress($jobId);
+                    } elseif (self::isCleanTmpOp($jobOp)) {
+                        // AGENT_TEMP_FOLDER.md R5: the step from the progress file of the job.
+                        $step = TempCleanupJobService::runningStep($jobId);
+                        $progress = TempCleanupJobService::runningProgress($jobId);
                     } elseif (self::isHistoryOp($jobOp)) {
                         // BOOT_DISK_SPACE.md R6: counts from the progress file of the job.
                         $step = HistoryJobService::runningStep($jobOp, $jobId);

@@ -206,6 +206,19 @@ class UtilityHandler {
             $_POST['history_move_path'] = \AICliAgents\Services\HistoryMoveService::normaliseSetting(
                 $hist, (string)(\AICliAgents\Services\ConfigService::getConfig()['history_move_path'] ?? ''));
         }
+        // AGENT_TEMP_FOLDER.md R2: a refused Agent temporary folder is not saved. The rest of the form still
+        // saves, and the answer carries the plain reason for the person.
+        $tmpRefusal = '';
+        if (array_key_exists('agent_tmp_location', $_POST) || array_key_exists('agent_tmp_path', $_POST)) {
+            $tmpCfg = \AICliAgents\Services\ConfigService::getConfig();
+            $tmpLoc = is_array($_POST['agent_tmp_location'] ?? '') ? 'ram' : (string)($_POST['agent_tmp_location'] ?? ($tmpCfg['agent_tmp_location'] ?? 'ram'));
+            $tmpPath = is_array($_POST['agent_tmp_path'] ?? '') ? '' : trim((string)($_POST['agent_tmp_path'] ?? ($tmpCfg['agent_tmp_path'] ?? '')));
+            $tmpChk = \AICliAgents\Services\AgentTempService::checkSetting($tmpLoc, $tmpPath);
+            if (!$tmpChk['ok']) {
+                $tmpRefusal = $tmpChk['reason'];
+                unset($_POST['agent_tmp_location'], $_POST['agent_tmp_path']);
+            }
+        }
         saveAICliConfig($_POST);
         // HOME_BACKUP.md: the Manager UI no longer posts backup_* fields here
         // (#287: each home saves its own settings through
@@ -216,6 +229,7 @@ class UtilityHandler {
         if (array_key_exists('backup_schedule', $_POST)) {
             \AICliAgents\Services\BackupCronService::sync(getAICliConfig());
         }
+        if ($tmpRefusal !== '') return ['status' => 'error', 'message' => $tmpRefusal, 'field' => 'agent_tmp'];
         return ['status' => 'ok'];
     }
 

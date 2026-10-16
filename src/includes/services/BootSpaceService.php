@@ -423,6 +423,15 @@ class BootSpaceService
         $out = ['measured_at' => $now, 'disk' => $disk, 'parts' => self::sortParts($parts),
             'agents' => $agentRows, 'history' => $history, 'history_ages' => self::HISTORY_AGES, 'caches' => $caches,
             'partial' => !$complete || MeasureDeadline::wasPartial()];
+        // AGENT_TEMP_FOLDER.md R4: the agent temporary folders in RAM. Background measure only.
+        // A run that passes its own du (a test) never reads the real /tmp unless it passes agent_tmp too.
+        if (isset($seams['agent_tmp'])) {
+            $out['agent_tmp'] = $seams['agent_tmp'];
+        } elseif (!isset($seams['du']) && !self::outOfTime()) {
+            try {
+                $out['agent_tmp'] = AgentTempService::measure(['du' => $du, 'now' => $now]);
+            } catch (\Throwable $e) { /* the card shows no warning */ }
+        }
         if ($oldVersions !== null) $out['old_versions'] = $oldVersions;
         if ($convert !== null) $out['convert'] = $convert;
         return $out;
@@ -647,6 +656,18 @@ class BootSpaceService
      * HomeCacheService::status(). Null when the file has no figures for the home.
      * @return array<string,mixed>|null
      */
+    /**
+     * The agent temporary folders in RAM, as the last measurement kept them (AGENT_TEMP_FOLDER.md R4):
+     * ram_bytes, closed_bytes, closed_sessions, warn_mb, warn. Null when the file has none. Reads the file only.
+     * @return array<string,mixed>|null
+     */
+    public static function cachedAgentTmp(?array $data = null): ?array
+    {
+        $data = $data ?? self::read();
+        $t = $data['agent_tmp'] ?? null;
+        return is_array($t) ? $t : null;
+    }
+
     public static function cachedCache(string $user, ?array $data = null): ?array
     {
         $data = $data ?? self::read();

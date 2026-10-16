@@ -2451,6 +2451,7 @@ _op_history() {
 
     local runner="${STORAGE_DIR:-}/history-move.php"
     [ "$op" = "removeold" ] && runner="${STORAGE_DIR:-}/remove-old-versions.php"
+    [ "$op" = "cleantmp" ] && runner="${STORAGE_DIR:-}/clean-agent-tmp.php"   # AGENT_TEMP_FOLDER.md R5
     if [ -z "$id" ] || [ -z "$job_id" ] || [ ! -f "$runner" ] || ! command -v php >/dev/null 2>&1; then
         log_error "History job for $entity cannot run: missing id, job id, runner or php"
         _OP_EXIT=1
@@ -4211,6 +4212,25 @@ _relay_http_audit_tick() {
     ) || true
 }
 
+# RESPONSIVE_PRIORITY.md R4: keep the terminal responsive. Every 300 s (and on the first
+# tick after the supervisor starts) run priority.sh auto. It does nothing when the setting
+# is off. Unraid restarts nginx and php-fpm on some settings changes, and the new processes
+# start at nice 0, so the raise has to be repeated. Never blocks the tick: the lock fd is
+# closed for the child and `timeout` bounds it.
+_PRIORITY_LAST=0
+_priority_tick() {
+    local now interval="${AICLI_PRIORITY_INTERVAL:-300}" script
+    now="$(date +%s)"
+    [ $(( now - _PRIORITY_LAST )) -ge "$interval" ] || return 0
+    _PRIORITY_LAST="$now"
+    script="${AICLI_PRIORITY_SH:-$(dirname "$SCRIPT_PATH")/../priority.sh}"
+    [ -f "$script" ] || return 0
+    (
+        [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&-
+        timeout 30 bash "$script" auto >/dev/null 2>&1
+    ) || true
+}
+
 # ---------------------------------------------------------------------------
 # Work loop — one iteration, called every tick
 # ---------------------------------------------------------------------------
@@ -4256,6 +4276,9 @@ _work_tick() {
 
     # Step 1d3: #393 — warn when the boot disk fills (acts every 300 s).
     declare -f _pool_space_tick >/dev/null 2>&1 && { _pool_space_tick || true; }
+
+    # Step 1d4: RESPONSIVE_PRIORITY.md — keep the terminal responsive (acts every 300 s, only when the setting is on).
+    _priority_tick
 
     # Step 1e: SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 — release superseded agent
     # versions once nothing is running them, rate-limited to 5 min internally.
@@ -4388,7 +4411,7 @@ _work_tick() {
                     backup)
                         _op_backup_home "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
-                    historymove|historyback|removeold)
+                    historymove|historyback|removeold|cleantmp)
                         _op_history "$req_op" "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
                     restore)

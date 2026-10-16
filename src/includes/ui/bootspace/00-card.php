@@ -92,6 +92,19 @@
         '</div>';
     }
 
+    // Pure: the warning about the agent temporary folders in RAM (AGENT_TEMP_FOLDER.md R4). '' when there is no warning.
+    // The numbers come from the background measure (data.agent_tmp). The button opens the dialog of fragment 60.
+    function tmpWarnHtml(t) {
+        if (!t || !t.warn) return '';
+        var closed = Number(t.closed_bytes) || 0;
+        var canClean = closed > 0;
+        return '<div data-testid="boot-space-tmp-warn" style="padding:10px; margin-bottom:12px; border:1px solid #ff8c00; border-radius:4px; background:rgba(255,140,0,0.08); font-size:12px;">' +
+            '<div style="font-weight:600; margin-bottom:3px;"><i class="fa fa-exclamation-triangle"></i> Temporary files of agents use ' + human(t.ram_bytes) + ' of RAM</div>' +
+            '<div style="opacity:0.85; margin-bottom:6px;">The warning limit is ' + human((Number(t.warn_mb) || 0) * 1048576) + '. Sessions that no longer run hold ' + human(closed) + ' of it. A large temporary folder in RAM can make typing slow. The setting Agent temporary folder (Configuration tab) can move new sessions to a pool.</div>' +
+            '<button type="button" class="aicli-bs-tmp-act" data-testid="boot-space-tmp-clean"' + (canClean ? '' : ' aria-disabled="true" title="No closed session holds temporary files."') +
+            ' style="font-size:11px; padding:3px 10px; margin:0; ' + (canClean ? '' : 'opacity:0.4; cursor:not-allowed;') + '">Clean up temporary files of closed sessions</button></div>';
+    }
+
     // Pure: the whole card body. `data` is the answer of get_boot_space.
     function cardHtml(data) {
         var parts = (data && data.parts) || [];
@@ -110,6 +123,7 @@
             '<div class="aicli-card-body">' +
                 '<p style="margin:0 0 10px; font-size:12px; opacity:0.75;">Where the space on the boot disk goes. The sizes are the space really used on disk, so compression is counted. The largest part is first.</p>' +
                 diskHtml(data && data.disk) +
+                tmpWarnHtml(data && data.agent_tmp) +
                 rows +
                 '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px; font-size:11px; opacity:0.85;">' +
                     '<span>' + stamp + '</span>' +
@@ -247,7 +261,11 @@
         }, 100);
     });
 
+    // The last answer of get_boot_space (the fragments read it).
+    reg.data = function () { return state.data; };
+
     // Test seams.
+    reg.tmpWarnHtml = tmpWarnHtml;
     reg.cardHtml = cardHtml;
     reg.human = human;
     reg.load = load;

@@ -108,6 +108,8 @@ require_once __DIR__ . '/services/HomeCacheService.php';  // BOOT_DISK_SPACE.md 
 require_once __DIR__ . '/services/MeasureDeadline.php';   // #552 — one deadline for the background measurement
 require_once __DIR__ . '/services/BootSpaceService.php';  // BOOT_DISK_SPACE.md R1 — the Boot disk space breakdown
 require_once __DIR__ . '/services/OldVersionsJobService.php';   // #552 — the supervisor job Remove old versions
+require_once __DIR__ . '/services/AgentTempService.php';   // AGENT_TEMP_FOLDER.md — the Agent temporary folder setting, its measure and clean-up
+require_once __DIR__ . '/services/TempCleanupJobService.php';   // AGENT_TEMP_FOLDER.md R5 — the supervisor job Clean up temporary files
 // T-11 (Feature #1360) — workspace export/import bundles
 require_once __DIR__ . '/services/WorkspaceBundleService.php';
 require_once __DIR__ . '/services/AgentRelayService.php';

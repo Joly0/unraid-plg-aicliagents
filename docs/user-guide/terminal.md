@@ -166,6 +166,10 @@ A phone or a tablet does not do this. It connects a terminal only when you open 
 | **Terminal Theme** (Configuration tab) | The colors of the terminal windows. Choices: **Dark** (white text on a dark gray ground), **Light** (dark text on white), **Solarized** (muted blue-gray text on a dark teal ground). | Dark | When the dark ground is hard to read in your room, or you use a light Unraid theme and want the terminal to match. |
 | **Font Size** (Configuration tab) | The text size of the terminal windows, in pixels. Allowed values: 8 to 32. | 14 | When the text is too small on your screen, or you want more lines on the screen. |
 | **Upload size limit** (Configuration tab) | The largest file that the upload window accepts, in MB. 0 means no limit. | 512 | When you need to send a larger file, or you want to protect the server's disk from large files. |
+| **Keep the terminal responsive** (Configuration tab) | Gives the Unraid web page and the terminals a higher priority than other programs, and the plugin background work a lower one. Docker containers, virtual machines and array services are not changed. | Off | When typing in a terminal lags while the server is busy. |
+| **Agent temporary folder** (Configuration tab) | Where agents keep their temporary files. RAM is the default. A folder on a pool keeps large temporary files out of memory, so typing stays quick. | RAM | When agent temporary files grow large. |
+
+**Keep the terminal responsive** applies at once. Choose **On**, and typing in a terminal stays quick when Plex, a virtual machine or a backup uses the processor. Your agents keep the normal priority, so the setting does not slow them down. Choose **Off** to put every program back at its normal priority.
 
 A change to **Terminal Theme** or **Font Size** reaches a terminal window when that window loads. Reload the terminal page to see the change in the windows that are already open.
 
@@ -212,6 +216,8 @@ When the plugin types a fixed notice into an agent (for example, a Relay notice)
 <details>
 <summary>Change history</summary>
 
+- **2026-10-16** — New setting **Agent temporary folder** on the Configuration tab. Spec `docs/specs/AGENT_TEMP_FOLDER.md`, issue #554.
+- **2026-10-16** — New setting **Keep the terminal responsive** on the Configuration tab. Spec `docs/specs/RESPONSIVE_PRIORITY.md`, issue #553.
 - **2026-10-16** — A path in the terminal is a link only when the file exists. A path with no file type (`~/bin/backup`) and a bare file name in the workspace folder (`README.md`) can be links too. Spec `docs/specs/TMUX_PATH_LINKS.md`, issue #544.
 
 </details>

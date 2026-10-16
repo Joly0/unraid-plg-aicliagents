@@ -11,6 +11,7 @@
 namespace AICliAgents\Services;
 
 require_once __DIR__ . '/HomeCacheService.php';
+require_once __DIR__ . '/AgentTempService.php';
 
 class ConfigService {
     const CONFIG_PATH = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
@@ -148,6 +149,15 @@ class ConfigService {
             // /mnt/<pool>. Old conversation sessions move there from the home (Storage tab,
             // Boot disk space, Move old sessions).
             'history_move_path'                    => '',
+            // RESPONSIVE_PRIORITY.md: "Keep the terminal responsive" (1 = on). Off by default: a public plugin
+            // must not change the priority of Unraid's own programs unless the user asks.
+            'responsive_priority'                  => '0',
+            // AGENT_TEMP_FOLDER.md (#554): "Agent temporary folder". ram (default) = /tmp as today; pool = the folder
+            // agent_tmp_path on a mounted pool or disk; boot = a folder next to the persistence data (internal boot disk only).
+            // agent_tmp_warn_mb: the Boot disk space card warns when the agent temporary folders in RAM pass this size.
+            'agent_tmp_location'                    => 'ram',
+            'agent_tmp_path'                        => '',
+            'agent_tmp_warn_mb'                     => '1024',
             // CONTINUE_ON_RESTART.md (2026-09-09): moved here from the Relay's
             // settings.json — this governs whether a WORKSPACE resumes its own
             // work after a restart, not Relay messaging. On by default, same as
@@ -374,6 +384,29 @@ class ConfigService {
             $newConfig['storage_upper_mode'] = ((string)$newConfig['storage_upper_mode'] === 'disk') ? 'disk' : 'zram';
         }
 
+        // AGENT_TEMP_FOLDER.md R2: the three settings of the agent temporary folder. A refused value is never
+        // stored: the stored one stays (UtilityHandler::save tells the person the reason).
+        if (array_key_exists('agent_tmp_warn_mb', $newConfig)) {
+            $newConfig['agent_tmp_warn_mb'] = AgentTempService::normaliseWarnMb($newConfig['agent_tmp_warn_mb']);
+        }
+        if (array_key_exists('agent_tmp_location', $newConfig) || array_key_exists('agent_tmp_path', $newConfig)) {
+            $cur = self::getConfig();
+            $wantLoc = $newConfig['agent_tmp_location'] ?? ($cur['agent_tmp_location'] ?? 'ram');
+            $wantPath = $newConfig['agent_tmp_path'] ?? ($cur['agent_tmp_path'] ?? '');
+            $chk = AgentTempService::checkSetting($wantLoc, $wantPath);
+            if ($chk['ok']) {
+                $newConfig['agent_tmp_location'] = $chk['location'];
+                if (array_key_exists('agent_tmp_path', $newConfig) || $chk['location'] === 'pool') $newConfig['agent_tmp_path'] = $chk['path'];
+            } else {
+                unset($newConfig['agent_tmp_location'], $newConfig['agent_tmp_path']);
+            }
+        }
+
+        // RESPONSIVE_PRIORITY.md: responsive_priority is 0 or 1. Anything else is 0.
+        if (array_key_exists('responsive_priority', $newConfig)) {
+            $newConfig['responsive_priority'] = ((string)$newConfig['responsive_priority'] === '1') ? '1' : '0';
+        }
+
         // BOOT_DISK_SPACE.md R4: keep_previous_version is 0 or 1.
         if (isset($newConfig['keep_previous_version'])) {
             $newConfig['keep_previous_version'] = ((string)$newConfig['keep_previous_version'] === '0') ? '0' : '1';
@@ -404,6 +437,7 @@ class ConfigService {
         $oldAdminTools      = (string)($config['admin_tools_enabled'] ?? '0');
         $oldVoiceEnabled    = (string)($config['voice_enabled'] ?? '0');
         $oldNotebookEnabled = (string)($config['notebook_enabled'] ?? '1');
+        $oldResponsive      = (string)($config['responsive_priority'] ?? '0');
 
         $changedKeys = [];
         foreach ($newConfig as $key => $val) {
@@ -436,6 +470,12 @@ class ConfigService {
                 LogService::log("Successfully updated plugin configuration. Changed keys: " . implode(", ", $changedKeys), LogService::LOG_INFO, "ConfigService");
                 LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'config', 'config_saved', ['changed_keys' => $changedKeys]);
             }
+        }
+
+        // RESPONSIVE_PRIORITY.md R4: a real change of the setting applies (on) or resets (off) at once.
+        $newResponsive = (string)($config['responsive_priority'] ?? '0');
+        if ($newResponsive !== $oldResponsive) {
+            self::runResponsivePriority($newResponsive === '1' ? 'apply' : 'reset');
         }
 
         // Update cron job if version check schedule changed
@@ -621,6 +661,29 @@ class ConfigService {
         // (the install flock fd 9, the installer's output pipe fd 4).
         UtilityService::spawnDetached(['/bin/bash', '-c', 'sleep 3; /etc/rc.d/rc.nginx reload']);
         LogService::log("Nginx configuration updated; reload scheduled (detached).", LogService::LOG_DEBUG, "ConfigService");
+    }
+
+    /** @var (callable(string):void)|null test seam: replaces the real start of priority.sh. */
+    public static $responsivePrioritySpawner = null;
+
+    /**
+     * RESPONSIVE_PRIORITY.md R4: run priority.sh (apply, reset or auto) detached. The script
+     * changes only an allow-list of processes and reads the setting itself in the auto mode.
+     * Best effort: it never throws.
+     */
+    public static function runResponsivePriority(string $mode): void {
+        if (!in_array($mode, ['apply', 'reset', 'auto'], true)) return;
+        try {
+            if (self::$responsivePrioritySpawner !== null) {
+                (self::$responsivePrioritySpawner)($mode);
+                return;
+            }
+            $script = dirname(__DIR__, 2) . '/scripts/priority.sh';
+            if (!is_file($script)) return;
+            UtilityService::spawnDetached(['/bin/bash', $script, $mode]);
+        } catch (\Throwable $e) {
+            LogService::log("priority.sh $mode could not start: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
+        }
     }
 
     /**
