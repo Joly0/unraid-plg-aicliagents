@@ -1015,6 +1015,12 @@
         font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
         font-size: 10.5px; color: var(--text-color, #646978); opacity: 0.6;
     }
+    /* The "Remove old versions" link is a real action. Its tap area is 44 px tall like a button:
+       the box is 44 px and the negative margin keeps the layout at the text height. */
+    .av2-foot .av2-meta .av2-remove-old {
+        display: inline-flex; align-items: center; box-sizing: border-box;
+        min-height: 44px; min-width: 44px; padding: 0 4px; margin: -15px 0; vertical-align: middle;
+    }
     .av2-foot .av2-actions { display: flex; gap: 8px; }
 
     /* Channel panel — segmented control with inset shadow + sharper active pill */

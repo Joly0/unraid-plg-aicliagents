@@ -334,7 +334,7 @@
                     <span style="font-size:11px;">Enable for agents</span>
                     <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Tick each agent that should receive this server the next time you click Apply to agents.</p>
                     <div id="hub-agent-checks" class="hub-agent-grid"></div>
-                    <div id="hub-agent-checks-empty" style="display:none; font-size:11px; opacity:0.6;">
+                    <div id="hub-agent-checks-empty" style="display:none; font-size:11px; opacity:0.75;">
                         No supported agents are installed yet — the server definition is stored and can be targeted later.
                     </div>
                 </div>

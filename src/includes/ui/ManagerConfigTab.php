@@ -458,7 +458,10 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         var pv = document.getElementById('aicli-relay-notice-preview');
                         if (!st || !tx || !pv) return;
                         tx.style.display = st.value === 'custom' ? 'block' : 'none';
+                        // Answers can arrive out of order. Only the answer of the newest request may write the preview.
+                        var seq = window.aicliRelayNoticeSeq = (window.aicliRelayNoticeSeq || 0) + 1;
                         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx.value) + '&csrf_token=' + csrf, function (r) {
+                            if (seq !== window.aicliRelayNoticeSeq) return;
                             if (r.status !== 'ok') { pv.style.color = '#d03b3b'; pv.textContent = r.message || 'This text cannot be used.'; return; }
                             pv.style.color = '';
                             pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
@@ -470,7 +473,9 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         var st = document.getElementById('aicli-relay-notice-style');
                         var tx = document.getElementById('aicli-relay-notice-custom');
                         if (tx) tx.style.display = st.value === 'custom' ? 'block' : 'none';
+                        var seq = window.aicliRelayNoticeSeq = (window.aicliRelayNoticeSeq || 0) + 1;
                         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx ? tx.value : '') + '&csrf_token=' + csrf, function (r) {
+                            if (seq !== window.aicliRelayNoticeSeq) return;
                             var pv = document.getElementById('aicli-relay-notice-preview');
                             if (pv && r.status === 'ok') pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
                         });
