@@ -7,7 +7,9 @@
  *   size it frees, and it runs the AJAX action clear_home_caches for the home of the line.
  *   The server refuses while a workspace of that home runs.
  *   `part` carries: user (the home), and optionally bytes and on_boot_bytes (the sizes the
- *   card showed). The dialog reads the live size first (get_home_cache_status).
+ *   card showed). The dialog reads the size of the last background measurement
+ *   (get_home_cache_status, a read) and shows its age (#552). When the numbers are older than
+ *   10 minutes or missing, the dialog offers Measure now. It never measures itself.
  * Dependencies: jQuery, SweetAlert, CommonLogging.php (aicliAjax), escapeHtml
  *   (ManagerStorageScripts.php).
  * Constraints: Atomic UI fragment.
@@ -26,7 +28,11 @@
     }
 
     // Pure: the text of the confirm. `freed` is the size the action removes.
-    function hcConfirmText(user, freed, location) {
+    function hcStamp(st) {
+        return (window.aicliBootSpace && typeof window.aicliBootSpace.stampHtml === 'function') ? window.aicliBootSpace.stampHtml(st) : '';
+    }
+
+    function hcConfirmText(user, freed, location, st) {
         var where = location === 'ram' ? 'in RAM' : (location === 'pool' ? 'on the pool' : 'on the boot disk');
         return '<div style="text-align:left; font-size:12px; line-height:1.6;">' +
             '<div style="margin-bottom:8px;">This empties the cache folders of the home of <b>' + escapeHtml(user) + '</b> (' + escapeHtml(where) + ').</div>' +
@@ -34,7 +40,7 @@
                 '<li>It frees <b>' + escapeHtml(hcSize(freed)) + '</b>.</li>' +
                 '<li>A cache holds files that a tool downloads again. Nothing else is removed. Installed Claude Code plugins stay.</li>' +
                 '<li>It works only while no workspace of this home runs.</li>' +
-            '</ul></div>';
+            '</ul>' + (st ? hcStamp(st) : '') + '</div>';
     }
     window.aicliHomeCacheDialogText = hcConfirmText;   // used by the tests and the card
 
@@ -55,6 +61,16 @@
     window.aicliBootSpace.actions['clear_caches'] = function (part) {
         var user = String((part && (part.user || part.home)) || 'root');
         aicliAjax('get_home_cache_status', { user: user }, function (st) {
+            if (window.aicliBootSpace) window.aicliBootSpace.reopen = function () { window.aicliBootSpace.actions['clear_caches'](part); };
+            if (st && st.status === 'ok' && st.has_data === false) {
+                // Nothing is measured yet: offer one background measure, then open this dialog again.
+                if (typeof window.swal === 'function') {
+                    swal({ title: 'Clear caches?', text: '<div style="text-align:left; font-size:12px;">The size of the caches is not measured yet. Press Measure now.' + hcStamp(st) + '</div>', html: true, type: 'info' });
+                } else {
+                    hcFail('The size of the caches is not measured yet.');
+                }
+                return;
+            }
             if (!st || st.location === 'none') {
                 hcFail('This home is not a plain-folder home.');
                 return;
@@ -66,7 +82,7 @@
             }
             swal({
                 title: 'Clear caches?',
-                text: hcConfirmText(user, freed, st.location),
+                text: hcConfirmText(user, freed, st.location, st),
                 html: true,
                 type: 'warning',
                 showCancelButton: true,

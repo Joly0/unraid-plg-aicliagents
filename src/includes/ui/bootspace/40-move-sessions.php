@@ -6,7 +6,10 @@
  *   aicliBootSpace.actions['move_sessions'] and
  *   aicliBootSpace.actions['bring_back_sessions']. Each is a swal dialog.
  *   The server side is HistoryHandler (history_measure, history_move,
- *   history_bring_back).
+ *   history_bring_back). #552: history_measure answers from the last background measurement
+ *   (a read). The dialog shows its age and a Measure now button when it is older than 10
+ *   minutes or missing. The count of old sessions is computed here from the figures of the
+ *   answer; no request is sent when the age or the agent changes. The dialog never measures.
  * Dependencies: jQuery, SweetAlert (swal), aicliAjax (CommonLogging.php),
  *   window.aicliBootSpace (ManagerBootSpaceScripts.php).
  * Constraints: Atomic fragment. The action gets the line object `part`; it reads
@@ -70,12 +73,30 @@
         return html;
     }
 
+    function stamp(r) {
+        return (typeof reg.stampHtml === 'function') ? reg.stampHtml(r) : '';
+    }
+
+    /** The sessions older than `days` for one agent id, or for 'all'. Null when this age was not measured. */
+    function olderThan(stores, agent, days, ages) {
+        if ((ages || []).map(Number).indexOf(Number(days)) < 0) return null;
+        var t = { sessions: 0, files: 0, bytes: 0 };
+        stores.forEach(function (s) {
+            if (s.kind !== 'files' || (agent !== 'all' && s.id !== agent)) return;
+            var b = (s.older_than || {})[String(days)] || (s.older_than || {})[days];
+            if (!b) return;
+            t.sessions += b.sessions; t.files += b.files; t.bytes += b.bytes;
+        });
+        return t;
+    }
+
     reg.actions['move_sessions'] = function (part) {
         part = part || {};
         var user = part.user || 'root';
         if (typeof window.swal !== 'function') { fail('This page cannot show the dialog.'); return; }
-        aicliAjax('history_measure', { user: user, agent: part.agent || 'all', days: 90 }, function (m) {
+        aicliAjax('history_measure', { user: user }, function (m) {
             if (!m || m.status !== 'ok') { fail(m && m.message); return; }
+            reg.reopen = function () { reg.actions['move_sessions'](part); };
             liftSwal();
             var pools = m.pools || [];
             var dest = m.dest || '';
@@ -107,7 +128,7 @@
                     : '<div style="display:flex; gap:6px; margin-bottom:6px;">' +
                       '<select id="aicli-hist-pool" style="flex:1;">' + poolOpts + '</select>' +
                       '<input id="aicli-hist-folder" type="text" value="' + esc(folder) + '" style="flex:1;" placeholder="folder name"></div>') +
-                '<div id="aicli-hist-summary" style="margin:8px 0; font-weight:600;"></div>' +
+                '<div id="aicli-hist-summary" style="margin:8px 0; font-weight:600;"></div>' + stamp(m) +
                 '<div style="padding:8px; border:1px solid #b35900; border-radius:4px;">' + esc(WARNING) + '</div>' +
                 '</div>';
             swal({
@@ -126,7 +147,7 @@
                     unlift();
                     if (r && r.status === 'queued') {
                         swal({ title: 'Move queued', text: r.message || 'Watch the activity tray for progress.', type: 'info', timer: 3000, showConfirmButton: false });
-                        if (typeof window.refreshStats === 'function') window.refreshStats(); if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
+                        if (typeof window.refreshStats === 'function') window.refreshStats();   // the job starts a fresh measurement when it ends (#552)
                     } else {
                         fail(r && r.message);
                     }
@@ -137,20 +158,18 @@
                 var p = $('#aicli-hist-pool').val(), f = String($('#aicli-hist-folder').val() || '').replace(/^\/+|\/+$/g, '');
                 return (p && f) ? (p + '/' + f) : '';
             }
-            var timer = null;
+            // The count comes from the figures of the answer (ages of 30, 90 and 180 days). No request.
             function refreshSummary() {
                 var agent = $('#aicli-hist-agent').val() || 'all';
                 var days = parseInt($('#aicli-hist-days').val(), 10) || 90;
-                $('#aicli-hist-summary').text('Counting...');
-                aicliAjax('history_measure', { user: user, agent: agent, days: days }, function (r) {
-                    if (!r || r.status !== 'ok' || !r.selection) { $('#aicli-hist-summary').text(''); return; }
-                    var s = r.selection;
-                    $('#aicli-hist-summary').text(s.sessions + ' sessions (' + s.files + ' files, ' + human(s.bytes) + ') are older than ' + days + ' days and can move.');
-                });
+                var t = olderThan(m.stores, agent, days, m.ages);
+                var text;
+                if (!m.has_data) text = 'The sessions are not measured yet. Press Measure now.';
+                else if (t === null) text = 'Counts exist for 30, 90 and 180 days. Pick one of them to see the count. The move works for any age.';
+                else text = t.sessions + ' sessions (' + t.files + ' files, ' + human(t.bytes) + ') are older than ' + days + ' days and can move.';
+                $('#aicli-hist-summary').text(text);
             }
-            $(document).off('.aicliHist').on('input.aicliHist change.aicliHist', '#aicli-hist-agent, #aicli-hist-days', function () {
-                clearTimeout(timer); timer = setTimeout(refreshSummary, 350);
-            });
+            $(document).off('.aicliHist').on('input.aicliHist change.aicliHist', '#aicli-hist-agent, #aicli-hist-days', refreshSummary);
             refreshSummary();
         });
     };
@@ -188,7 +207,7 @@
                     unlift();
                     if (r && r.status === 'queued') {
                         swal({ title: 'Queued', text: r.message || 'Watch the activity tray for progress.', type: 'info', timer: 3000, showConfirmButton: false });
-                        if (typeof window.refreshStats === 'function') window.refreshStats(); if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
+                        if (typeof window.refreshStats === 'function') window.refreshStats();   // the job starts a fresh measurement when it ends (#552)
                     } else {
                         fail(r && r.message);
                     }

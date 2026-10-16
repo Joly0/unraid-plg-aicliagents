@@ -108,7 +108,11 @@ class HomeCacheService
     {
         $none = ['location' => 'none', 'path' => '', 'bytes' => 0, 'cap_bytes' => 0, 'on_boot_bytes' => 0];
         if (preg_match('/^[A-Za-z0-9._-]+$/', $user) !== 1) return $none;
-        $out = self::run(['status', $user]);
+        // Background measurement only (#552). The time left on the shared deadline caps the script.
+        require_once __DIR__ . '/MeasureDeadline.php';
+        $left = MeasureDeadline::remaining(120);
+        if ($left < 1) { MeasureDeadline::markPartial(); return $none; }
+        $out = self::run(['status', $user], $left);
         $j = json_decode($out, true);
         if (!is_array($j) || !isset($j['location'])) return $none;
         $loc = in_array($j['location'], ['ram', 'pool', 'boot', 'none'], true) ? $j['location'] : 'none';
@@ -138,11 +142,13 @@ class HomeCacheService
         if (!empty($running)) {
             return ['status' => 'error', 'message' => 'Close the workspaces of this home first. A running workspace uses its caches.'];
         }
-        $before = self::status($user);
-        if ($before['location'] === 'none') {
+        // No measuring in a web request (#552): a plain home is a folder under the persistence
+        // folder. The script runs with AICLI_HC_NO_MEASURE=1, so it runs no du. The caller
+        // reads the freed size from the last background measurement.
+        if (!is_dir(self::plainHomeDir($user))) {
             return ['status' => 'error', 'message' => 'This home is not a plain-folder home.'];
         }
-        $out = self::run(['clear', $user]);
+        $out = self::run(['clear', $user], 120, true);
         $j = json_decode($out, true);
         if (!is_array($j) || ($j['status'] ?? '') !== 'ok') {
             $msg = is_array($j) && !empty($j['message']) ? (string)$j['message'] : 'The caches could not be cleared.';
@@ -176,10 +182,28 @@ class HomeCacheService
         return preg_match('/^MemTotal:\s+(\d+)\s+kB/m', $mi, $m) === 1 ? (int)$m[1] * 1024 : 0;
     }
 
-    /** @param string[] $args */
-    private static function run(array $args): string
+    /** The folder of a plain-folder home (a cheap is_dir check, no measuring). */
+    private static function plainHomeDir(string $user): string
     {
-        $cmd = 'timeout 120 bash ' . escapeshellarg(self::SCRIPT);
+        $base = getenv('AICLI_PERSIST_PATH');
+        if ($base === false || $base === '') {
+            $cfg = ConfigService::getConfig();
+            $base = (string)($cfg['home_storage_path'] ?? '');
+            if ($base === '') $base = '/boot/config/plugins/unraid-aicliagents/persistence';
+        }
+        return rtrim($base, '/') . '/passthrough/homes/' . $user;
+    }
+
+    /**
+     * @param string[] $args
+     * @param int  $timeout the longest the script may run (seconds); the background
+     *        measurement passes the time left on its shared deadline
+     * @param bool $noMeasure true: the script runs no du (AICLI_HC_NO_MEASURE=1)
+     */
+    private static function run(array $args, int $timeout = 120, bool $noMeasure = false): string
+    {
+        $timeout = max(1, $timeout);
+        $cmd = ($noMeasure ? 'AICLI_HC_NO_MEASURE=1 ' : '') . 'timeout ' . $timeout . ' bash ' . escapeshellarg(self::SCRIPT);
         foreach ($args as $a) $cmd .= ' ' . escapeshellarg($a);
         return trim((string)@shell_exec($cmd . ' 2>/dev/null'));
     }

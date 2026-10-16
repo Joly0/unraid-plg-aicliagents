@@ -984,6 +984,12 @@ class SupervisorService {
         return $progress[$step] ?? 50;
     }
 
+    /** BOOT_DISK_SPACE.md R4 (#552): op removeold (Remove old versions). */
+    private static function isRemoveOldOp(string $op): bool {
+        require_once __DIR__ . '/OldVersionsJobService.php';
+        return OldVersionsJobService::isOp($op);
+    }
+
     /** BOOT_DISK_SPACE.md R6: ops historymove and historyback. */
     private static function isHistoryOp(string $op): bool {
         require_once __DIR__ . '/HistoryJobService.php';
@@ -1108,6 +1114,10 @@ class SupervisorService {
                             // source (#231), never a raw token.
                             require_once __DIR__ . '/TaskService.php';
                             $step = 'Already saved. ' . TaskService::deferReasonHuman($defer, 'bake');
+                        } elseif (self::isRemoveOldOp($op)) {
+                            // BOOT_DISK_SPACE.md R4 (#552): say how much the removal freed.
+                            $step = OldVersionsJobService::doneStep($jobId);
+                            OldVersionsJobService::cleanup($jobId);
                         } elseif (self::isHistoryOp($op)) {
                             // BOOT_DISK_SPACE.md R6: say how many files moved and how many stayed.
                             $step = HistoryJobService::doneStep($jobId);
@@ -1142,6 +1152,9 @@ class SupervisorService {
                         if ($defer !== '') {
                             require_once __DIR__ . '/TaskService.php';
                             $err = 'Could not finish. ' . TaskService::deferReasonHuman($defer, (string)($job['op'] ?? ''));
+                        } elseif (self::isRemoveOldOp((string)($job['op'] ?? '')) && ($oldReason = OldVersionsJobService::failureReason($jobId)) !== '') {
+                            $err = $oldReason;
+                            OldVersionsJobService::cleanup($jobId);
                         } elseif (self::isHistoryOp((string)($job['op'] ?? '')) && ($historyReason = HistoryJobService::failureReason($jobId)) !== '') {
                             // BOOT_DISK_SPACE.md R6: the job wrote its reason ("The array is stopped...").
                             $err = $historyReason;
@@ -1176,6 +1189,10 @@ class SupervisorService {
                     } elseif ($jobOp === 'restore') {
                         $step = self::restorePhaseStep((string)($job['phase'] ?? ''));
                         $progress = self::restorePhaseProgress($step);
+                    } elseif (self::isRemoveOldOp($jobOp)) {
+                        // BOOT_DISK_SPACE.md R4 (#552): the step from the progress file of the job.
+                        $step = OldVersionsJobService::runningStep($jobId);
+                        $progress = OldVersionsJobService::runningProgress($jobId);
                     } elseif (self::isHistoryOp($jobOp)) {
                         // BOOT_DISK_SPACE.md R6: counts from the progress file of the job.
                         $step = HistoryJobService::runningStep($jobOp, $jobId);

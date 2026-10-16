@@ -8,8 +8,11 @@
  *   The dialog lists what goes, the space it frees and what stays because a
  *   workspace uses it, and asks for a confirm before it removes anything.
  * Dependencies: jQuery, SweetAlert, CommonLogging.php (aicliAjax), escapeHtml.
- * Constraints: Atomic UI fragment. Backend: AJAX agent_old_versions (read-only)
- *   and remove_old_versions (StorageHandler, AgentVersionCleanupService).
+ * Constraints: Atomic UI fragment. Backend: AJAX agent_old_versions (read-only) and
+ *   remove_old_versions (StorageHandler). #552: the list comes from the last background
+ *   measurement. The dialog shows its age, and a Measure now button when it is older than
+ *   10 minutes or missing; it never measures itself. The removal runs as a supervisor job
+ *   (op removeold) and the Activity tray shows its steps.
  * </module_context>
  */
 ?>
@@ -27,9 +30,14 @@
     var KIND = { plain: 'version folder', layer: 'storage layer', rollback: 'rollback copy' };
 
     // PURE: the HTML of the list dialog from the agent_old_versions answer.
+    function stamp(r) {
+        return (window.aicliBootSpace && typeof window.aicliBootSpace.stampHtml === 'function') ? window.aicliBootSpace.stampHtml(r) : '';
+    }
     function listHtml(r) {
         var items = (r && r.items) || [], skipped = (r && r.skipped) || [], h = '<div style="text-align:left; font-size:12px; line-height:1.6;">';
-        if (!items.length) {
+        if (r && r.has_data === false) {
+            h += '<div>The old versions are not measured yet. Press Measure now.</div>';
+        } else if (!items.length) {
             h += '<div>There is nothing to remove. Each agent keeps only the version in use.</div>';
         } else {
             h += '<div style="margin-bottom:6px;">This removes <b>' + items.length + '</b> old item(s) and frees <b>'
@@ -47,18 +55,7 @@
             });
             h += '</ul>';
         }
-        return h + '</div>';
-    }
-    function doneHtml(r) {
-        var h = '<div style="text-align:left; font-size:12px; line-height:1.6;">Removed <b>' + ((r.removed || []).length)
-              + '</b> item(s) and freed <b>' + fmtBytes(r.freed_bytes) + '</b>.';
-        var sk = r.skipped || [];
-        if (sk.length) {
-            h += '<div style="margin-top:6px;"><b>Not removed:</b></div><ul style="margin:0 0 0 18px; padding:0;">';
-            sk.forEach(function (s) { h += '<li><b>' + esc(s.agent) + '</b> <code>' + esc(lastPart(s.path)) + '</code>: ' + esc(s.reason) + '</li>'; });
-            h += '</ul>';
-        }
-        return h + '</div>';
+        return h + stamp(r) + '</div>';
     }
 
     // agent: an agent id, 'all', or a card line object with an .agent field.
@@ -69,11 +66,13 @@
             window.alert('Remove old versions needs the dialog library. Reload the page.');
             return;
         }
+        // The list comes from the last measurement (a read). This dialog measures nothing.
         aicliAjax('agent_old_versions', { agent: agent }, function (r) {
             if (!r || r.status !== 'ok') {
                 swal('Cannot list the old versions', (r && r.message) || 'Unknown error. Check the Debug Console.', 'error');
                 return;
             }
+            if (window.aicliBootSpace) window.aicliBootSpace.reopen = function () { run(agent); };
             var any = (r.items || []).length > 0;
             swal({
                 title: agent === 'all' ? 'Remove old versions of all agents?' : 'Remove old versions of ' + agent + '?',
@@ -88,13 +87,15 @@
                 closeOnConfirm: false
             }, function (confirmed) {
                 if (!confirmed || !any) return;
+                // The removal is a supervisor job. The request returns at once; the Activity tray
+                // shows the steps and the result, and the job starts a fresh measurement when it ends.
                 aicliAjax('remove_old_versions', { agent: agent }, function (res) {
-                    if (res && res.status === 'ok') {
-                        swal({ title: 'Old versions removed', text: doneHtml(res), html: true, type: 'success' });
+                    if (res && res.status === 'queued') {
+                        swal({ title: 'Removal queued', text: res.message || 'Watch the activity tray for progress.', type: 'info', timer: 3500, showConfirmButton: false });
                     } else {
                         swal('Not removed', (res && res.message) || 'Unknown error. Check the Debug Console.', 'error');
                     }
-                    if (typeof refreshStats === 'function') refreshStats(); if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
+                    if (typeof refreshStats === 'function') refreshStats();
                 });
             });
         });

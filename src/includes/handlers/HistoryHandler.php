@@ -4,7 +4,7 @@
  *     <name>HistoryHandler</name>
  *     <description>AJAX handler for old conversation history
  *     (docs/specs/BOOT_DISK_SPACE.md R6, #539). history_measure: sizes per agent
- *     and what a move would pick. history_move and history_bring_back: queue a
+ *     and what a move would pick, read from the last background measurement (#552). history_move and history_bring_back: queue a
  *     supervisor job (ops historymove, historyback) with Activity tray steps.</description>
  *     <dependencies>HistoryStoreService, HistoryMoveService, HistoryJobService,
  *     SupervisorService, ActivityService, ConfigService.</dependencies>
@@ -20,10 +20,12 @@ namespace AICliAgents\Handlers;
 use AICliAgents\Services\HistoryJobService;
 use AICliAgents\Services\HistoryMoveService;
 use AICliAgents\Services\HistoryStoreService;
+use AICliAgents\Services\BootSpaceService;
 
 require_once __DIR__ . '/../services/HistoryStoreService.php';
 require_once __DIR__ . '/../services/HistoryMoveService.php';
 require_once __DIR__ . '/../services/HistoryJobService.php';
+require_once __DIR__ . '/../services/BootSpaceService.php';
 
 class HistoryHandler
 {
@@ -67,40 +69,54 @@ class HistoryHandler
         return $given !== '' ? HistoryMoveService::normaliseSetting($given, '') : $stored;
     }
 
+    /**
+     * history_measure (read-only). #552: the figures come from the last background measurement
+     * (.boot_space.json). This request walks no folder and measures nothing. The answer carries
+     * `measured_at`, `age`, `stale`, `has_data` and `measuring`. The count of sessions that a
+     * move would pick (`selection`) exists for the ages 30, 90 and 180 days (`ages`); for any
+     * other age it is null. The count is approximate: the move itself skips sessions in use.
+     */
     private static function measure(): array
     {
         [$err, $user] = self::user();
         if ($err) return ['status' => 'error', 'message' => $err];
-        $home = self::homeDir($user);
         $days = max(1, min(3650, (int)($_REQUEST['days'] ?? 90)));
         $dest = self::destination();
-        $measure = HistoryStoreService::measure($home);
+        $data = BootSpaceService::read();
+        $rows = BootSpaceService::cachedHistory($user, $data) ?? [];
+        $ages = is_array($data['history_ages'] ?? null) ? array_map('intval', $data['history_ages']) : BootSpaceService::HISTORY_AGES;
         $stores = [];
         foreach (HistoryStoreService::stores() as $agentId => $st) {
-            $m = $measure[$agentId];
+            $m = $rows[$agentId] ?? [];
             $stores[] = [
                 'id' => $agentId, 'label' => $st['label'], 'kind' => $st['kind'], 'verified' => $st['verified'],
                 'note' => $st['note'], 'source' => $st['source'],
-                'bytes' => $m['bytes'], 'files' => $m['files'], 'sessions' => $m['sessions'],
-                'index_bytes' => $m['index_bytes'], 'older_than' => $m['older_than'], 'partial' => $m['partial'],
+                'bytes' => (int)($m['bytes'] ?? 0), 'files' => (int)($m['files'] ?? 0), 'sessions' => (int)($m['sessions'] ?? 0),
+                'index_bytes' => (int)($m['index_bytes'] ?? 0), 'older_than' => $m['older_than'] ?? new \stdClass(),
+                'partial' => (bool)($m['partial'] ?? false),
             ];
         }
         $agent = (string)($_REQUEST['agent'] ?? '');
         $selection = null;
-        if ($agent !== '') {
+        if ($agent !== '' && $rows && in_array($days, $ages, true)) {
             $ids = $agent === 'all'
                 ? array_keys(array_filter(HistoryStoreService::stores(), static function ($s) { return $s['kind'] === 'files'; }))
                 : (HistoryStoreService::isMovable($agent) ? [$agent] : []);
-            $selection = HistoryStoreService::summarize($home, $ids, $days);
+            $selection = ['files' => 0, 'bytes' => 0, 'sessions' => 0, 'agents' => []];
+            foreach ($ids as $id) {
+                $b = $rows[$id]['older_than'][$days] ?? $rows[$id]['older_than'][(string)$days] ?? ['files' => 0, 'bytes' => 0, 'sessions' => 0];
+                $one = ['files' => (int)$b['files'], 'bytes' => (int)$b['bytes'], 'sessions' => (int)$b['sessions']];
+                $selection['agents'][$id] = $one;
+                foreach ($one as $k => $v) $selection[$k] += $v;
+            }
         }
         $mounted = $dest !== '' && HistoryMoveService::destinationMounted($dest);
         return [
-            'status' => 'ok', 'user' => $user, 'stores' => $stores, 'days' => $days, 'selection' => $selection,
+            'status' => 'ok', 'user' => $user, 'stores' => $stores, 'days' => $days, 'ages' => $ages, 'selection' => $selection,
             'dest' => $dest, 'dest_mounted' => $mounted,
             'moved' => $dest !== '' && $mounted ? HistoryMoveService::movedSummary($dest, $user) : [],
             'pools' => HistoryMoveService::mountedPools(),
-            'measured_at' => time(),
-        ];
+        ] + BootSpaceService::meta($data) + ['has_user' => $rows !== []];
     }
 
     private static function queue(string $op): array

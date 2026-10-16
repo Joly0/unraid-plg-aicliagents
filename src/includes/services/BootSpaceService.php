@@ -8,9 +8,15 @@
  *   A measure runs in the background (src/scripts/storage/boot-space.php), never in a page
  *   request. get_boot_space reads the file and starts a new measure when the file is older
  *   than 10 minutes or missing. removeLeftover() removes one item of the "Left over" line.
+ *   The file also holds what the action dialogs show (#552): the agents with their sizes, the
+ *   old versions, the convert estimate, the conversation history of each plain home and the
+ *   cache status of each plain home. A dialog reads these from the file and never measures.
+ *   One run has one overall deadline (MeasureDeadline, 300 s). When it passes, the run writes
+ *   what it has with "partial": true.
  * Dependencies: ConfigService, AgentStorageService, AgentVersionCleanupService, HomeCacheService,
  *   HistoryStoreService, HistoryMoveService, FileStorage (home layers), UtilityService.
- * Constraints: Never measures in the page request. removeLeftover() removes only items that the
+ * Constraints: Never measures in the page request. The read functions (snapshot, cachedOldVersions,
+ *   cachedConvert, cachedHistory, cachedCache) read the file only: no du, no find, no tree walk. removeLeftover() removes only items that the
  *   last measurement listed under "Left over", re-checks right before it removes, and never
  *   touches a path outside the persistence folder. Every seam is optional; production code
  *   passes none.
@@ -20,6 +26,7 @@ namespace AICliAgents\Services;
 
 require_once __DIR__ . '/HistoryStoreService.php';
 require_once __DIR__ . '/HistoryMoveService.php';
+require_once __DIR__ . '/MeasureDeadline.php';
 
 class BootSpaceService
 {
@@ -119,18 +126,34 @@ class BootSpaceService
 
     // ---- measuring -----------------------------------------------------------------
 
-    /** Allocated bytes of a file or folder (du -x -s -B1). 0 when it is missing or du fails. */
+    /**
+     * Allocated bytes of a file or folder (du -x -s -B1). 0 when it is missing, du fails or the
+     * shared deadline has passed. BACKGROUND MEASUREMENT ONLY (#552): no web request calls it.
+     * The command runs at the lowest CPU priority and in the best-effort I/O class at level 7.
+     * (The idle I/O class is not used: on a busy disk it can starve for ever and hold the lock.)
+     * The timeout is the smaller of DU_TIMEOUT and the time left on the deadline.
+     */
     public static function duBytes(string $path): int
     {
         if (!file_exists($path) && !is_link($path)) return 0;
-        static $prefix = null;
-        if ($prefix === null) {
-            $prefix = 'timeout ' . self::DU_TIMEOUT . ' nice -n 19 ';
-            $io = trim((string)@shell_exec('command -v ionice 2>/dev/null'));
-            if ($io !== '') $prefix .= 'ionice -c3 ';
-        }
-        $out = (string)@shell_exec($prefix . 'du -x -s -B1 -- ' . escapeshellarg($path) . ' 2>/dev/null');
+        $t = MeasureDeadline::remaining(self::DU_TIMEOUT);
+        if ($t < 1) { MeasureDeadline::markPartial(); return 0; }
+        $out = (string)@shell_exec('timeout ' . $t . ' ' . self::lowPriorityPrefix() . 'du -x -s -B1 -- ' . escapeshellarg($path) . ' 2>/dev/null');
         return preg_match('/^(\d+)\s/', $out, $m) === 1 ? (int)$m[1] : 0;
+    }
+
+    /** "nice -n 19 ionice -c2 -n7 " (ionice only when the host has it). */
+    public static function lowPriorityPrefix(): string
+    {
+        return 'nice -n 19 ' . (self::ioniceBinary() !== '' ? 'ionice -c2 -n7 ' : '');
+    }
+
+    private static function ioniceBinary(): string
+    {
+        foreach (['/usr/bin/ionice', '/bin/ionice', '/usr/sbin/ionice', '/sbin/ionice'] as $b) {
+            if (is_executable($b)) return $b;
+        }
+        return '';
     }
 
     /** Size, use, free space, mount and file system of the disk that holds $path. */
@@ -224,13 +247,41 @@ class BootSpaceService
         return $items;
     }
 
+    /** Ages (days) of the history figures that the Move old sessions dialog reads from the file. */
+    public const HISTORY_AGES = [30, 90, 180];
+
     /**
      * Measure everything. Slow: du on several GB. Run it in the background only.
      * $seams (tests): persist, plugin_dir, du (callable path→bytes), config_user, disk (array),
      * agent_sizes (array), old_versions (array), convert (array), cache_status (callable user→array),
-     * history (callable homeDir→array), moved (callable user→array), retired_list, now (int).
+     * history (callable homeDir→array), moved (callable user→array), retired_list, now (int),
+     * deadline_at (Unix time; the measure then runs under its own deadline).
+     *
+     * One deadline covers all parts (MeasureDeadline). When it passes, the parts that are not
+     * measured yet are skipped and the answer carries "partial": true.
      */
     public static function measure(array $seams = []): array
+    {
+        $ownDeadline = false;
+        if (isset($seams['deadline_at'])) {
+            MeasureDeadline::start((int)$seams['deadline_at']);
+            $ownDeadline = true;
+        }
+        try {
+            return self::measureParts($seams);
+        } finally {
+            if ($ownDeadline) MeasureDeadline::clear();
+        }
+    }
+
+    /** True (and the answer becomes partial) when the shared deadline has passed. */
+    private static function outOfTime(): bool
+    {
+        if (MeasureDeadline::expired()) { MeasureDeadline::markPartial(); return true; }
+        return false;
+    }
+
+    private static function measureParts(array $seams): array
     {
         $persist = rtrim((string)($seams['persist'] ?? self::persistPath()), '/');
         $pluginDir = rtrim((string)($seams['plugin_dir'] ?? self::pluginDir()), '/');
@@ -243,9 +294,14 @@ class BootSpaceService
         $homes = self::discoverHomes($persist, $configUser);
         $parts = [];
         $insideTotal = 0;   // bytes of the parts that lie inside the plugin folder
+        $history = [];      // user => agentId => figures (the Move old sessions dialog)
+        $caches = [];       // user => cache status (the Clear caches dialog)
+        $agentRows = []; $oldVersions = null; $convert = null;
+        $complete = true;   // false as soon as a part is skipped because the time is gone
 
         // ---- homes ----
         foreach ($homes['layered'] as $u) {
+            if (self::outOfTime()) { $complete = false; break; }
             $files = glob($persist . '/home_' . $u . '_*.sqsh') ?: [];
             $b = 0; foreach ($files as $f) $b += (int)$du($f);
             $b += (int)$du($persist . '/_upper/homes/' . $u);
@@ -256,17 +312,22 @@ class BootSpaceService
                 'action' => self::action('tidy_up', 'Close all and tidy up')];
         }
         foreach ($homes['plain'] as $u) {
+            if (!$complete || self::outOfTime()) { $complete = false; break; }
             $home = $persist . '/passthrough/homes/' . $u;
             $total = (int)$du($home);
             $histBytes = 0;
             try {
-                $m = isset($seams['history']) ? ($seams['history'])($home) : HistoryStoreService::measure($home);
+                $m = isset($seams['history'])
+                    ? ($seams['history'])($home)
+                    : HistoryStoreService::measure($home, self::HISTORY_AGES, null, MeasureDeadline::remaining(120));
                 foreach ($m as $row) $histBytes += (int)($row['bytes'] ?? 0);
+                $history[$u] = $m;
             } catch (\Throwable $e) { $histBytes = 0; }
             $cache = ['location' => 'none', 'on_boot_bytes' => 0, 'bytes' => 0];
             try {
                 $cache = isset($seams['cache_status']) ? ($seams['cache_status'])($u) : HomeCacheService::status($u);
             } catch (\Throwable $e) { /* keep the empty answer */ }
+            $caches[$u] = $cache;
             $cacheBoot = (int)($cache['on_boot_bytes'] ?? 0);
             if (($cache['location'] ?? '') === 'boot') $cacheBoot = max($cacheBoot, (int)($cache['bytes'] ?? 0));
             $histBytes = min($histBytes, $total);
@@ -301,42 +362,86 @@ class BootSpaceService
         }
 
         // ---- agents ----
-        $sizes = $seams['agent_sizes'] ?? AgentStorageService::agentSizes($persist);
-        $cur = 0;
-        foreach ($sizes as $s) $cur += (int)($s['current_bytes'] ?? 0);
-        $old = $seams['old_versions'] ?? AgentVersionCleanupService::oldVersions(null);
-        $oldBytes = (int)($old['total_bytes'] ?? 0);
-        $est = $seams['convert'] ?? AgentStorageService::convertEstimate();
-        $convAction = !empty($est['offered'])
-            ? self::action('convert_agents', 'Convert to plain folders')
-            : self::action('convert_agents', 'Convert to plain folders', false, self::convertReason((string)($est['reason'] ?? '')));
-        $insideTotal += $cur + $oldBytes;
-        $names = [];
-        foreach ($sizes as $s) $names[] = ($s['name'] ?? $s['id']) . ' (' . (($s['storage'] ?? '') === 'layers' ? 'layers' : 'plain folders') . ')';
-        $parts[] = ['key' => 'agents:current', 'group' => 'agents', 'label' => 'Agents: current versions', 'bytes' => $cur,
-            'note' => $names ? implode(', ', $names) : '', 'action' => $convAction];
-        $parts[] = ['key' => 'agents:old', 'group' => 'agents', 'label' => 'Agents: old versions', 'bytes' => $oldBytes,
-            'items' => count($old['items'] ?? []),
-            'action' => $oldBytes > 0 ? self::action('remove_old_versions', 'Remove old versions')
-                : self::action('remove_old_versions', 'Remove old versions', false, 'No old version to remove.')];
+        if ($complete && !self::outOfTime()) {
+            $sizes = $seams['agent_sizes'] ?? AgentStorageService::agentSizes($persist);
+            $agentRows = array_values($sizes);
+            $cur = 0;
+            foreach ($sizes as $s) $cur += (int)($s['current_bytes'] ?? 0);
+            $old = $seams['old_versions'] ?? (self::outOfTime() ? null : AgentVersionCleanupService::oldVersions(null));
+            if ($old === null) { $complete = false; $old = ['items' => [], 'skipped' => [], 'total_bytes' => 0]; }
+            else $oldVersions = $old;
+            $oldBytes = (int)($old['total_bytes'] ?? 0);
+            $est = $seams['convert'] ?? (self::outOfTime() ? null
+                : AgentStorageService::convertEstimate(['persist' => $persist, 'agent_sizes' => $sizes]));
+            if ($est === null) { $complete = false; $est = ['offered' => false, 'reason' => '']; }
+            else $convert = self::enrichConvert($est);
+            $convAction = !empty($est['offered'])
+                ? self::action('convert_agents', 'Convert to plain folders')
+                : self::action('convert_agents', 'Convert to plain folders', false, self::convertReason((string)($est['reason'] ?? '')));
+            $insideTotal += $cur + $oldBytes;
+            $names = [];
+            foreach ($sizes as $s) $names[] = ($s['name'] ?? $s['id']) . ' (' . (($s['storage'] ?? '') === 'layers' ? 'layers' : 'plain folders') . ')';
+            $parts[] = ['key' => 'agents:current', 'group' => 'agents', 'label' => 'Agents: current versions', 'bytes' => $cur,
+                'note' => $names ? implode(', ', $names) : '', 'action' => $convAction];
+            $parts[] = ['key' => 'agents:old', 'group' => 'agents', 'label' => 'Agents: old versions', 'bytes' => $oldBytes,
+                'items' => count($old['items'] ?? []),
+                'action' => $oldBytes > 0 ? self::action('remove_old_versions', 'Remove old versions')
+                    : self::action('remove_old_versions', 'Remove old versions', false, 'No old version to remove.')];
+        } else {
+            $complete = false;
+        }
 
         // ---- left over ----
-        $items = self::leftOverItems($persist, $homes, $du, $seams['retired_list'] ?? null);
-        $lo = 0; foreach ($items as $it) $lo += $it['bytes'];
-        $insideTotal += $lo;
-        $parts[] = ['key' => 'leftover', 'group' => 'leftover', 'label' => 'Left over', 'bytes' => $lo,
-            'items' => array_map(static function ($it) { return ['key' => $it['key'], 'label' => $it['label'], 'bytes' => $it['bytes']]; }, $items),
-            'action' => $items ? self::action('remove_leftover', 'Remove')
-                : self::action('remove_leftover', 'Remove', false, 'Nothing is left over.')];
+        if ($complete && !self::outOfTime()) {
+            $items = self::leftOverItems($persist, $homes, $du, $seams['retired_list'] ?? null);
+            $lo = 0; foreach ($items as $it) $lo += $it['bytes'];
+            $insideTotal += $lo;
+            $parts[] = ['key' => 'leftover', 'group' => 'leftover', 'label' => 'Left over', 'bytes' => $lo,
+                'items' => array_map(static function ($it) { return ['key' => $it['key'], 'label' => $it['label'], 'bytes' => $it['bytes']]; }, $items),
+                'action' => $items ? self::action('remove_leftover', 'Remove')
+                    : self::action('remove_leftover', 'Remove', false, 'Nothing is left over.')];
+        } else {
+            $complete = false;
+        }
 
         // ---- plugin files: the rest of the plugin folder ----
-        $pluginTotal = (int)$du($pluginDir);
-        $persistInPlugin = self::isInside($persist, $pluginDir);
-        $rest = $persistInPlugin ? max(0, $pluginTotal - $insideTotal) : $pluginTotal;
-        $parts[] = ['key' => 'plugin', 'group' => 'plugin', 'label' => 'Plugin files', 'bytes' => $rest,
-            'note' => 'Program files, saved copies of earlier versions, settings and state.', 'action' => null];
+        if ($complete && !self::outOfTime()) {
+            $pluginTotal = (int)$du($pluginDir);
+            $persistInPlugin = self::isInside($persist, $pluginDir);
+            $rest = $persistInPlugin ? max(0, $pluginTotal - $insideTotal) : $pluginTotal;
+            $parts[] = ['key' => 'plugin', 'group' => 'plugin', 'label' => 'Plugin files', 'bytes' => $rest,
+                'note' => 'Program files, saved copies of earlier versions, settings and state.', 'action' => null];
+        } else {
+            $complete = false;
+        }
 
-        return ['measured_at' => $now, 'disk' => $disk, 'parts' => self::sortParts($parts)];
+        $out = ['measured_at' => $now, 'disk' => $disk, 'parts' => self::sortParts($parts),
+            'agents' => $agentRows, 'history' => $history, 'history_ages' => self::HISTORY_AGES, 'caches' => $caches,
+            'partial' => !$complete || MeasureDeadline::wasPartial()];
+        if ($oldVersions !== null) $out['old_versions'] = $oldVersions;
+        if ($convert !== null) $out['convert'] = $convert;
+        return $out;
+    }
+
+    /**
+     * The convert estimate as the file keeps it: each agent also carries `extra_bytes` (what the
+     * conversion adds for that agent) and `fits` ('ok' or 'no_room:<missing bytes>' for that agent
+     * alone). The sizes of a layered agent are estimates (AgentStorageService::UNPACKED_RATIO).
+     */
+    public static function enrichConvert(array $est): array
+    {
+        $free = (int)($est['free_bytes'] ?? 0);
+        $disk = (int)($est['disk_bytes'] ?? 0);
+        $agents = [];
+        foreach (($est['agents'] ?? []) as $a) {
+            $extra = max(0, (int)($a['plain_bytes'] ?? 0) - (int)($a['now_bytes'] ?? 0));
+            $a['extra_bytes'] = $extra;
+            $a['fits'] = AgentStorageService::convertFits($free, $disk, $extra);
+            $a['estimated'] = true;
+            $agents[] = $a;
+        }
+        $est['agents'] = $agents;
+        return $est;
     }
 
     public static function human(int $b): string
@@ -395,9 +500,15 @@ class BootSpaceService
         if (!flock($fh, LOCK_EX | LOCK_NB)) { fclose($fh); return false; }
         try {
             @ftruncate($fh, 0); fwrite($fh, (string)getmypid()); fflush($fh); @touch($lock);
+            // ONE deadline for all parts (#552). A seam 'deadline_at' replaces it in tests.
+            $at = (int)($seams['deadline_at'] ?? (time() + MeasureDeadline::seconds()));
+            unset($seams['deadline_at']);
+            MeasureDeadline::start($at);
             $data = self::measure($seams);
+            $data['deadline_s'] = max(0, $at - time());   // seconds that were left when it ended
             self::write($data);
         } finally {
+            MeasureDeadline::clear();
             flock($fh, LOCK_UN); fclose($fh);
             @unlink($lock);
         }
@@ -412,7 +523,13 @@ class BootSpaceService
     {
         if (self::isMeasuring()) return false;
         $script = dirname(__DIR__, 2) . '/scripts/storage/boot-space.php';
-        $argv = ['timeout', '900', 'php', '-d', 'display_errors=0', $script];
+        // The whole run has one deadline (default 300 s). `timeout` is a hard stop a little after it.
+        // nice and ionice (best-effort class, level 7; NOT the idle class) keep it from starving
+        // the web server and the workspaces on the same disk.
+        $argv = ['timeout', (string)(MeasureDeadline::seconds() + 60), 'nice', '-n', '19'];
+        $io = self::ioniceBinary();
+        if ($io !== '') { array_push($argv, $io, '-c2', '-n7'); }
+        array_push($argv, 'php', '-d', 'display_errors=0', $script);
         if (!is_dir(dirname(self::lockFile()))) @mkdir(dirname(self::lockFile()), 0755, true);
         @touch(self::lockFile());   // mark it at once, so a second request does not start a second one
         if ($launcher !== null) { $launcher($argv); return true; }
@@ -436,7 +553,100 @@ class BootSpaceService
         $out['measuring'] = $measuring;
         $out['has_data'] = $data !== null;
         $out['age'] = $data !== null ? max(0, $now - (int)$data['measured_at']) : null;
+        $out['stale'] = self::isStale($data, $now);
         return $out;
+    }
+
+    // ---- reading the file for the dialogs (#552) ---------------------------------------
+    // These functions read the file and nothing else. They never measure and never start a
+    // measure: a dialog shows the numbers with their age and offers "Measure now".
+
+    /**
+     * The facts about the file that every dialog answer carries: measured_at, age (seconds),
+     * stale (older than MAX_AGE or missing), has_data, measuring (a measure runs now) and
+     * partial (the last run stopped at its deadline).
+     * @return array{has_data:bool,measured_at:int,age:?int,stale:bool,measuring:bool,partial:bool}
+     */
+    public static function meta(?array $data = null, ?int $now = null): array
+    {
+        $now = $now ?? time();
+        return [
+            'has_data'    => $data !== null,
+            'measured_at' => $data !== null ? (int)$data['measured_at'] : 0,
+            'age'         => $data !== null ? max(0, $now - (int)$data['measured_at']) : null,
+            'stale'       => self::isStale($data, $now),
+            'measuring'   => self::isMeasuring($now),
+            'partial'     => $data !== null && !empty($data['partial']),
+        ];
+    }
+
+    /**
+     * The answer of agent_old_versions: the old versions of the last measurement, for one agent
+     * or for 'all'. `status` is 'error' with message 'invalid_agent' for a bad id.
+     */
+    public static function cachedOldVersions(string $agent, ?array $data = null, ?int $now = null): array
+    {
+        if (!AgentVersionCleanupService::isValidTarget($agent)) return ['status' => 'error', 'message' => 'invalid_agent'];
+        $data = $data ?? self::read();
+        $all = $agent === '' || $agent === 'all';
+        $ov = is_array($data['old_versions'] ?? null) ? $data['old_versions'] : ['items' => [], 'skipped' => [], 'total_bytes' => 0];
+        $items = []; $skipped = []; $total = 0;
+        foreach (($ov['items'] ?? []) as $it) {
+            if (!$all && ($it['agent'] ?? '') !== $agent) continue;
+            $items[] = $it; $total += (int)($it['bytes'] ?? 0);
+        }
+        foreach (($ov['skipped'] ?? []) as $sk) {
+            if (!$all && ($sk['agent'] ?? '') !== $agent) continue;
+            $skipped[] = $sk;
+        }
+        return ['status' => 'ok', 'agent' => $all ? 'all' : $agent,
+                'keep_previous' => AgentVersionCleanupService::keepPrevious(),
+                'items' => $items, 'skipped' => $skipped, 'total_bytes' => $total] + self::meta($data, $now);
+    }
+
+    /**
+     * The answer of agent_convert_estimate: the estimate of the last measurement. The free space
+     * is read again now (one cheap call), so the room check uses the live number. `estimate` is
+     * null when there is no measurement yet.
+     */
+    public static function cachedConvert(?array $data = null, ?int $now = null, ?int $freeBytes = null): array
+    {
+        $data = $data ?? self::read();
+        $est = is_array($data['convert'] ?? null) ? $data['convert'] : null;
+        if ($est !== null && !empty($est['offered'])) {
+            $free = $freeBytes ?? (int)@disk_free_space(self::persistPath());
+            if ($free > 0 || $freeBytes !== null) {
+                $est['free_bytes'] = $free;
+                $est = self::enrichConvert($est);
+                $est['fits'] = AgentStorageService::convertFits($free, (int)($est['disk_bytes'] ?? 0), (int)($est['extra_bytes'] ?? 0));
+            }
+        }
+        return ['status' => 'ok', 'estimate' => $est] + self::meta($data, $now);
+    }
+
+    /**
+     * The conversation history of one plain home from the last measurement:
+     * agentId => {bytes, files, sessions, index_bytes, older_than{30,90,180}, partial}. Null when the
+     * file has no figures for the home.
+     * @return array<string,array<string,mixed>>|null
+     */
+    public static function cachedHistory(string $user, ?array $data = null): ?array
+    {
+        $data = $data ?? self::read();
+        $h = $data['history'][$user] ?? null;
+        return is_array($h) ? $h : null;
+    }
+
+    /**
+     * The cache status of one plain home from the last measurement, in the shape of
+     * HomeCacheService::status(). Null when the file has no figures for the home.
+     * @return array<string,mixed>|null
+     */
+    public static function cachedCache(string $user, ?array $data = null): ?array
+    {
+        $data = $data ?? self::read();
+        $c = $data['caches'][$user] ?? null;
+        return is_array($c) ? $c : null;
     }
 
     // ---- removing a left-over item ---------------------------------------------------
@@ -445,7 +655,7 @@ class BootSpaceService
      * Remove one item of the "Left over" line. Only an item that the last measurement lists is
      * accepted. The item is looked up again right before it is removed.
      *
-     * $seams (tests): persist, du, in_use (callable path→bool), delete_home (callable user→array{ok,message}),
+     * $seams (tests): persist, in_use (callable path→bool), delete_home (callable user→array{ok,message}),
      * retired_list, data (the last measurement instead of the file).
      * @return array{status:string,message?:string,freed_bytes?:int}
      */
@@ -467,14 +677,22 @@ class BootSpaceService
         }
 
         $persist = rtrim((string)($seams['persist'] ?? self::persistPath()), '/');
-        $du = $seams['du'] ?? [self::class, 'duBytes'];
+        // No measuring in a web request (#552): the freed size is the size that the last
+        // measurement listed for the item.
+        $listedBytes = 0;
+        foreach (($data['parts'] ?? []) as $p) {
+            if (($p['key'] ?? '') !== 'leftover') continue;
+            foreach (($p['items'] ?? []) as $it) {
+                if (($it['key'] ?? '') === $key) { $listedBytes = (int)($it['bytes'] ?? 0); break 2; }
+            }
+        }
         $inUse = $seams['in_use'] ?? [self::class, 'pathInUse'];
         $configUser = (string)($seams['config_user'] ?? (ConfigService::getConfig()['user'] ?? 'root'));
         if ($configUser === '') $configUser = 'root';
 
         // Re-check right before removal: find the item again with the live rules.
         $homes = self::discoverHomes($persist, $configUser);
-        $live = self::leftOverItems($persist, $homes, static function () { return 0; }, $seams['retired_list'] ?? null);
+        $live = self::leftOverItems($persist, $homes, static function () { return 0; }, $seams['retired_list'] ?? null);   // no du: the callable returns 0
         $item = null;
         foreach ($live as $it) { if ($it['key'] === $key) { $item = $it; break; } }
         if ($item === null) {
@@ -493,7 +711,7 @@ class BootSpaceService
                 $r = FileStorage::deleteHomeEntity($name);
             }
             $ok = !empty($r['ok']);
-            foreach ($files as $f) $freed += (int)$du($f);
+            $freed = $listedBytes;
             if ($ok) { self::logRemoved($key, $freed); return ['status' => 'ok', 'freed_bytes' => $freed]; }
             return ['status' => 'error', 'message' => (string)($r['message'] ?? 'The layers could not be removed.')];
         }
@@ -513,7 +731,7 @@ class BootSpaceService
         if ($inUse($path)) {
             return ['status' => 'error', 'message' => 'The item is in use (a mount or a process holds it), so it was not removed.'];
         }
-        $freed = (int)$du($path);
+        $freed = $listedBytes;
         $out = []; $rc = 0;
         @exec('rm -rf -- ' . escapeshellarg($path) . ' 2>&1', $out, $rc);
         if (file_exists($path)) {

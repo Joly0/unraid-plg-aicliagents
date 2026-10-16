@@ -4,7 +4,9 @@
  * Description: Boot disk space tool "Convert agents to plain folders"
  *   (docs/specs/BOOT_DISK_SPACE.md R3, epic #534). Registers
  *   aicliBootSpace.actions['convert_agents']. The dialog asks the server for the sizes
- *   (AJAX agent_convert_estimate), shows each layered agent with its size now and its
+ *   (AJAX agent_convert_estimate, #552: the numbers of the last background measurement, with their
+ *   age and a Measure now button when they are older than 10 minutes; the dialog never measures
+ *   itself), shows each layered agent with its size now and its
  *   estimated size as plain folders, the total extra space and the free space after,
  *   refuses when less than 10% of the disk or 2 GB would stay free, and then starts the
  *   conversion (AJAX convert_agents). Offered on an internal boot disk while
@@ -63,7 +65,11 @@
         return h + '</div>';
     }
 
-    function dialogHtml(est) {
+    function stamp(r) {
+        return (window.aicliBootSpace && typeof window.aicliBootSpace.stampHtml === 'function') ? window.aicliBootSpace.stampHtml(r) : '';
+    }
+
+    function dialogHtml(est, answer) {
         var rows = '', i, a;
         for (i = 0; i < est.agents.length; i++) {
             a = est.agents[i];
@@ -78,8 +84,9 @@
             + '<table style="width:100%; border-collapse:collapse;"><thead><tr><th style="text-align:left;">Agent</th>'
             + '<th style="text-align:right;">Size now</th><th style="text-align:right;">As plain folders</th></tr></thead><tbody>'
             + rows + '</tbody></table>'
-            + (est.estimated ? '<div style="opacity:0.7; margin-top:4px;">Some sizes are estimates: an agent that is not mounted cannot be measured.</div>' : '')
+            + (est.estimated ? '<div style="opacity:0.7; margin-top:4px;">The sizes as plain folders are estimates: about 5.8 times the size of the layer files, divided by the compression of the boot disk.</div>' : '')
             + '<div id="aicli-ca-summary">' + summaryHtml(est, est.agents.map(function (x) { return x.id; })) + '</div>'
+            + (answer ? stamp(answer) : '')
             + '</div>';
     }
 
@@ -106,10 +113,17 @@
     window.aicliBootSpace = window.aicliBootSpace || { actions: {} };
     window.aicliBootSpace.actions['convert_agents'] = function (part) {
         if (typeof window.swal !== 'function') { window.alert('This needs the Unraid dialog library.'); return; }
+        // The numbers come from the last background measurement (a read). This dialog measures nothing.
         aicliAjax('agent_convert_estimate', {}, function (r) {
             var est = r && r.estimate;
+            if (window.aicliBootSpace) window.aicliBootSpace.reopen = function () { window.aicliBootSpace.actions['convert_agents'](part); };
+            if (r && r.status === 'ok' && !est) {
+                swal({ title: 'Convert agents to plain folders?', html: true, type: 'info',
+                       text: '<div style="text-align:left; font-size:12px;">The sizes are not measured yet. Press Measure now.' + stamp(r) + '</div>' });
+                return;
+            }
             if (!est || r.status !== 'ok') {
-                swal('Not available', (r && r.message) || 'The sizes could not be measured.', 'error');
+                swal('Not available', (r && r.message) || 'The sizes could not be read.', 'error');
                 return;
             }
             if (!est.offered) {
@@ -127,7 +141,7 @@
             document.body.classList.add('aicli-swal-above-tray');
             swal({
                 title: 'Convert agents to plain folders?',
-                text: dialogHtml(est),
+                text: dialogHtml(est, r),
                 html: true,
                 type: 'warning',
                 showCancelButton: true,

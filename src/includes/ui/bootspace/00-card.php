@@ -10,6 +10,11 @@
  *   every 3 seconds. "Measure now" starts a new measure (POST measure_boot_space).
  *   It defines aicliBootSpace.refresh(): every action of the card calls it when it ends, so the
  *   numbers update at once.
+ *   It also gives the dialogs their shared helpers (#552): aicliBootSpace.stampHtml(answer) writes
+ *   "Measured at HH:MM (N min ago)" and, when the numbers are older than 10 minutes or missing,
+ *   a "Measure now" button. aicliBootSpace.measureNow(done) starts one background measure and
+ *   polls get_boot_space (a read) every 3 seconds until it ends. A dialog never measures itself
+ *   and never calls a measuring action in a loop.
  *   Deep link: the page address with #boot-space opens the Storage tab and scrolls to the card.
  * Dependencies: jQuery, CommonLogging.php (aicliAjax, aicliTraceId), ManagerScripts.php (switchMainTab).
  * Constraints: Atomic UI fragment. The lines come from the server (parts); the card has no list of
@@ -145,6 +150,55 @@
         return xhr;
     }
     reg.post = post;
+
+    // ---- helpers for the dialogs (#552) ----------------------------------------------------
+
+    // Pure: "Measured at 14:05 (3 min ago)" from a dialog answer (measured_at, age, has_data, partial).
+    function ageText(r) {
+        if (!r || !r.has_data) return 'Not measured yet.';
+        var a = Math.max(0, Number(r.age) || 0);
+        var ago = a < 60 ? 'less than a minute ago' : (a < 3600 ? Math.round(a / 60) + ' min ago' : Math.round(a / 3600) + ' h ago');
+        return 'Measured at ' + clock(r.measured_at) + ' (' + ago + ')' + (r.partial ? '. The measure stopped at its time limit, so some sizes may be missing.' : '');
+    }
+    reg.ageText = ageText;
+
+    // Pure: the line under a dialog. A "Measure now" button shows when the numbers are older than
+    // 10 minutes or missing.
+    reg.stampHtml = function (r) {
+        var stale = !r || !r.has_data || !!r.stale;
+        var h = '<div data-testid="bootspace-dialog-stamp" data-stale="' + (stale ? '1' : '0') + '" style="margin-top:8px; font-size:11px; opacity:0.85;">' + esc(ageText(r));
+        if (r && r.measuring) h += ' <i class="fa fa-spinner fa-spin"></i> measuring now&hellip;';
+        if (stale && !(r && r.measuring)) {
+            h += ' <button type="button" class="aicli-bs-dialog-measure" data-testid="bootspace-dialog-measure-now" style="font-size:11px; padding:2px 8px; margin:0 0 0 6px;">Measure now</button>';
+        }
+        return h + '</div>';
+    };
+
+    // Start ONE background measure, then poll get_boot_space (a read) every 3 seconds until it
+    // ends or 6 minutes pass. done(answer) gets the last get_boot_space answer, or null.
+    reg.measureNow = function (done) {
+        function poll(n) {
+            setTimeout(function () {
+                aicliAjax('get_boot_space', {}, function (r) {
+                    if (r && r.measuring && n < 120) { poll(n + 1); return; }
+                    done(r && r.status === 'ok' ? r : null);
+                }).fail(function () { done(null); });
+            }, 3000);
+        }
+        post('measure_boot_space', {}, function () { poll(0); }).fail(function () { done(null); });
+    };
+
+    // A dialog sets aicliBootSpace.reopen = fn before it shows; the Measure now button of the dialog
+    // measures once, closes the dialog and opens it again with the new numbers.
+    $(document).on('click', '.aicli-bs-dialog-measure', function () {
+        var btn = $(this), again = reg.reopen;
+        btn.prop('disabled', true).text('Measuring\u2026');
+        reg.measureNow(function () {
+            if (typeof window.swal === 'function' && typeof window.swal.close === 'function') window.swal.close();
+            load();
+            if (typeof again === 'function') setTimeout(again, 400);
+        });
+    });
 
     // Every action of the card calls this when it ends: a new measure starts at once.
     reg.refresh = function () {

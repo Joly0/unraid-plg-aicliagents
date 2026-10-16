@@ -105,7 +105,9 @@ require_once __DIR__ . '/services/HealthService.php';
 require_once __DIR__ . '/services/StorageStateAuditService.php';
 require_once __DIR__ . '/services/PinnedLayersService.php';  // #455 — flash space pinned by old home layers
 require_once __DIR__ . '/services/HomeCacheService.php';  // BOOT_DISK_SPACE.md R5 — caches of plain-folder homes
+require_once __DIR__ . '/services/MeasureDeadline.php';   // #552 — one deadline for the background measurement
 require_once __DIR__ . '/services/BootSpaceService.php';  // BOOT_DISK_SPACE.md R1 — the Boot disk space breakdown
+require_once __DIR__ . '/services/OldVersionsJobService.php';   // #552 — the supervisor job Remove old versions
 // T-11 (Feature #1360) — workspace export/import bundles
 require_once __DIR__ . '/services/WorkspaceBundleService.php';
 require_once __DIR__ . '/services/AgentRelayService.php';

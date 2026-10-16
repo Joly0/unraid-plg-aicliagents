@@ -202,6 +202,10 @@ home_cache_home_busy() {
 _hc_du_bytes() {
     local out
     [ "$#" -gt 0 ] || { printf '0\n'; return 0; }
+    # AICLI_HC_NO_MEASURE=1 (set by the web request "Clear caches", #552): no du at all.
+    # The freed bytes then read 0 and the caller takes the size from the last background
+    # measurement.
+    [ -z "${AICLI_HC_NO_MEASURE:-}" ] || { printf '0\n'; return 0; }
     out="$(timeout 60 du -s -B1 -- "$@" 2>/dev/null | awk '{s+=$1} END {print s+0}')"
     printf '%s\n' "${out:-0}"
 }

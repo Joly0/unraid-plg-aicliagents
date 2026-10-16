@@ -18,4 +18,10 @@ if ($jobId === '' || preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/', $jobId)
     fwrite(STDERR, "usage: history-move.php <jobId>\n");
     exit(2);
 }
-exit(\AICliAgents\Services\HistoryJobService::run($jobId));
+$rc = \AICliAgents\Services\HistoryJobService::run($jobId);
+// The card shows the new numbers: ask for a background measurement (best effort, #552).
+try {
+    require_once __DIR__ . '/../../includes/services/BootSpaceService.php';
+    \AICliAgents\Services\BootSpaceService::startMeasure();
+} catch (\Throwable $e) { /* the next card visit measures */ }
+exit($rc);

@@ -43,6 +43,11 @@ class AgentVersionCleanupService {
         return $p !== '' ? rtrim($p, '/') : '/boot/config/plugins/unraid-aicliagents/persistence';
     }
 
+    /** True when $agentId is "all", empty, or a valid agent id. Cheap: it reads nothing. */
+    public static function isValidTarget(?string $agentId): bool {
+        try { self::target($agentId); return true; } catch (\InvalidArgumentException $e) { return false; }
+    }
+
     /** 1 when the setting "Keep the previous version for rollback" is on (the default). */
     public static function keepPrevious(): bool {
         $cfg = ConfigService::getConfig();
@@ -98,7 +103,17 @@ class AgentVersionCleanupService {
      * @return array{items:array<int,array{agent:string,kind:string,bytes:int,path:string}>,skipped:array<int,array{agent:string,path:string,reason:string}>,total_bytes:int}
      */
     public static function oldVersions(?string $agentId = null): array {
-        $r = self::parse(self::run('list', self::target($agentId), self::LIST_TIMEOUT));
+        // The list runs du on every version. It belongs to the background measurement and to the
+        // remove job only; no web request calls it (#552). The time left on the shared deadline
+        // caps the script.
+        require_once __DIR__ . '/MeasureDeadline.php';
+        $target = self::target($agentId);
+        $t = MeasureDeadline::remaining(self::LIST_TIMEOUT);
+        if ($t < 1) {
+            MeasureDeadline::markPartial();
+            return ['items' => [], 'skipped' => [], 'total_bytes' => 0];
+        }
+        $r = self::parse(self::run('list', $target, $t));
         return ['items' => $r['items'], 'skipped' => $r['skipped'], 'total_bytes' => $r['total_bytes']];
     }
 

@@ -2429,7 +2429,8 @@ _op_backup_home() {
     declare -f _backup_delete_options >/dev/null 2>&1 && _backup_delete_options "$job_id"
 }
 
-# Op handler: historymove / historyback (docs/specs/BOOT_DISK_SPACE.md R6, #539).
+# Op handler: historymove / historyback (docs/specs/BOOT_DISK_SPACE.md R6, #539), and
+# removeold (R4, #552: Remove old versions; runner remove-old-versions.php).
 # Moves old conversation sessions of a home to a pool folder, or brings them
 # back. The work is in scripts/storage/history-move.php (HistoryJobService::run):
 # it reads the job options file, copies and checks each file, writes a progress
@@ -2449,6 +2450,7 @@ _op_history() {
     _OP_DEFER_REASON=""
 
     local runner="${STORAGE_DIR:-}/history-move.php"
+    [ "$op" = "removeold" ] && runner="${STORAGE_DIR:-}/remove-old-versions.php"
     if [ -z "$id" ] || [ -z "$job_id" ] || [ ! -f "$runner" ] || ! command -v php >/dev/null 2>&1; then
         log_error "History job for $entity cannot run: missing id, job id, runner or php"
         _OP_EXIT=1
@@ -4386,7 +4388,7 @@ _work_tick() {
                     backup)
                         _op_backup_home "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
-                    historymove|historyback)
+                    historymove|historyback|removeold)
                         _op_history "$req_op" "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
                     restore)

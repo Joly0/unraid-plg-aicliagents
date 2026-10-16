@@ -1553,29 +1553,42 @@ class StorageHandler {
 
     /**
      * AJAX `agent_old_versions` (BOOT_DISK_SPACE.md R4): GET agent=<id>|all (default all).
-     * Read-only. Lists what Remove old versions removes, how much space it frees
-     * and what stays because a workspace uses it.
+     * Read-only. Lists what Remove old versions removes, how much space it frees and what
+     * stays because a workspace uses it. #552: it answers from the last background
+     * measurement (.boot_space.json) and measures nothing. The answer carries `measured_at`,
+     * `age`, `stale`, `has_data` and `measuring`.
      */
     private static function agentOldVersions(): array {
         $agent = (string)($_REQUEST['agent'] ?? 'all');
-        try {
-            $r = \AICliAgents\Services\AgentVersionCleanupService::oldVersions($agent);
-        } catch (\InvalidArgumentException $e) {
-            return ['status' => 'error', 'message' => 'invalid_agent'];
-        }
-        return ['status' => 'ok', 'agent' => $agent === '' ? 'all' : $agent,
-                'keep_previous' => \AICliAgents\Services\AgentVersionCleanupService::keepPrevious()] + $r;
+        return \AICliAgents\Services\BootSpaceService::cachedOldVersions($agent);
     }
 
-    /** AJAX `remove_old_versions` (BOOT_DISK_SPACE.md R4): POST agent=<id>|all. Removes now; keeps what is in use. */
+    /**
+     * AJAX `remove_old_versions` (BOOT_DISK_SPACE.md R4): POST agent=<id>|all. #552: it queues
+     * a supervisor job (op `removeold`) with Activity tray steps and returns at once. The
+     * request lists nothing and removes nothing.
+     */
     private static function removeOldVersionsAction(): array {
-        $agent = (string)($_REQUEST['agent'] ?? 'all');
+        $agent = trim((string)($_REQUEST['agent'] ?? 'all'));
+        if ($agent === '') $agent = 'all';
         aicli_log("AJAX Request: Remove old versions of $agent", AICLI_LOG_INFO);
-        try {
-            return \AICliAgents\Services\AgentVersionCleanupService::removeOldVersions($agent);
-        } catch (\InvalidArgumentException $e) {
+        if (!\AICliAgents\Services\AgentVersionCleanupService::isValidTarget($agent)) {
             return ['status' => 'error', 'message' => 'invalid_agent'];
         }
+        require_once __DIR__ . '/../services/OldVersionsJobService.php';
+        $jobId = \AICliAgents\Services\SupervisorService::generateJobId(\AICliAgents\Services\OldVersionsJobService::OP, 'agent', $agent);
+        if (!\AICliAgents\Services\OldVersionsJobService::writeOptions($jobId, ['agent' => $agent])) {
+            return ['status' => 'error', 'message' => 'Could not prepare the job. Try again.'];
+        }
+        if (!\AICliAgents\Services\SupervisorService::enqueue('agent', $agent, \AICliAgents\Services\OldVersionsJobService::OP, 'user_old_versions', 5, $jobId)) {
+            \AICliAgents\Services\OldVersionsJobService::deleteOptions($jobId);
+            return ['status' => 'error', 'message' => 'Could not queue the job. Try again.'];
+        }
+        self::trackJobActivity($jobId, $agent === 'all'
+            ? 'Removing old versions of all agents'
+            : 'Removing old versions of ' . self::trayAgentName($agent));
+        \AICliAgents\Services\SupervisorService::wake();
+        return ['status' => 'queued', 'job_id' => $jobId, 'message' => 'Queued. Watch the activity tray for progress.'];
     }
 
     /**
@@ -1588,6 +1601,11 @@ class StorageHandler {
         aicli_log("AJAX Request: Clear caches of home $user", AICLI_LOG_INFO);
         $r = \AICliAgents\Services\HomeCacheService::clear($user);
         if (($r['status'] ?? '') === 'ok') {
+            // #552: no du in the request. The freed size is the size of the last measurement;
+            // a fresh background measurement follows.
+            $c = \AICliAgents\Services\BootSpaceService::cachedCache($user) ?? [];
+            $r['freed_bytes'] = (int)($c['bytes'] ?? 0) + (int)($c['on_boot_bytes'] ?? 0);
+            \AICliAgents\Services\BootSpaceService::startMeasure();
             \AICliAgents\Services\LifecycleLogService::log(
                 \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
                 'storage', 'home_caches_cleared', ['id' => $user, 'freed_bytes' => (int)($r['freed_bytes'] ?? 0)]);
@@ -1595,11 +1613,21 @@ class StorageHandler {
         return $r;
     }
 
-    /** AJAX `get_home_cache_status` (read-only): GET user=<home id>. */
+    /**
+     * AJAX `get_home_cache_status` (read-only): GET user=<home id>. #552: it answers from the
+     * last background measurement and measures nothing. The answer has the shape of
+     * HomeCacheService::status() plus `measured_at`, `age`, `stale`, `has_data`, `measuring`.
+     */
     private static function homeCacheStatus(): array {
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '') $user = 'root';
-        return ['status' => 'ok'] + \AICliAgents\Services\HomeCacheService::status($user);
+        if (preg_match('/^[A-Za-z0-9._-]+$/', $user) !== 1) {
+            return ['status' => 'error', 'message' => 'invalid_user'];
+        }
+        $data = \AICliAgents\Services\BootSpaceService::read();
+        $c = \AICliAgents\Services\BootSpaceService::cachedCache($user, $data)
+            ?? ['location' => 'none', 'path' => '', 'bytes' => 0, 'cap_bytes' => 0, 'on_boot_bytes' => 0];
+        return ['status' => 'ok'] + $c + \AICliAgents\Services\BootSpaceService::meta($data);
     }
 
     /** AJAX `convert_storage` (#496): GET/POST type=home, id=<user>, optional continue_after=0. */
@@ -1685,16 +1713,19 @@ class StorageHandler {
 
     /**
      * BOOT_DISK_SPACE.md R3, AJAX `agent_convert_estimate` (read-only): the numbers the
-     * "Convert agents to plain folders" dialog shows, from AgentStorageService.
+     * "Convert agents to plain folders" dialog shows. #552: from the last background
+     * measurement; this request measures nothing (no du, no tree walk).
      * Response: { status:'ok', estimate:{offered, reason, disk_bytes, free_bytes, ratio,
-     * agents:[{id,name,now_bytes,plain_bytes}], extra_bytes, fits, retained_bytes, estimated} }.
+     * agents:[{id,name,now_bytes,plain_bytes,extra_bytes,fits,estimated}], extra_bytes, fits,
+     * retained_bytes, estimated} | null, has_data, measured_at, age, stale, measuring }.
+     * The free space is read again now. `estimate` is null before the first measurement.
      */
     private static function agentConvertEstimate(): array {
         try {
-            return ['status' => 'ok', 'estimate' => \AICliAgents\Services\AgentStorageService::convertEstimate()];
+            return \AICliAgents\Services\BootSpaceService::cachedConvert();
         } catch (\Throwable $e) {
             aicli_log("agent_convert_estimate failed: " . $e->getMessage(), AICLI_LOG_WARN);
-            return ['status' => 'error', 'message' => 'The sizes could not be measured. Try again.'];
+            return ['status' => 'error', 'message' => 'The sizes could not be read. Try again.'];
         }
     }
 
@@ -1726,7 +1757,15 @@ class StorageHandler {
      */
     public static function convertAgents($requested, ?array $estimate = null, ?callable $installBusy = null): array {
         require_once __DIR__ . '/../services/AgentStorageService.php';
-        $estimate = $estimate ?? \AICliAgents\Services\AgentStorageService::convertEstimate();
+        // #552: the numbers come from the last background measurement; the request measures nothing.
+        // The free space is read again, so the room check uses the live number.
+        if ($estimate === null) {
+            $estimate = \AICliAgents\Services\BootSpaceService::cachedConvert()['estimate'] ?? null;
+            if ($estimate === null) {
+                return ['status' => 'error', 'reason' => 'not_measured',
+                        'message' => 'The sizes are not measured yet. Open Boot disk space, choose Measure now, then try again.'];
+            }
+        }
         if (empty($estimate['offered'])) {
             $why = [
                 'usb_boot' => 'Agents on a USB boot stick keep compressed layers.',

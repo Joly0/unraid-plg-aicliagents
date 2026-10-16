@@ -7,6 +7,9 @@
  *   plain folders" dialog shows before it changes anything.</description>
  *   <dependencies>ConfigService, StoragePathResolver, FileStorage, LayerManifestService, AgentRegistry</dependencies>
  *   <constraints>Static methods only. Read-only: it measures and decides, it never moves a file.
+ *   agentSizes() and convertEstimate() measure with du. Only the background measurement
+ *   (BootSpaceService::run) may call them. No web request does (#552); the dialogs read
+ *   the numbers from .boot_space.json.
  *   The decision functions are the PHP twins of agent_storage_choice and agent_convert_fits
  *   in src/scripts/storage/detect_backend.sh.</constraints>
  * </module_context>
@@ -21,11 +24,15 @@ class AgentStorageService
     /** ... and at least this share of the whole disk (one tenth). */
     public const RESERVE_DIVISOR = 10;
     /**
-     * When an agent is not mounted its unpacked size cannot be measured. A layer is
-     * a compressed image: measured on prod02 (2026-10-16) 770 MB of layers held
-     * 4.5 GB of files, so the estimate multiplies the layer size by 5.
+     * The unpacked size of a layered agent divided by the size of its layer files. A layer
+     * is a compressed image. Measured on prod02 (2026-10-16): 770 MB of layers held 4.5 GB
+     * of files, which is about 5.8 times. The Convert dialog multiplies the size of the
+     * layer files by this fixed number and shows the result as an estimate. No code
+     * measures the unpacked size of a mounted view: `du` of a mounted squashfs view reads
+     * every block of the layers and froze the boot disk of prod02 (#552). The boot file
+     * system's compression ratio divides the unpacked size afterwards (convertEstimate).
      */
-    public const UNPACKED_FALLBACK_FACTOR = 5;
+    public const UNPACKED_RATIO = 5.8;
 
     /**
      * PHP twin of agent_storage_choice (detect_backend.sh). 'layers' or 'plain'.
@@ -99,13 +106,20 @@ class AgentStorageService
         return $blocks > 0 ? $blocks * 512 : (int)($st['size'] ?? 0);
     }
 
-    /** Allocated bytes of a folder tree (du -x -s -B1, 30 s cap). 0 when it cannot be read. */
+    /**
+     * Allocated bytes of a folder tree (du -x -s -B1). Background measurement only: the
+     * timeout is the smaller of 30 s and the time left on the shared deadline
+     * (MeasureDeadline). 0 when it cannot be read or the time is gone.
+     */
     private static function treeBytes(string $dir, ?callable $du = null): int
     {
         if ($du !== null) return (int)$du($dir);
         if (!is_dir($dir)) return 0;
+        require_once __DIR__ . '/MeasureDeadline.php';
+        $t = MeasureDeadline::remaining(30);
+        if ($t < 1) { MeasureDeadline::markPartial(); return 0; }
         // nosemgrep: php.lang.security.exec-use.exec-use
-        $out = (string)@shell_exec('timeout 30 du -x -s -B1 ' . escapeshellarg($dir) . ' 2>/dev/null');
+        $out = (string)@shell_exec('timeout ' . $t . ' du -x -s -B1 ' . escapeshellarg($dir) . ' 2>/dev/null');
         return (int)trim((string)strtok($out, "\t "));
     }
 
@@ -216,34 +230,12 @@ class AgentStorageService
     }
 
     /**
-     * The unpacked size of one layered agent: the files its mounted view holds.
-     * A mounted view is measured with du (apparent size) and the answer is kept in
-     * RAM until a layer changes. An agent that is not mounted gets the layer size
-     * times UNPACKED_FALLBACK_FACTOR, and the caller is told it is an estimate.
-     *
-     * @return array{bytes:int,estimated:bool}
+     * The unpacked size of one layered agent: the size of its layer files times
+     * UNPACKED_RATIO. It is always an estimate. It reads no file content.
      */
-    private static function unpackedBytes(string $id, int $layerFileBytes, string $sig): array
+    public static function unpackedEstimate(int $layerFileBytes): int
     {
-        $cache = (getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents') . '/.agent_unpacked_' . preg_replace('/[^a-z0-9-]/', '_', $id) . '.json';
-        $c = json_decode((string)@file_get_contents($cache), true);
-        if (is_array($c) && ($c['sig'] ?? '') === $sig && (int)($c['bytes'] ?? 0) > 0) {
-            return ['bytes' => (int)$c['bytes'], 'estimated' => false];
-        }
-        require_once __DIR__ . '/AgentRegistry.php';
-        require_once __DIR__ . '/StorageMountService.php';
-        $view = AgentRegistry::agentPath($id);
-        $real = @realpath($view);
-        if ($real !== false && StorageMountService::isMounted($real)) {
-            // nosemgrep: php.lang.security.exec-use.exec-use
-            $out = (string)@shell_exec('timeout 60 du -x -s -b ' . escapeshellarg($real) . ' 2>/dev/null');
-            $bytes = (int)trim((string)strtok($out, "\t "));
-            if ($bytes > 0) {
-                @file_put_contents($cache, json_encode(['sig' => $sig, 'bytes' => $bytes]));
-                return ['bytes' => $bytes, 'estimated' => false];
-            }
-        }
-        return ['bytes' => $layerFileBytes * self::UNPACKED_FALLBACK_FACTOR, 'estimated' => true];
+        return (int)round($layerFileBytes * self::UNPACKED_RATIO);
     }
 
     /**
@@ -261,7 +253,8 @@ class AgentStorageService
      * .graduated/ and are removed later, or at once from the card's Left over line.
      *
      * @param array<string,mixed>|null $facts test seam: persist, device_class, keep, policy,
-     *        disk_bytes, free_bytes, ratio, agents[] ({id,name,now_bytes,unpacked_bytes})
+     *        disk_bytes, free_bytes, ratio, agent_sizes (the result of agentSizes(), so du runs once),
+     *        agents[] ({id,name,now_bytes,unpacked_bytes})
      * @return array{offered:bool,reason:string,disk_bytes:int,free_bytes:int,ratio:float,agents:array<int,array{id:string,name:string,now_bytes:int,plain_bytes:int}>,extra_bytes:int,fits:string,retained_bytes:int,estimated:bool}
      */
     public static function convertEstimate(?array $facts = null): array
@@ -293,21 +286,17 @@ class AgentStorageService
                     'now_bytes' => (int)$a['now_bytes'], 'unpacked_bytes' => (int)$a['unpacked_bytes']];
             }
         } else {
-            foreach (self::agentSizes($persist) as $s) {
+            foreach (($facts['agent_sizes'] ?? self::agentSizes($persist)) as $s) {
                 if ($s['storage'] !== 'layers') continue;
                 $layerFiles = glob(rtrim($persist, '/') . '/agent_' . $s['id'] . '_*.sqsh') ?: [];
-                $sigParts = [];
                 $apparent = 0;
                 foreach ($layerFiles as $f) {
                     $st = @stat($f);
-                    $sigParts[] = basename($f) . ':' . (int)($st['size'] ?? 0) . ':' . (int)($st['mtime'] ?? 0);
                     $apparent += (int)($st['size'] ?? 0);
                 }
-                sort($sigParts);
-                $u = self::unpackedBytes($s['id'], $apparent, md5(implode('|', $sigParts)));
-                if ($u['estimated']) $estimated = true;
+                $estimated = true;
                 $rows[] = ['id' => $s['id'], 'name' => $s['name'],
-                    'now_bytes' => $s['current_bytes'] + $s['previous_bytes'], 'unpacked_bytes' => $u['bytes']];
+                    'now_bytes' => $s['current_bytes'] + $s['previous_bytes'], 'unpacked_bytes' => self::unpackedEstimate($apparent)];
             }
         }
         if ($rows === []) { $result['reason'] = 'no_layered_agents'; return $result; }
