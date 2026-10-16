@@ -352,7 +352,8 @@ class HistoryMoveService
         // rename() over an existing file would replace it; link() fails if the name exists.
         if (@link($part, $home)) {
             @unlink($part);
-        } elseif (file_exists($home) || is_link($home) || !@rename($part, $home)) {
+        } elseif (@lstat($home) !== false || !@rename($part, $home)) {
+            // lstat sees a file, a folder and a dangling link alike: never replace any of them.
             @unlink($part);
             self::walWrite($log, ['t' => 'removed', 'file' => $rel]);
             return 'A file with this name appeared in the home, so it was not replaced.';
