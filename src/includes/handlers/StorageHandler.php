@@ -1608,7 +1608,7 @@ class StorageHandler {
             \AICliAgents\Services\BootSpaceService::startMeasure();
             \AICliAgents\Services\LifecycleLogService::log(
                 \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
-                'storage', 'home_caches_cleared', ['id' => $user, 'freed_bytes' => (int)($r['freed_bytes'] ?? 0)]);
+                'storage', 'home_caches_cleared', ['id' => $user, 'freed_bytes' => $r['freed_bytes']]);
         }
         return $r;
     }

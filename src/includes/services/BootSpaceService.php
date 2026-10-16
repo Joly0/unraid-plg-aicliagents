@@ -274,7 +274,12 @@ class BootSpaceService
         }
     }
 
-    /** True (and the answer becomes partial) when the shared deadline has passed. */
+    /**
+     * True (and the answer becomes partial) when the shared deadline has passed. The answer
+     * changes with the clock, so two calls in a row can differ.
+     *
+     * @phpstan-impure
+     */
     private static function outOfTime(): bool
     {
         if (MeasureDeadline::expired()) { MeasureDeadline::markPartial(); return true; }

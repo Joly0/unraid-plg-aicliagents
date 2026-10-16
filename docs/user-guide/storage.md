@@ -147,7 +147,7 @@ When the boot disk has no room for a new agent, the install stops and says "No s
 An agent that was installed with layers stays layered until you convert it. The conversion is offered on an internal boot disk while **Keep agents compressed** is off, and when at least one agent has layers. It is not offered on a USB boot stick.
 
 1. On the **Boot disk space** card (see "Boot disk space" above), press **Convert to plain folders** on the line **Agents: current versions**. Expect: a dialog **Convert agents to plain folders?**.
-2. Read the dialog before you press anything. It lists each agent with **Size now** and **As plain folders**. Below the list it shows the extra space, the free space now and the free space after. The size as plain folders is an estimate: the unpacked size of the agent, divided by the compression of the boot disk. A note tells you when an agent could not be measured.
+2. Read the dialog before you press anything. It lists each agent with **Size now** and **As plain folders**. Below the list it shows the extra space, the free space now and the free space after. The size as plain folders is an estimate: the size of the layer files times 5.8, divided by the compression of the boot disk. The dialog does not measure anything. It shows the numbers of the last measure, with the line "Measured at 14:05 (3 min ago)". When the numbers are more than 10 minutes old, or there are none, the dialog shows the button **Measure now**. Press it once, wait for the measure to end, and the dialog opens again with new numbers.
 3. Tick or untick agents. The totals change at once.
 4. Press **Convert**. Expect: "Conversion queued". Press **Cancel** to stop. Nothing changes then.
 
@@ -344,7 +344,7 @@ When the pool is not mounted, for example while the array is stopped, the caches
 
 The first time a home starts after this feature is on, the plugin removes the old cache content from the boot disk once. It does this only while no workspace of that home runs. The Activity tray shows how much space it freed.
 
-**Clear caches** (on the line **Home** *name*: **caches** of the **Boot disk space** card; see "Boot disk space") empties the cache folders of a home. The dialog shows the size it frees. The button works only while no workspace of that home runs. A home with layers is not changed: the merge of layers already drops its caches.
+**Clear caches** (on the line **Home** *name*: **caches** of the **Boot disk space** card; see "Boot disk space") empties the cache folders of a home. The dialog shows the size it frees, from the last measure, with the time of that measure. The button works only while no workspace of that home runs. A home with layers is not changed: the merge of layers already drops its caches.
 
 ## Boot disk space
 
@@ -352,7 +352,9 @@ The plugin keeps its homes and agents on the boot disk, because they must work w
 
 The card shows a bar with the size of the boot disk, how much is used and how much is free. Below the bar is one line for each part, the largest first. Each line has a bar, its size and, when there is something to do, a button. The sizes are the space really used on the disk, so compression is counted.
 
-The plugin measures the sizes in the background. A measure of several GB takes a few seconds, and the page never waits for it. The card shows the time of the last measure ("Measured at 14:05"). The plugin measures again when the last measure is more than 10 minutes old, and at once after an action on the card. Press **Measure now** to measure when you want. While a measure runs, the card says "measuring now" and updates by itself.
+The plugin measures the sizes in the background, never while you wait. A measure can take a few minutes on a slow disk. It runs with the lowest priority and has a time limit of 5 minutes. If the limit ends the measure early, the card says that some sizes may be missing. The card shows the time of the last measure ("Measured at 14:05"). The plugin measures again when the last measure is more than 10 minutes old, and after an action on the card. Press **Measure now** to measure when you want. While a measure runs, the card says "measuring now" and updates by itself.
+
+The dialogs of the buttons (**Remove old versions**, **Clear caches**, **Convert to plain folders**, **Move old sessions…**) read the numbers of the last measure. Each dialog shows when the numbers were measured. When they are more than 10 minutes old, or missing, the dialog also shows **Measure now**. The dialog never measures by itself.
 
 A button is grey when the action cannot run now. Hold the mouse over it to read the reason, for example "No old version to remove." or "Agents on a USB boot stick keep compressed layers."
 
@@ -401,8 +403,8 @@ This setting is in the **Configuration** tab, card **Global Configuration**. The
 
 Press **Remove old versions** in the storage line of an installed agent card in the **Agent Store** tab. The card **Boot disk space** shows the same action for all agents, on the line **Agents: old versions**. See "Boot disk space".
 
-1. Press **Remove old versions**. Expect: a dialog lists the old versions of the agent, the space the removal frees, and the versions that stay because a workspace uses them. The dialog names the workspace.
-2. Press **Remove** to continue, or **Cancel** to stop. Expect: after **Remove**, a second dialog says how much space you got back.
+1. Press **Remove old versions**. Expect: a dialog lists the old versions of the agent, the space the removal frees, and the versions that stay because a workspace uses them. The dialog names the workspace. It shows when the list was measured; press **Measure now** when the list is old.
+2. Press **Remove** to continue, or **Cancel** to stop. Expect: after **Remove**, the dialog says "Removal queued". The Activity tray shows the steps ("Checking the old versions", "Removing old versions") and ends with how much space you got back. The card measures again by itself.
 
 The action removes old version folders, old storage layers and the kept rollback copies. When the setting above is **Yes**, the newest kept rollback copy stays. After the removal, you cannot roll back to a removed version. A version that a workspace uses is never removed. If a clean-up of that agent already runs, the plugin leaves that item and says so; press the link again later.
 
@@ -413,7 +415,7 @@ Each agent keeps your conversations in your home on the boot disk. Old conversat
 The line **Home** *name*: **conversation history** of the card **Boot disk space** (see "Boot disk space") has the button **Move old sessions…**. The button opens a dialog.
 
 1. Choose the agent, or **All agents that keep one file for each session**. An agent that keeps its history in a database (OpenCode, Kilo Code and Goose) is grey. The dialog shows its size and says that it cannot move.
-2. Enter the age in days. The default is 90. The dialog shows how many sessions are older, and how much space they use.
+2. Enter the age in days. The default is 90. The dialog shows how many sessions are older, and how much space they use. It has these counts for 30, 90 and 180 days, from the last measure. For another age it says so; the move still works for any age.
 3. Choose a pool and a folder name. The plugin remembers the folder in the setting **Folder for moved sessions**.
 4. Read the warning: "Moved sessions cannot be resumed, and are not reachable while the array is stopped."
 5. Select **Move sessions**. The Activity tray shows the progress, for example "Moving sessions: 12 of 140 files (3.0 GB)".
@@ -557,6 +559,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-16** — The dialogs of the card **Boot disk space** show the time of the numbers they use and offer **Measure now** when the numbers are old. They no longer measure the disk. **Remove old versions** runs as a job with steps in the Activity tray. The measure has a time limit of 5 minutes. Spec `docs/specs/BOOT_DISK_SPACE.md` (Implementation notes #552), issue #552.
 - **2026-10-16** — New: the card **Boot disk space** at the top of the **Home Storage** tab shows where the boot disk space goes, with one line and one button for each part, **Measure now**, and **Remove** for left-over items. The full-disk warning now names the biggest part and ends with "Open Home Storage, Boot disk space." Spec `docs/specs/BOOT_DISK_SPACE.md` (R1, R2), issues #538 and #531.
 - **2026-10-16** — New setting **Keep the previous version for rollback** and the action **Remove old versions**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R4), issue #536.
 - **2026-10-16** — The caches of a plain-folder home live in RAM or on a pool, not on the boot disk: the fields **Cache location for plain-folder homes**, **Cache folder on a pool** and **RAM cache size per home**, the action **Clear caches**, and the Health warning for RAM caches. Spec `docs/specs/BOOT_DISK_SPACE.md`, issue #537.
