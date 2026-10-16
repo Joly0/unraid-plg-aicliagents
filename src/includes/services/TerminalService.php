@@ -160,6 +160,18 @@ class TerminalService {
             return;
         }
 
+        // Forgejo #558: the array is stopping. A pool stays mounted until the end
+        // of the stop, so the check above passes; a start here holds the pool
+        // and the array cannot stop. Every start path converges here.
+        if (!empty($path) && StorageMountService::startBlockedByArrayStop((string)$path)) {
+            LogService::log(
+                "Session $id deferred: the array is stopping and the workspace is on it: $path",
+                LogService::LOG_WARN,
+                "TerminalService"
+            );
+            return;
+        }
+
         // 2. Setup environment
         $config = ConfigService::getConfig();
         $registry = AgentRegistry::getRegistry();

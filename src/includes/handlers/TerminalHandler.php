@@ -545,6 +545,21 @@ class TerminalHandler {
         if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('start', (string)$id, (string)($_GET['path'] ?? ''));
         $workspacePath = $_GET['path'] ?? null;
 
+        // Forgejo #558: an open tab re-sends `start` when the stop hook closes its
+        // workspace. While the array stops, refuse a workspace on the array or a
+        // pool. The page shows the "workspace unavailable" card and retries every
+        // 10 s, so the workspace comes back after the array starts.
+        if (!empty($workspacePath) && \AICliAgents\Services\StorageMountService::startBlockedByArrayStop((string)$workspacePath)) {
+            return [
+                'status' => 'error',
+                'reason' => 'workspace_unavailable',
+                'message' => \AICliAgents\Services\StorageMountService::ARRAY_STOPPING_MESSAGE,
+                'path' => $workspacePath,
+                'classification' => \AICliAgents\Services\StorageMountService::classifyPath((string)$workspacePath),
+                'emergency_possible' => false,
+            ];
+        }
+
         // R2 (UPGRADE_RELAUNCH_ZOMBIE_SKIP): never spawn a session while this
         // agent's binary is being swapped — a `start` that races the upgrade
         // creates a tmux session whose agent dies instantly (a ZOMBIE), which the

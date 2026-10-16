@@ -106,6 +106,12 @@ nchan_notify() {
 
 log "Shutdown/Array stop detected."
 
+# Forgejo #558: mark the stop FIRST. An open browser tab re-sends `start` as
+# soon as the sessions below close; the plugin refuses a start on the array or
+# a pool while this flag exists (StorageMountService::isArrayStopping).
+# event/disks_mounted removes it; /tmp does not survive a reboot.
+touch /tmp/unraid-aicliagents/.array_stopping 2>/dev/null || true
+
 # docs/specs/VOICE_MAIL.md: voice mail lives on tmpfs between heartbeats, so flush
 # it to Flash before anything else in shutdown runs — this is the moment a reboot
 # would otherwise lose whatever was spoken since the last supervisor tick. Bounded

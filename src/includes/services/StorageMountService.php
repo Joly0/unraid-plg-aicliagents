@@ -106,6 +106,42 @@ class StorageMountService {
         return is_dir($path) && is_readable($path);
     }
 
+    /** Forgejo #558: written by event/stopping, removed by event/disks_mounted. */
+    const ARRAY_STOPPING_FLAG = "/tmp/unraid-aicliagents/.array_stopping";
+
+    /**
+     * Forgejo #558: is the array stopping?
+     *
+     * A pool (for example /mnt/datapool) stays mounted until the very end of an
+     * array stop, so isPathAvailable() still says yes. On 2026-10-17 an open
+     * browser tab started three workspaces again on prod02 seconds after the
+     * stop hook closed them, and the pool could not be exported for 80+ minutes.
+     * True when var.ini says fsState="Stopping", or when the stop hook wrote its
+     * flag (the hook can run before emhttpd writes var.ini).
+     * $varIni and $flag are test seams; production reads the live files.
+     */
+    public static function isArrayStopping(?string $varIni = null, ?string $flag = null): bool {
+        if (file_exists($flag ?? self::ARRAY_STOPPING_FLAG)) return true;
+        $ini = $varIni ?? (string)@file_get_contents('/var/local/emhttp/var.ini');
+        return (bool)preg_match('/^fsState="Stopping"/m', $ini);
+    }
+
+    /**
+     * Forgejo #558: must a start of a workspace in $path wait for the array?
+     * Only a folder on the array or a pool waits; a folder on flash, RAM or an
+     * unassigned disk does not keep the array from stopping.
+     * $class, $varIni and $flag are test seams.
+     */
+    public static function startBlockedByArrayStop(string $path, ?string $class = null, ?string $varIni = null, ?string $flag = null): bool {
+        if ($path === '') return false;
+        $class = $class ?? self::classifyPath($path);
+        if ($class !== 'array' && strpos($class, 'pool:') !== 0) return false;
+        return self::isArrayStopping($varIni, $flag);
+    }
+
+    /** Forgejo #558: the message the start request returns while the array stops. */
+    const ARRAY_STOPPING_MESSAGE = 'The array is stopping. This workspace starts again after the array is started.';
+
     /**
      * Classify a path by storage type. Delegates to classify-path.sh (single source of truth).
      * Returns: 'flash' | 'array' | 'pool:<name>' | 'unassigned' | 'ram' | 'unknown'
