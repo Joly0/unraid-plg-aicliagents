@@ -57,7 +57,8 @@
             <div class="aicli-card-body">
                 <p style="font-size:11px; opacity:0.6; margin-top:0;">
                     One canonical definition per MCP server, projected into each targeted agent's own config format
-                    (Claude / Gemini / Qwen / OpenCode / Copilot JSON, Codex TOML, Goose YAML). Keys you created by
+                    (JSON for Claude, Gemini, Qwen, OpenCode, Kilo Code, Copilot, Factory, Nanocoder, Antigravity
+                    and Kimi Code; TOML for Codex and Grok; YAML for Goose). Keys you created by
                     hand in vendor files are never touched.
                 </p>
                 <div id="hub-server-list" style="display:flex; flex-direction:column; gap:6px;">
@@ -108,11 +109,23 @@
                 </span>
             </div>
             <div class="aicli-card-body">
+                <?php
+                // #470: list the agents from the projector registries, so the help text cannot go stale.
+                $hubSurfaceNames = static function (string $surface): string {
+                    if (!class_exists('\AICliAgents\Services\Hub\HubProjector')) return '';
+                    $names = [];
+                    foreach (array_keys(\AICliAgents\Services\Hub\HubProjector::treeAgentMeta($surface)) as $id) {
+                        $names[] = \AICliAgents\Services\Hub\HubProjector::agentDisplayName((string)$id);
+                    }
+                    return htmlspecialchars(implode(', ', $names), ENT_QUOTES, 'UTF-8');
+                };
+                ?>
                 <p style="font-size:11px; opacity:0.6; margin-top:0;">
                     Hub-stored skills (a folder with <code>SKILL.md</code> + optional extra files) and slash
-                    commands (one markdown file each), mirrored into the agents that have such a surface:
-                    Claude&nbsp;Code (<code>~/.claude/skills/</code> + <code>~/.claude/commands/</code>) and
-                    OpenCode (<code>~/.opencode/commands/</code>, commands only). The hub only ever touches
+                    commands (one markdown file each), mirrored into the agents that have such a surface.
+                    Skills go to: <span id="hub-help-skill-agents"><?=$hubSurfaceNames('skills')?></span>.
+                    Commands go to: <span id="hub-help-command-agents"><?=$hubSurfaceNames('commands')?></span>.
+                    The hub only ever touches
                     the copies it projected — skills/commands you placed in those directories yourself are
                     never modified or removed.
                 </p>

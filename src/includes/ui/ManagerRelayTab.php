@@ -22,7 +22,7 @@
 
       <p style="margin:0;opacity:.75;font-size:12px;">
         Your agents share updates and send each other work requests through a shared mailbox.
-        Messages are saved to each workspace's inbox and are never typed into a running terminal.
+        Messages are saved to each workspace's inbox. A short notice is typed into the agent's terminal so it reads the inbox; the wording is a setting on the Configuration tab.
       </p>
 
       <details style="border:1px solid var(--border-color,#e0e0e0);border-radius:6px;padding:10px 14px;">

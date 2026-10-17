@@ -1095,7 +1095,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['admin_tools_enabled'] ?? '0', "1", _('On'))?>
                                 <?=mk_option($config['admin_tools_enabled'] ?? '0', "0", _('Off (default)'))?>
                             </select>
-                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Lets agents in your workspaces ask the plugin about its own state, for example to list workspaces or check storage; every tool is read-only, and this is off by default.</div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Lets agents in your workspaces ask the plugin about its state and make routine changes to it. Reads change nothing; changes are recorded in the Activity tray; deleting, upgrading, backing up, restoring and merging only propose, and wait for your approval. Off by default.</div>
                         </dd>
                     </dl>
                 </div>

@@ -74,7 +74,9 @@ class StorageTargetService {
         foreach (['addons' => 'ud_addons', 'disks' => 'ud_disk'] as $dir => $src) {
             foreach (self::subdirs("$mnt/$dir") as $d) {
                 if (!self::mounted($d)) continue;
-                $cands[] = self::candidate($d, 'UD device: ' . basename($d), $src, $kind, $config, $current);
+                // #465: offer a folder INSIDE the device (the same shape as the appdata
+                // candidate). The device top folder is refused by validatePersistPath.
+                $cands[] = self::candidate("$d/aicliagents", 'UD device: ' . basename($d), $src, $kind, $config, $current);
             }
         }
         // 5. Array direct disks — advanced only (bypasses FUSE, pins one spindle).

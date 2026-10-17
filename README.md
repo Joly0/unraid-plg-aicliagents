@@ -36,9 +36,11 @@ one page for each feature and a reference of every setting on every tab.
 - **Version management.** A version picker and channel choice (latest, beta,
   next) per agent, with upgrade notices through Unraid's own notification
   system.
-- **Graceful upgrades.** Installing or upgrading an agent finds every active
-  session using it, saves each one's place, closes them cleanly, swaps the
-  binary, and offers a Resume button when you come back.
+- **Graceful upgrades.** A new version of an agent installs side by side with
+  the one your workspaces run, so an open workspace is not interrupted and
+  keeps its version until you switch it over. Only a forced upgrade ("Force
+  upgrade now") saves each workspace's place, closes it, installs, and starts
+  it again where it left off.
 - **Agent Relay.** A shared mailbox between the workspaces on this server,
   for one agent to hand work to another or keep a co-worker informed. See
   [Relay](#relay) below.
@@ -66,8 +68,8 @@ once.
 
 To start working, press **+ New Workspace**. Pick an agent by its icon and
 name, then type or browse to a folder. If that agent already has a saved
-conversation for that folder, press **Resume**; otherwise press **Start
-Fresh**. The workspace opens as a new tab in the drawer on the side of the
+conversation for that folder, you can press **Resume**; to begin an empty
+conversation, press **Start New**. The workspace opens as a new tab in the drawer on the side of the
 screen.
 
 Each agent has its own sign-in step the first time you use it — an API key,
@@ -92,13 +94,16 @@ A workspace's "..." menu holds the rest of what you can do to it:
   files, MCP servers, instructions, and the rest of what Config Hub can
   manage).
 - **Upload file** — open the upload overlay for this workspace.
-- **Relay inbox** / **Relay settings** — this workspace's Agent Relay
-  mailbox and its topic subscriptions.
+- **Relay** — **Inbox** is this workspace's Agent Relay mailbox, and
+  **Settings** holds its topic subscriptions.
 - **Export bundle** — save this workspace's settings (arguments, environment
   variables, tmux profile, and, if you choose, its secrets) as a portable
   file you can import into a new workspace or a fresh install.
-- **Mute voice** / **Unmute voice** — stop this one workspace's agent from
-  speaking, even while voice is on everywhere else.
+- **Voice** — a section with **Open voice mail**, the choices **Speak**,
+  **Voice mail** and **Off** for this workspace, **Spoken name…** and
+  **Voice…**. **Off** stops this one workspace's agent from speaking, even
+  while voice is on everywhere else; **Voice mail** keeps its messages to
+  play later.
 - **Restart as new** — start a fresh conversation in the same folder,
   keeping the workspace itself and its saved settings.
 - **Add to favourites** / **Update favourite** — see below.
@@ -121,7 +126,7 @@ closing it completely without browsing to the folder again.
   voice switch too.
 - **Open it from Select Workspace.** The "+ New Workspace" overlay shows a
   Favourites strip above the agent tiles. Click a chip to pre-fill the
-  form — agent, folder, and name — then press Resume or Start Fresh as
+  form — agent, folder, and name — then press Resume or Start New as
   usual. A chip for an agent that is not installed shows dimmed. A chip for
   a workspace that is already open shows an "open" mark and focuses that
   workspace instead of creating a second one.
@@ -144,8 +149,9 @@ closing it completely without browsing to the folder again.
 ### File and web links
 
 When an agent writes or mentions a file — `docs/specs/myspec.md`, for
-example — it becomes a link you can click, opening straight in the Unraid
-file editor instead of you hunting for it under Shares. A web address an
+example — it becomes a link you can click, opening straight in the
+plugin's own editor (a text file) or in Unraid's file browser (any other
+file), instead of you hunting for it under Shares. A web address an
 agent prints, such as an issue it just filed or a dashboard it started, is
 clickable too: an ordinary address opens in a new tab, and a link to one of
 this plugin's own pages opens in the tab you already have open, so a link
@@ -157,12 +163,12 @@ clickable — nothing else in the terminal's output can turn into a link.
 
 **Copy and paste.** Text copied inside the terminal — by you, or by the
 agent through its own copy helper — reaches your system clipboard
-automatically. A Paste button sends your clipboard into the terminal when
-your browser allows it; where it does not (plain HTTP, or a browser that
-blocks the request), a manual copy/paste box appears instead. On iPhone and
-iPad, tap and hold the terminal to open a paste box, or use the on-screen
-Paste and Copy buttons — Copy grabs your current selection or the visible
-screen text. Hold Shift while you drag to select text with the browser's own
+automatically. The Paste icon in the drawer (or Ctrl+V) sends your clipboard
+into the terminal when your browser allows it; where it does not (plain
+HTTP, or a browser that blocks the request), a manual copy/paste box appears
+instead. On a phone, touch and hold the terminal to get **Paste** and
+**Select**, or use the key row under the terminal, which has the same two
+keys. **Select** opens a window where you choose the text to copy. Hold Shift while you drag to select text with the browser's own
 selection instead of the terminal's mouse mode; a small hint about this
 appears once and can be dismissed for good.
 
@@ -189,14 +195,15 @@ anything:
   sound in that tab (a browser only allows sound after a click), and every
   other open tab's icon updates to match right away.
 - **One switch per workspace.** A chatty agent does not have to speak as
-  loudly as a quiet one. Mute a single workspace from its "..." menu ("Mute
-  voice"); a muted row shows a small crossed-out speaker mark. A muted
+  loudly as a quiet one. Silence a single workspace from its "..." menu
+  (Voice, then **Off**); a muted row shows a small crossed-out speaker mark. A muted
   workspace's agent cannot speak even while the global switch is on — it
   hears back a clear message telling it so.
 
 With no engine configured, your browser's own voice (the Web Speech API)
 speaks the message — no install, no extra container. For a natural voice,
-press **Set up natural voice** in Settings > Agent voice. The plugin checks
+press **Set up natural voice** on the **Agent voice** card of the
+Configuration tab in Settings. The plugin checks
 that Docker is on, prepares a corrected **Kokoro-FastAPI-CPU** template (its
 voice model is kept on your pool drive, on a free port), and opens Unraid's
 own Add Container page. Press Apply there. The Settings page waits until the
@@ -208,9 +215,9 @@ connects it. You can also install it yourself and type its address as the
 Endpoint URL.
 
 **Settings.** Voice (all devices), Endpoint URL (empty means browser mode),
-Voice, Speed, and an API key field (only needed if your engine requires one;
+Voice id, Speed, and an API key field (only needed if your engine requires one;
 never shown back to you once set). When your engine can list its own voices
-(Kokoro-FastAPI can), the Voice field becomes a dropdown filled from the
+(Kokoro-FastAPI can), the Voice id field becomes a dropdown filled from the
 engine, with an "Other…" choice for a hand-typed id.
 
 **Hooks for your agent.** Wire the plugin's `speak` command into your
@@ -248,16 +255,16 @@ themselves if the recogniser revises what it heard; turn this off with the
 "Type while I speak" checkbox in the bubble if the corrections distract you.
 
 The recognised text lands in the active workspace's terminal — it is never
-sent on its own, so you always read it before you press Enter. A "Send on
-stop" checkbox in the recording bubble presses Enter for you, but only once
-the agent is idle at its own prompt; while the agent is busy the text still
+sent on its own, so you always read it before you press Enter. A "Send when
+I stop talking" checkbox in the recording bubble presses Enter for you, but
+only once the agent is idle at its own prompt; while the agent is busy the text still
 lands, and the bubble tells you it is waiting to be sent. An info icon in
 the bubble lists every spoken command and punctuation word below, for quick
 reference.
 
 With no engine configured, your browser's own speech recognition turns
 speech into text on your device — no install, no extra container. This
-works in Chrome, Edge, and Safari, including on an iPhone. Firefox, and
+works in Chrome and Safari, including on an iPhone. Firefox, and
 Chrome on iPhone, have no built-in recogniser; set a transcription endpoint
 to use voice input there.
 
@@ -350,8 +357,9 @@ Pick a location for Home Storage and Agent Storage in this order:
 1. **A cache pool path**, for example `/mnt/cache/appdata/aicliagents`. This
    is the fastest and safest choice. The Storage picker recommends a path
    like this first, when one is available.
-2. **An Unassigned Devices path**, for example `/mnt/disks/mydrive`. Use this
-   when you have a spare drive that is not part of the array or a pool.
+2. **An Unassigned Devices path**, for example `/mnt/disks/mydrive/aicliagents`. Use this
+   when you have a spare drive that is not part of the array or a pool. Use a
+   folder inside the device, not its top folder.
 3. **A single array disk**, for example `/mnt/disk1`. This works, but an
    array disk spins up on every save.
 4. **`/mnt/user`** (a user share). Use this only when none of the paths
@@ -376,8 +384,10 @@ The plugin can keep a second, plain copy of each user's home on a target you
 choose. Without a second copy, a damaged layer, a failed flash drive, or a
 bad test run can lose all of it.
 
-- **Where.** Settings, Storage, Home backup. One card, one row per user
-  with a home.
+- **Where.** Settings, Home Storage tab. Each home has its own card, and the
+  backup strip at the bottom of the card has a **Set up config backup…**
+  button (**Config backup…** once a folder is chosen). It opens a dialog with
+  the settings of that home.
 - **Cold or warm.** Cold is the default: the plugin closes the user's
   sessions, saves the home, copies it, then brings the sessions back. Cold
   gives the most consistent copy, because an agent's own database files are
@@ -387,9 +397,9 @@ bad test run can lose all of it.
 - **Target.** Pick a folder on a pool, an Unassigned Devices disk, or the
   array. A `/mnt/user` share path is not allowed: a home has many small
   files, and copying that many files over a share can freeze the server.
-  Pick a share on the card and the plugin uses its real disk path instead.
-  Click Check to see the resolved path, its filesystem, and its free space
-  before you save.
+  Pick a share and the plugin uses its real disk path instead. There is no
+  Check button: when you pick a folder, the line under it shows the resolved
+  path, its filesystem, and its free space.
 - **Schedule.** Off, once a day at a time you choose, or once a week on a
   day and time you choose. The plugin owns one cron entry for this, the same
   way it owns the health-check schedule.
@@ -399,7 +409,8 @@ bad test run can lose all of it.
 
 ### Restore
 
-Each saved copy in the Home backup card has a Restore… button.
+Open **Config backup…** on the home's card. Each saved copy in its list has a
+**Restore…** button.
 
 - **What it does.** Pick a saved copy and click Restore. Choose Replace or
   Merge, then confirm. Replace makes the home match the saved copy exactly;
@@ -453,8 +464,10 @@ Find all of this under Settings, Config Hub.
 
 Agent Relay is a shared mailbox between the workspaces on this server. It is
 on from the moment you install the plugin. An agent can post to a topic
-other workspaces are listening to, or send one workspace a direct message —
-nothing is typed into a running terminal unless you choose to deliver it.
+other workspaces are listening to, or send one workspace a direct message.
+Messages are saved to each workspace's inbox. The plugin types only a short
+notice into the agent's terminal, when the agent is idle, so it reads the
+inbox; the wording of the notice is a setting on the Configuration tab.
 
 - **Topics are informational.** Subscribing a workspace to a topic never
   makes it responsible for acting on what arrives there. An administrator
@@ -462,11 +475,12 @@ nothing is typed into a running terminal unless you choose to deliver it.
   workspace can act on a direct request sent to it.
 - **Private messages.** Two workspaces can hold a focused conversation in a
   private thread without adding noise to a topic everyone else watches.
-- **Native tools where they exist.** Claude Code and Codex CLI receive Relay
-  as native MCP tools once you turn Relay MCP on for them (an already-running
-  agent needs one restart to pick up the change). Every other supported
-  agent gets the same operations through a command available in its own
-  shell, with no extra setup.
+- **Native tools where they exist.** Every supported agent except Pi Coder
+  receives Relay as native MCP tools (the Relay setting "Give agents built-in
+  Relay tools" is on by default; an already-running agent needs one restart
+  to pick up a change). Every agent, Pi Coder included, also gets the same
+  operations through a command available in its own shell, with no extra
+  setup. Pi Coder uses only the command, because it does not accept MCP.
 - **Connect another machine.** Turn on "Allow other machines to connect" in
   Settings, Agent Relay, and give a remote its own access token. That
   machine then appears as a contact your workspaces can message, over the
@@ -498,7 +512,8 @@ Settings menu, in six tabs:
   and update channel, its default secrets and environment variables, its
   default launch arguments, and its default terminal profile.
 - **Home Storage** — where your home directory and each agent's files live,
-  the tools to move or consolidate them, and the Home backup card.
+  the tools to move or consolidate them, and the config backup button on each
+  home's card.
 - **Config Hub** — see [Config Hub](#config-hub) above.
 - **Agent Relay** — see [Relay](#relay) above.
 - **Debug Console** — see [Troubleshooting](#troubleshooting) below.
@@ -540,7 +555,8 @@ own health at a glance: green for all clear, amber for a warning, red for
 something that needs attention. Hover it to see what is not fine; click it
 to jump straight to the Debug Console.
 
-Behind the dot, the plugin checks itself roughly once a minute: that its
+The page reads the dot again every minute, and the plugin also checks
+itself in the background every 30 minutes: that its
 background supervisor is alive, that its storage layers match what it
 expects to have mounted, that the flash drive and its working storage have
 room to spare, that its own log is not growing without bound, and that
@@ -566,10 +582,11 @@ Start with the **Debug Console** tab in Settings.
   the developer maintains, and tells you if what you are seeing is already
   known.
 
-If a workspace will not start because its storage is not ready, the plugin
-explains what is wrong and offers a fix: restore from a sibling copy, start
-fresh, enter Emergency Mode to keep working in RAM, or confirm that this
-flash drive really belongs to this server. If the Unraid array is stopped,
+If a workspace will not start because its storage is not ready, the
+terminal page shows a **Storage Unavailable** banner, and the drawer button
+changes to **Emergency Session**, which keeps you working in RAM. The
+Home Storage tab shows what is wrong with each home or agent store, with the
+buttons that apply, such as **Restore from**. If the Unraid array is stopped,
 a workspace whose storage lives on flash keeps running uninterrupted; one
 whose storage lives on the array offers Emergency Mode until the array
 starts again.
