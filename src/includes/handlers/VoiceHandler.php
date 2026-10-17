@@ -65,6 +65,8 @@ class VoiceHandler
             case 'list_voices':         return self::listVoices();
             case 'voice_transcribe':    return self::voiceTranscribe();
             case 'voice_dictate':       return self::voiceDictate();
+            // docs/specs/VOICE_INPUT.md "Engine down" (#484).
+            case 'voice_stt_health':    return self::voiceSttHealth();
             // docs/specs/VOICE_MAIL.md — Forgejo #210.
             case 'voicemail_list':      return self::voicemailList();
             case 'voicemail_mark_heard':return self::voicemailMarkHeard();
@@ -292,7 +294,8 @@ class VoiceHandler
                 'voicemail_delete', 'voicemail_delete_all', 'voicemail_set_spoken_name',
                 'voice_set_workspace_voice',
                 'voice_set_workspace_speed',
-                'voice_engine_prepare', 'check_voice_engine', 'voice_engine_finish', 'voice_engine_status', 'voice_engine_download'];
+                'voice_engine_prepare', 'check_voice_engine', 'voice_engine_finish', 'voice_engine_status', 'voice_engine_download',
+                'voice_stt_health'];
     }
 
     private static function getVoiceSettings(): array
@@ -556,9 +559,18 @@ class VoiceHandler
         $workspaceId = (string)($_POST['workspaceId'] ?? '');
 
         $result = VoiceService::transcribe($filedata, $mime, $seconds, $workspaceId, $workspaceId === 'manager');
-        return isset($result['error'])
-            ? ['status' => 'error', 'message' => (string)$result['error']]
-            : ['status' => 'ok'] + $result;
+        if (isset($result['error'])) {
+            $answer = ['status' => 'error', 'message' => (string)$result['error']];
+            if (!empty($result['engine'])) $answer['engine'] = true; // #484: the engine failed; the page may use browser recognition
+            return $answer;
+        }
+        return ['status' => 'ok'] + $result;
+    }
+
+    /** #484: is the speech-to-text engine up? Read-only; the pill asks it when dictation starts. */
+    private static function voiceSttHealth(): array
+    {
+        return ['status' => 'ok'] + VoiceService::sttHealth();
     }
 
     /**

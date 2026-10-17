@@ -815,18 +815,26 @@ MD;
     public function ledgerKey(): string { return parent::ledgerKey() . '#aicli-admin-skill'; }
 
     public function desired(array $servers): array {
-        $files = ['aicli-admin/SKILL.md' => self::SKILL];
-        // The Notebook guide follows its own switch (Settings > Notebook). Default on.
-        $notebookOn = true;
+        $cfg = [];
         try {
-            if (class_exists('\AICliAgents\Services\ConfigService')) {
-                $cfg = \AICliAgents\Services\ConfigService::getConfig();
-                $notebookOn = (string)($cfg['notebook_enabled'] ?? '1') === '1';
-            }
+            if (class_exists('\AICliAgents\Services\ConfigService')) $cfg = \AICliAgents\Services\ConfigService::getConfig();
         } catch (\Throwable $e) {
-            $notebookOn = true;
+            $cfg = [];
         }
-        if ($notebookOn) $files['aicli-artefacts/SKILL.md'] = self::ARTEFACTS_SKILL;
+        return self::filesFor($cfg);
+    }
+
+    /**
+     * The skill files wanted for a config. Each skill follows its own switch (#483, #487): the plugin
+     * management skill follows Plugin management (default off); the Notebook guide follows the
+     * Notebook switch (default on). Both off gives an empty set, which removes a projected copy.
+     * @param array<string,mixed> $cfg plugin config
+     * @return array<string,string> relative path => file text
+     */
+    public static function filesFor(array $cfg): array {
+        $files = [];
+        if ((string)($cfg['admin_tools_enabled'] ?? '0') === '1') $files['aicli-admin/SKILL.md'] = self::SKILL;
+        if ((string)($cfg['notebook_enabled'] ?? '1') === '1') $files['aicli-artefacts/SKILL.md'] = self::ARTEFACTS_SKILL;
         return $files;
     }
 }

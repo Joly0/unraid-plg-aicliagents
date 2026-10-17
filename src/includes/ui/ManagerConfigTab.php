@@ -1035,6 +1035,8 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 }, 3000);
                             }
                         } else if (d.state === 'transcribing') {
+                            // #485: a piece can answer after the stop; its words still count.
+                            if (typeof d.phrase === 'string' && d.phrase.trim()) heard.push(d.phrase.trim());
                             interim = '';
                             show('Transcribing…');
                         } else if (d.state === 'idle' && typeof d.text === 'string') {
@@ -1045,7 +1047,8 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         }
                     };
                     window.addEventListener('aicli-voice-input', onEvt);
-                    api.startInput({ workspaceId: 'manager', sttUrl: sttUrl, sttLanguage: sttLanguage });
+                    // noEngineFallback (#484): this button tests the engine, so it must not quietly use the browser instead.
+                    api.startInput({ workspaceId: 'manager', sttUrl: sttUrl, sttLanguage: sttLanguage, noEngineFallback: true });
                 };
 
                 window.addEventListener('aicli-voice-state', syncToggle);

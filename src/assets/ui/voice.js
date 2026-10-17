@@ -815,6 +815,10 @@
     var inputHeardSpeech = false; // this piece has seen audio above threshold
     var inputSilenceSince = 0;    // 0 while not silent; else the ms timestamp silence began
     var inputEngineStopRequested = false; // stopInput() called — the piece in flight is the LAST one
+    // #484: the engine is down, so this recording moved to the browser's own recognition.
+    // The engine recorder's clips are dropped from then on.
+    var inputEngineAbandoned = false;
+    var inputEngineDownSeen = false; // the health check said the engine is down (it may answer before the microphone opens)
     // Serialises this session's piece transcriptions so a later piece's
     // reply can never type before an earlier piece's own reply — mirrors
     // ui-build/src/lib/voiceInput.ts's createPhraseQueue (a framework-free
@@ -836,6 +840,21 @@
             for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) detail[k] = extra[k]; }
         }
         dispatchInput(detail);
+    }
+
+    /** The state label for an event that carries a phrase, a note or a tick. Once a stop was
+     *  requested the state is 'transcribing'; such an event must not move it back to
+     *  'recording' (#485: the icon pulsed again when a piece answered after the click). */
+    function liveInputState() {
+        return _inputState === 'transcribing' ? 'transcribing' : 'recording';
+    }
+
+    /** #485: recording has stopped (a click, silence, the 5 minute cap or the Enter button).
+     *  Every stop path goes through here, so the icon leaves its pulsing look at once, not when
+     *  the last piece has been transcribed. Safe to call twice. */
+    function markInputStopped() {
+        if (_inputState !== 'recording') return;
+        setInputState('transcribing', { seconds: inputSeconds });
     }
 
     function clearInputTimers() {
@@ -906,7 +925,8 @@
         if (gen !== inputGeneration) return;
         // #345: once only. The stop watchdog (stopInput) and a late onend can
         // both arrive; the second must not report a second, empty stop.
-        if (_inputState !== 'recording') return;
+        // (#485: after a stop request the state is 'transcribing', and the flush still has to run.)
+        if (_inputState !== 'recording' && _inputState !== 'transcribing') return;
         clearInputTimers();
         var leftover = inputInterim.replace(/^\s+|\s+$/g, '');
         inputInterim = '';
@@ -914,10 +934,15 @@
         setInputState('idle', { text: leftover });
     }
 
-    function startBrowserInput(gen) {
+    var NO_RECOGNITION_NOTE = 'This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Agent voice.';
+    // #484: the sentence shown when dictation moves from the speech server to the browser.
+    var ENGINE_DOWN_NOTE = 'The speech-to-text server is not answering, so your browser is recognising your speech instead.';
+    var ENGINE_DOWN_NO_BROWSER_NOTE = 'The speech-to-text server is not answering, and this browser has no speech recognition of its own.';
+
+    function startBrowserInput(gen, noSupportNote) {
         var Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!Ctor) {
-            refuseInput('This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Agent voice.');
+            refuseInput(noSupportNote || NO_RECOGNITION_NOTE);
             return;
         }
         try {
@@ -935,14 +960,14 @@
                     if (r.isFinal) {
                         // R11: type this phrase AT ONCE — do not wait for stop.
                         var phrase = String((r[0] && r[0].transcript) || '').replace(/^\s+|\s+$/g, '');
-                        if (phrase) { inputHeardThisRecording = true; dispatchInput({ state: 'recording', phrase: phrase }); }
+                        if (phrase) { inputHeardThisRecording = true; dispatchInput({ state: liveInputState(), phrase: phrase }); }
                     } else {
                         interim += (r[0] && r[0].transcript) || '';
                     }
                 }
                 inputInterim = interim;
                 if (interim.replace(/\s+/g, '')) inputHeardThisRecording = true;
-                setInputState('recording', { interim: interim, seconds: inputSeconds });
+                setInputState(liveInputState(), { interim: interim, seconds: inputSeconds });
                 armBrowserSilenceStop(gen);
             };
             rec.onerror = function (evt) {
@@ -963,7 +988,7 @@
             rec.start();
             setInputState('recording', { interim: '', seconds: 0 });
         } catch (e) {
-            refuseInput('This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Agent voice.');
+            refuseInput(noSupportNote || NO_RECOGNITION_NOTE);
         }
     }
 
@@ -1098,16 +1123,19 @@
             if (isFinal) setInputState('transcribing', { seconds: inputSeconds });
             var reader = new FileReader();
             var sendMime = mimeType;
-            var onDone = function (text, error) {
+            var onDone = function (text, error, engineFailure) {
                 if (gen !== inputGeneration) { resolve(); return; }
                 if (isFinal) {
                     setInputState('idle', error ? { text: text || '', error: error } : { text: text || '' });
                 } else if (error) {
+                    // #484: the engine failed (down, or it refused the clip): use the browser's own
+                    // recognition for the rest of this recording, and say so.
+                    if (engineFailure && fallBackToBrowser(gen)) { resolve(); return; }
                     // R11: one piece's transcription failing must not end the
                     // recording — only report it and keep listening.
-                    dispatchInput({ state: 'recording', error: error });
+                    if (!inputEngineAbandoned) dispatchInput({ state: liveInputState(), error: error });
                 } else if (text) {
-                    dispatchInput({ state: 'recording', phrase: text });
+                    dispatchInput({ state: liveInputState(), phrase: text });
                 }
                 // else: an empty non-final piece is dropped silently (R11).
                 resolve();
@@ -1130,10 +1158,11 @@
                     if (data && data.status === 'ok') {
                         onDone(String(data.text || '').replace(/^\s+|\s+$/g, ''), null);
                     } else {
-                        onDone('', (data && data.message) || 'The transcription server did not answer.');
+                        // `engine` (set by voice_transcribe) marks a failure of the engine itself, not a refusal.
+                        onDone('', (data && data.message) || 'The transcription server did not answer.', !!(data && data.engine));
                     }
                 }).catch(function () {
-                    onDone('', 'The transcription server did not answer.');
+                    onDone('', 'The transcription server did not answer.', true);
                 });
             };
             reader.onerror = function () { onDone('', 'The transcription server did not answer.'); };
@@ -1175,6 +1204,8 @@
             if (evt.data && evt.data.size > 0) inputPieceChunks.push(evt.data);
         };
         mr.onstop = function () {
+            // #484: the recording moved to the browser's recognition; this clip is dropped.
+            if (inputEngineAbandoned) { inputPieceChunks = []; return; }
             var blob = new Blob(inputPieceChunks, { type: mr.mimeType || mimeType || 'audio/webm' });
             inputPieceChunks = [];
             var pieceSeconds = (Date.now() - pieceStartedAt) / 1000;
@@ -1191,11 +1222,58 @@
         inputPieceMaxTimer = setTimeout(function () { cutEnginePiece(gen); }, ENGINE_MAX_PIECE_MS);
     }
 
+    /**
+     * #484: the speech-to-text engine failed or is down. Drop the engine capture and carry on with the
+     * browser's own recognition on the same recording, with one plain sentence saying so. Returns true
+     * when it switched (or tried to), false when it must not (a stop was requested, it already switched,
+     * the caller turned it off, or nothing is recording).
+     */
+    function fallBackToBrowser(gen) {
+        if (gen !== inputGeneration || inputOpts.noEngineFallback) return false;
+        if (inputEngineAbandoned || inputEngineStopRequested || _inputState !== 'recording') return false;
+        inputEngineAbandoned = true;
+        stopEngineAudioAnalysis();
+        if (inputPieceMaxTimer) { clearTimeout(inputPieceMaxTimer); inputPieceMaxTimer = null; }
+        var mr = inputPieceRecorder;
+        inputPieceRecorder = null;
+        if (mr && mr.state === 'recording') {
+            try { mr.stop(); } catch (e) { /* its onstop drops the clip */ }
+        }
+        stopInputTracks();
+        var browserOpts = {};
+        for (var k in inputOpts) { if (Object.prototype.hasOwnProperty.call(inputOpts, k)) browserOpts[k] = inputOpts[k]; }
+        browserOpts.sttUrl = '';
+        inputOpts = browserOpts;
+        startBrowserInput(gen, ENGINE_DOWN_NO_BROWSER_NOTE);
+        if (_inputState === 'recording') dispatchInput({ state: 'recording', error: ENGINE_DOWN_NOTE, engine: 'browser' });
+        return true;
+    }
+
+    /** #484: ask the server whether the engine answers. A down answer moves this recording to the browser. */
+    function probeEngine(gen) {
+        inputEngineDownSeen = false;
+        if (inputOpts.noEngineFallback) return;
+        try {
+            fetch(inputAjaxUrl('voice_stt_health'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'csrf_token=' + encodeURIComponent(inputCsrf())
+            }).then(function (r) { return r.json(); }).then(function (data) {
+                if (gen !== inputGeneration) return;
+                if (data && data.status === 'ok' && data.engine && data.ok === false) {
+                    inputEngineDownSeen = true;
+                    fallBackToBrowser(gen); // false while the microphone is still opening: startEngineInput() checks the flag
+                }
+            }).catch(function () { /* no answer says nothing about the engine: the first piece decides */ });
+        } catch (e) { /* same */ }
+    }
+
     function startEngineInput(gen) {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
             refuseInput('The browser refused microphone access; allow it in the site settings and try again.');
             return;
         }
+        probeEngine(gen);
         navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
             if (gen !== inputGeneration) {
                 try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) { /* noop */ }
@@ -1219,6 +1297,7 @@
             }
             setInputState('recording', { seconds: 0 });
             startEnginePiece(gen);
+            if (inputEngineDownSeen) fallBackToBrowser(gen); // the health check answered "down" while the microphone opened
         }).catch(function () {
             if (gen !== inputGeneration) return;
             refuseInput('The browser refused microphone access; allow it in the site settings and try again.');
@@ -1249,6 +1328,9 @@
         }
         var gen = ++inputGeneration;
         inputSeconds = 0;
+        inputEngineAbandoned = false;
+        inputEngineStopRequested = false;
+        inputEngineDownSeen = false;
         inputHeardThisRecording = false;
         inputQuietSince = 0;
         clearInputTimers();
@@ -1270,12 +1352,14 @@
         if (_inputState !== 'recording') return;
         // One stop only: a silence timer must not fire a second stop.
         if (inputSilenceStopTimer) { clearTimeout(inputSilenceStopTimer); inputSilenceStopTimer = null; }
+        // #485: the icon stops pulsing now, whatever path asked for the stop.
+        markInputStopped();
         if (inputRecogniser) {
             var rec = inputRecogniser;
             var gen = inputGeneration;
             try { rec.stop(); } catch (e) { finishBrowserInput(gen); return; }
             setTimeout(function () {
-                if (gen !== inputGeneration || _inputState !== 'recording') return;
+                if (gen !== inputGeneration || (_inputState !== 'transcribing' && _inputState !== 'recording')) return;
                 try { rec.abort(); } catch (e) { /* noop */ }
                 finishBrowserInput(gen);
             }, INPUT_STOP_GRACE_MS);
@@ -1295,6 +1379,11 @@
             }
         }
     }
+
+    // #485: leaving the page ends a recording through the same stop path, so the microphone is released.
+    window.addEventListener('pagehide', function () {
+        try { if (_inputState === 'recording') stopInput(); } catch (e) { /* the page is going away */ }
+    });
 
     // ---- public API ------------------------------------------------------
 

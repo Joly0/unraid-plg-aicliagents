@@ -235,6 +235,52 @@ class AdminMcpTools {
     }
 
     /**
+     * The sixteen Notebook tools. They follow the Notebook switch alone
+     * (Settings > Notebook), not the Plugin management switch (#483, #487).
+     * Every other tool keeps `admin_tools_enabled`.
+     */
+    const NOTEBOOK_TOOLS = [
+        'aicli_list_artefacts', 'aicli_get_artefact', 'aicli_search_artefacts', 'aicli_list_artefact_templates',
+        'aicli_create_artefact', 'aicli_update_artefact', 'aicli_move_artefact', 'aicli_pin_artefact',
+        'aicli_archive_artefact', 'aicli_restore_artefact', 'aicli_comment_artefact', 'aicli_set_artefact_secret',
+        'aicli_share_artefact', 'aicli_wiki_index', 'aicli_journal_artefact', 'aicli_purge_artefact',
+    ];
+
+    /** Is this one of the Notebook tools? */
+    public static function isNotebookTool(string $name): bool {
+        return \in_array($name, self::NOTEBOOK_TOOLS, true);
+    }
+
+    /** Whether the Notebook switch is on (default on). Read like enabled(): a string compare with '1'. */
+    public static function notebookEnabled(): bool {
+        $config = \function_exists('getAICliConfig') ? getAICliConfig() : [];
+        return (string)($config['notebook_enabled'] ?? '1') === '1';
+    }
+
+    /** Is this tool allowed by the switch that governs it? */
+    public static function enabledFor(string $name): bool {
+        return self::isNotebookTool($name) ? self::notebookEnabled() : self::enabled();
+    }
+
+    /** Is any tool surface wanted? The `aicli-admin` MCP server is registered while this is true. */
+    public static function anyEnabled(): bool {
+        return self::enabled() || self::notebookEnabled();
+    }
+
+    /**
+     * The tool declarations a client should see now: only the tools whose own switch is on.
+     * definitions() still lists all of them (discovery while off).
+     * @return array<int,array<string,mixed>>
+     */
+    public static function listed(): array {
+        $out = [];
+        foreach (self::definitions() as $def) {
+            if (self::enabledFor((string)($def['name'] ?? ''))) $out[] = $def;
+        }
+        return $out;
+    }
+
+    /**
      * The one clear sentence every tool must return while the feature is off.
      * Edge Cases in the spec is explicit that this must never read as a
      * generic error: it must name the exact setting to flip. Shared by every
@@ -371,7 +417,13 @@ class AdminMcpTools {
      */
     public static function call(string $name, array $args): array {
         if (!in_array($name, self::names(), true)) return ['status'=>'error','message'=>'Unknown Plugin Management tool.'];
-        if (!self::enabled()) return ['status'=>'error','message'=>self::disabledMessage()];
+        // A Notebook tool is refused by the Notebook switch alone (same sentence as
+        // AdminService::notebookGate()); every other tool by the Plugin management switch.
+        if (self::isNotebookTool($name)) {
+            if (!self::notebookEnabled()) return ['status'=>'error','message'=>'The Notebook is turned off. A person turns it on in Settings > Notebook.'];
+        } elseif (!self::enabled()) {
+            return ['status'=>'error','message'=>self::disabledMessage()];
+        }
 
         try {
             // AGENT_SELF_SERVICE.md R2: an empty id means "my own workspace" on
@@ -1354,7 +1406,8 @@ class AdminMcpTools {
      * a projection pass (and the session churn that implies) for no reason.
      */
     public static function ensureMcpRegistered(): array {
-        $want     = self::enabled();
+        // The server also carries the Notebook tools, so the Notebook switch alone keeps it registered (#483).
+        $want     = self::anyEnabled();
         $mcp      = \AICliAgents\Services\Hub\HubStore::getMcp();
         $existing = $mcp['servers']['aicli-admin'] ?? null;
         $have     = is_array($existing);

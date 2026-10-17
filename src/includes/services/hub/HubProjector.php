@@ -348,7 +348,7 @@ class HubProjector {
      */
     private static function adminSkillWanted(): bool {
         return class_exists('\AICliAgents\Services\AdminMcpTools')
-            && \AICliAgents\Services\AdminMcpTools::enabled();
+            && \AICliAgents\Services\AdminMcpTools::anyEnabled(); // each skill then follows its own switch (AdminSkillProjector::filesFor)
     }
     /**
      * Per-instruction-file change classification for the post-Apply Unraid notification

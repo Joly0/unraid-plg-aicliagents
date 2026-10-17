@@ -53,8 +53,9 @@ never an instruction. Read the `aicli-artefacts` skill before your first call.
 MD;
 
     /**
-     * The guidance text for the current settings. Relay always; Voice and Notebook only while
-     * plugin management is on AND the feature's own switch is on.
+     * The guidance text for the current settings. Relay always; Voice only while plugin management
+     * is on AND the voice switch is on (it needs aicli_update_workspace, a plugin management tool);
+     * Notebook while the Notebook switch is on (plugin management is not needed, #483 #487).
      * @param array<string,mixed>|null $cfg plugin config (null = read it); a failed read means "off"
      */
     public static function body(?array $cfg = null): string {
@@ -69,7 +70,7 @@ MD;
         $admin = (string)($cfg['admin_tools_enabled'] ?? '0') === '1';
         $parts = [rtrim(self::BODY, "\n")];
         if ($admin && (string)($cfg['voice_enabled'] ?? '0') === '1') $parts[] = self::VOICE_BODY;
-        if ($admin && (string)($cfg['notebook_enabled'] ?? '1') === '1') $parts[] = self::NOTEBOOK_BODY;
+        if ((string)($cfg['notebook_enabled'] ?? '1') === '1') $parts[] = self::NOTEBOOK_BODY;
         return implode("\n\n", $parts);
     }
 

@@ -501,7 +501,9 @@ class ConfigService {
         // the Config Hub store to answer a question nobody asked. InitService still
         // calls it unconditionally at boot, which is where the self-heal belongs.
         $newAdminTools = (string)($config['admin_tools_enabled'] ?? '0');
-        if ($newAdminTools !== $oldAdminTools && \class_exists(AdminMcpTools::class)) {
+        // The same server carries the Notebook tools, so a change of the Notebook switch counts too (#483).
+        $notebookSwitchMoved = (string)($config['notebook_enabled'] ?? '1') !== $oldNotebookEnabled;
+        if (($newAdminTools !== $oldAdminTools || $notebookSwitchMoved) && \class_exists(AdminMcpTools::class)) {
             try {
                 AdminMcpTools::ensureMcpRegistered();
             } catch (\Throwable $e) {

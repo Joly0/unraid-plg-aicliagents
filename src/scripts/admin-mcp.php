@@ -153,7 +153,7 @@ while (true) {
         // AdminMcpTools may not exist yet while this transport is being wired up in
         // parallel (see file header); fail soft with an empty tool list rather than
         // letting a missing-class error escape the loop and kill the transport.
-        try { $tools = AdminMcpTools::definitions(); } catch (\Throwable $e) { $tools = []; }
+        try { $tools = AdminMcpTools::listed(); } catch (\Throwable $e) { $tools = []; }
         adminMcpReply($id,['tools'=>$tools]);
         if ($adminMcpOneShot) break;
         continue;

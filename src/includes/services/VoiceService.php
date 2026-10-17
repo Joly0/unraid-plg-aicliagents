@@ -101,6 +101,9 @@ class VoiceService {
     /** R13: the voice-list HTTP call's hard timeout, in seconds (shorter than speech, R5's 20s — a Settings page dropdown must not hang on a slow engine). */
     private const LIST_VOICES_TIMEOUT_S = 5;
 
+    /** #484: the speech-to-text health check's hard timeout, in seconds. */
+    private const STT_HEALTH_TIMEOUT_S = 3;
+
     /** S5 (REVIEW_2026-09-13_EVENTS_AND_SECURITY.md#S5): the speech engine's reply is capped at this many bytes. */
     private const MAX_SPEECH_RESPONSE_BYTES = 8 * 1024 * 1024; // 8 MiB
 
@@ -833,30 +836,32 @@ class VoiceService {
             if ($sttUrl === '') {
                 return ['error' => 'No transcription engine is set; the browser recognises speech on its own.'];
             }
+            // #519: every refusal below is logged and recorded (refuseTranscribe), like an engine failure.
+            $approxBytes = intdiv(strlen($filedataBase64) * 3, 4);
             if ($seconds > self::MAX_STT_SECONDS) {
-                return ['error' => 'That clip is longer than the ' . self::MAX_STT_SECONDS . '-second cap.'];
+                return self::refuseTranscribe('That clip is longer than the ' . self::MAX_STT_SECONDS . '-second cap.', $mime, $approxBytes, $workspaceId);
             }
 
             $bytes = base64_decode($filedataBase64, true);
             if ($bytes === false || $bytes === '') {
-                return ['error' => 'There is no audio to transcribe.'];
+                return self::refuseTranscribe('There is no audio to transcribe.', $mime, 0, $workspaceId);
             }
             if (strlen($bytes) > self::MAX_STT_AUDIO_BYTES) {
-                return ['error' => 'That clip is larger than the ' . (self::MAX_STT_AUDIO_BYTES / (1024 * 1024)) . ' MB cap.'];
+                return self::refuseTranscribe('That clip is larger than the ' . (self::MAX_STT_AUDIO_BYTES / (1024 * 1024)) . ' MB cap.', $mime, strlen($bytes), $workspaceId);
             }
 
             $baseMime = strtolower(trim(explode(';', $mime, 2)[0]));
             if (!in_array($baseMime, self::ALLOWED_STT_MIME_TYPES, true)) {
-                return ['error' => "'$mime' is not an audio format this plugin accepts."];
+                return self::refuseTranscribe("'$mime' is not an audio format this plugin accepts.", $mime, strlen($bytes), $workspaceId);
             }
 
             if (!$bypassWorkspaceCheck) {
                 $workspace = self::findWorkspace($workspaceId);
                 if ($workspace === null) {
-                    return ['error' => "No workspace with id '$workspaceId' was found."];
+                    return self::refuseTranscribe("No workspace with id '$workspaceId' was found.", $mime, strlen($bytes), $workspaceId);
                 }
                 if (!ProcessManager::isRunning($workspaceId)) {
-                    return ['error' => "Workspace '" . (string)($workspace['name'] ?? $workspaceId) . "' is not running."];
+                    return self::refuseTranscribe("Workspace '" . (string)($workspace['name'] ?? $workspaceId) . "' is not running.", $mime, strlen($bytes), $workspaceId);
                 }
             }
 
@@ -866,7 +871,8 @@ class VoiceService {
             $result = self::doTranscribe($sttUrl, $bytes, $baseMime, $model, $language);
             if (isset($result['error'])) {
                 self::recordSttResult(false, (string)$result['error']);
-                return $result;
+                // #484: `engine` tells the page this failure came from the engine (not a refusal), so it can use the browser's recognition.
+                return $result + ['engine' => true];
             }
 
             $text = trim((string)$result['text']);
@@ -879,8 +885,27 @@ class VoiceService {
             if (class_exists('\\AICliAgents\\Services\\RedactionService')) {
                 $message = RedactionService::redact($message);
             }
-            return ['error' => 'Transcription failed: ' . $message];
+            $failed = 'Transcription failed: ' . $message;
+            try { self::recordSttResult(false, $failed); } catch (\Throwable $ignored) { /* the record must never hide the error */ }
+            return ['error' => $failed, 'engine' => true];
         }
+    }
+
+    /**
+     * #519: a request refused before the engine call is logged and recorded like an engine failure, so the
+     * Health check `voice_input` and the log show what the person saw. Logs the reason, the mime, the size
+     * and the workspace id; never the audio or the text. Never throws.
+     *
+     * @return array{error:string}
+     */
+    private static function refuseTranscribe(string $reason, string $mime, int $bytes, string $workspaceId): array {
+        try {
+            LogService::log("Dictation refused: $reason (mime '$mime', $bytes bytes, workspace '$workspaceId')", LogService::LOG_WARN, 'VoiceService');
+            self::recordSttResult(false, $reason);
+        } catch (\Throwable $e) {
+            // the refusal is still returned below
+        }
+        return ['error' => $reason];
     }
 
     /**
@@ -943,6 +968,53 @@ class VoiceService {
             return ['error' => "The transcription engine at $host returned an answer this plugin could not read."];
         }
         return ['text' => (string)$decoded['text']];
+    }
+
+    /**
+     * #484: a quick check of the speech-to-text engine, so the dictation pill can use the browser's own
+     * recognition when the engine is down. `engine` is false when no engine is set (the browser is used
+     * anyway). Down means: the connection failed, the engine answered 5xx, or it refused the key (401, 403).
+     * Tries `/health`, then `/v1/models` when the engine has no `/health` (404). A down answer is recorded
+     * for the Health check `voice_input`; an up answer records nothing (only a real transcription does).
+     * Never throws. Short timeout (STT_HEALTH_TIMEOUT_S), so a dead host does not hold the pill.
+     *
+     * @return array{engine:bool,ok:bool,message:string}
+     */
+    public static function sttHealth(): array {
+        try {
+            $config = ConfigService::getConfig();
+            $sttUrl = trim((string)($config['stt_url'] ?? ''));
+            if ($sttUrl === '') return ['engine' => false, 'ok' => true, 'message' => ''];
+
+            $headers = [];
+            $key = self::sttApiKey();
+            if ($key !== '') $headers[] = 'Authorization: Bearer ' . $key;
+            $host = self::hostOf($sttUrl);
+            $base = rtrim($sttUrl, '/');
+            $down = null;
+            foreach (['/health', '/v1/models'] as $path) {
+                $url = $base . $path;
+                $result = (self::$transport !== null)
+                    ? (self::$transport)($url, $headers, '', 'GET')
+                    : self::curlTransport($url, $headers, '', 'GET', 1048576, self::STT_HEALTH_TIMEOUT_S);
+                if (!empty($result['too_large'])) { $down = null; break; } // a big model list: the engine answered
+                $errno  = (int)($result['errno'] ?? 0);
+                $status = (int)($result['status'] ?? 0);
+                if ($errno !== 0) { $down = "Could not reach the transcription engine at $host."; break; }
+                if ($status >= 200 && $status <= 299) { $down = null; break; }
+                if ($status === 404 && $path === '/health') continue; // no /health route: ask /v1/models
+                if ($status >= 500 || $status === 401 || $status === 403) { $down = "The transcription engine at $host returned HTTP $status."; break; }
+                $down = null; // another answer (a 404 on /v1/models too): the engine is there; do not block dictation
+                break;
+            }
+            if ($down !== null) {
+                try { self::recordSttResult(false, $down); } catch (\Throwable $ignored) { /* the answer below still goes out */ }
+                return ['engine' => true, 'ok' => false, 'message' => $down];
+            }
+            return ['engine' => true, 'ok' => true, 'message' => ''];
+        } catch (\Throwable $e) {
+            return ['engine' => true, 'ok' => false, 'message' => 'The transcription engine could not be checked.'];
+        }
     }
 
     /** File extension for a recognised STT mime type, for the multipart filename only. */
@@ -1362,15 +1434,16 @@ class VoiceService {
      * transfer the moment the cap is crossed, before the reply is ever
      * fully buffered.
      */
-    private static function curlTransport(string $url, array $headers, string $body, string $method = 'POST', int $maxBytes = 0): array {
+    private static function curlTransport(string $url, array $headers, string $body, string $method = 'POST', int $maxBytes = 0, int $timeoutS = 0): array {
         $ch = curl_init($url);
         if ($method === 'POST') {
             curl_setopt($ch, CURLOPT_POST, true);
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
         }
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_TIMEOUT, $method === 'POST' ? self::CURL_TIMEOUT_S : self::LIST_VOICES_TIMEOUT_S);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+        // $timeoutS (#484) overrides the default total timeout; it also caps the connect time.
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeoutS > 0 ? $timeoutS : ($method === 'POST' ? self::CURL_TIMEOUT_S : self::LIST_VOICES_TIMEOUT_S));
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeoutS > 0 ? min(5, $timeoutS) : 5);
 
         $received = '';
         $tooLarge = false;
