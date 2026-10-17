@@ -1676,6 +1676,10 @@ fi
 if [ ! -d "$UPPER_DIR" ] || ! _bake_upper_has_content "$TYPE" "$UPPER_DIR"; then
     log "No changes to commit for $TYPE $ID (upper empty after prune: $UPPER_DIR)"
     lifecycle_log "info" "commit_stack" "bash_bake_skipped_empty" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"upper\":\"$UPPER_DIR\",\"upper_source\":\"${ENTITY_UPPER_SOURCE:-policy}\"}" 2>/dev/null || true
+    # #567: tell the Activity tray that this save found nothing to write. The
+    # tray reads and removes this marker when the job ends (SupervisorService
+    # ::bakeNoopStep) and says "Nothing to save" instead of a bare "Done".
+    printf '%s\n' "$(date +%s)" > "/tmp/unraid-aicliagents/.bake_noop_${TYPE}_${ID//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
     # #372: a home still on the upper of the old mode moves to the policy
     # upper once that upper is empty and nothing uses the home.
     if [ "$TYPE" = "home" ] && [ -z "$_UPPER_OVERRIDE" ] \

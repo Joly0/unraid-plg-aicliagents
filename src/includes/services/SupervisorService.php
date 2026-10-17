@@ -1113,7 +1113,13 @@ class SupervisorService {
                         // "done", so a plain finish has no grey line. Only a sentence that
                         // carries information is written.
                         $step   = '';
-                        if ($op === 'bake' && ($defer === 'busy_cooldown' || $defer === 'mount_busy')) {
+                        $noopStep = ($op === 'bake')
+                            ? self::bakeNoopStep($entity, max((int)($job['started_at'] ?? 0), (int)($job['queued_at'] ?? 0)))
+                            : '';
+                        if ($noopStep !== '') {
+                            // #567: the save found no change. Neutral wording, not a success line.
+                            $step = $noopStep;
+                        } elseif ($op === 'bake' && ($defer === 'busy_cooldown' || $defer === 'mount_busy')) {
                             // Forgejo #248: the supervisor ends a user Persist that kept
                             // deferring for these reasons as DONE, because the data was
                             // already on disk. Say exactly that, from the ONE plain-English
@@ -1303,6 +1309,26 @@ class SupervisorService {
      * Public so unit tests can invoke it directly without needing live tmux
      * sessions or a mounted ZRAM device (see HomePersistDirtyUpperTest).
      */
+    /**
+     * #567: the tray line for a bake that found nothing to write. commit_stack
+     * (storage_ops.sh) writes /tmp/unraid-aicliagents/.bake_noop_<type>_<id> when
+     * the writable layer is empty. A marker made since the job was queued counts;
+     * an older one is stale. The marker is removed when read. Returns '' when the
+     * bake wrote something.
+     */
+    public static function bakeNoopStep(string $entity, int $since): string
+    {
+        $parts = explode('/', $entity, 2);
+        if (count($parts) !== 2) return '';
+        $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $parts[1]);
+        $marker = '/tmp/unraid-aicliagents/.bake_noop_' . $parts[0] . '_' . $safe;
+        if (!is_file($marker)) return '';
+        $mtime = (int)@filemtime($marker);
+        @unlink($marker);
+        if ($mtime < $since) return '';
+        return 'Nothing to save: there were no changes to write.';
+    }
+
     public static function homeDoneStep(array $sessions, int $dirtyMb): string
     {
         if (!empty($sessions) && $dirtyMb > 8) {
