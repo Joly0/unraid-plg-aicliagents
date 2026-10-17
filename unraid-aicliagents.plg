@@ -3,6 +3,57 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.17.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.10.17.02
+
+**Boot disk space (new)**
+
+- **Feat: see where the boot disk space goes.** The Home Storage tab has a **Boot disk space** card. It shows how much each agent, each old agent version and each home uses, with the time of the measurement and a **Measure now** button, and it puts the action that helps next to each line. The boot-disk warning now names the part that is full and points to the card.
+- **Feat: remove old agent versions.** **Remove old versions** in the Agent Store card frees the space of agent versions that no workspace uses. The new setting **Keep the previous version for rollback** (on by default) decides whether each agent keeps its last version.
+- **Feat: new agents use plain folders on an internal boot disk.** When the server boots from an internal disk, not a USB stick, a new agent is installed as plain folders. An agent kept in layers can be converted.
+- **Feat: caches of a plain-folder home stay off the boot disk.** **Cache location for plain-folder homes** keeps the download caches of tools such as npm and pip in RAM (the default) or in a folder on a pool. **Clear caches** empties them while no workspace of that home runs.
+- **Feat: move old conversations out of the home.** **Move old sessions…** moves old agent conversation history to a folder on a pool, and **Bring back…** returns it.
+
+**Storage safety (thanks to Marcin M on the forum)**
+
+- **Fix: "Writable layer for homes = Disk" now completes on a home that has Claude Code conversations.** The move waited for ever, because the clean-up after a save kept every conversation file in RAM. A file the save has captured can now go. When a move cannot happen, the message says why.
+- **Fix: one damaged saved layer no longer stops the whole home.** A damaged newest layer of a home is moved to a `.bad` folder (never deleted), the home starts without it, and an Unraid notice names the layer. Any other layer that will not mount stops the home with the layer and the reason named.
+- **Fix: a damaged or missing layer list is restored, not overwritten.** The plugin keeps a backup of its list of saved layers and rebuilds the list from the layers on disk when needed. A home whose layers exist but whose list entry is missing is recorded again.
+- **Fix: a save with nothing to save says "Nothing to save"**, not a green "Persisted", in the dialog and in the Activity tray. A save in an Emergency Session says **Not saved**.
+- **Fix: the Emergency Session says that work done in it is lost**, next to the **Start Emergency Session** button and inside the session, also after a page reload.
+- **Fix: a busy home whose writable layer is on disk is no longer asked to save every few seconds.** Its changes are already on the disk; the home card now says they go into a layer when the home is idle.
+
+**Upgrades and the Activity tray**
+
+- **Fix: a long agent upgrade no longer shows "stalled".** While the new version is written to the boot disk, the Activity tray stays alive and shows the percent done.
+
+**Workspaces and the array**
+
+- **Fix: workspaces on the array or a pool no longer try to start while the array stops**, so the array can stop. They start again when the array is back.
+
+**Voice and the Notebook**
+
+- **Fix: the Notebook works for agents with the Notebook switch alone.** Plugin management no longer needs to be on.
+- **Improve: dictation goes on with your browser's own recognition when the speech server is down**, and says so. The Settings dictation **Test** still tests the server itself.
+- **Fix: the microphone icon stops pulsing as soon as you stop dictation.**
+- **Fix: a dictation request that is refused now leaves a line in the log and in the voice status**, so the reason can be found.
+
+**Settings and backups**
+
+- **Fix: the scheduled home backup now runs.** It failed every time, and nothing said so; a failed scheduled backup is now written to the log.
+- **New setting: Keep the terminal responsive** (off by default). It gives the Unraid web page and the terminals a higher priority than other programs, so typing stays quick while the server is busy.
+- **New setting: Agent temporary folder.** Agents can keep their temporary files in RAM (the default), in a folder on a pool, or on an internal boot disk.
+- **Fix: the storage picker offers a folder inside each pool, user share, array disk and Unassigned Devices drive**, not its top folder, and a new save of a top folder is refused with the reason.
+
+**Smaller fixes**
+
+- **Fix: the "Could not create folder" message in the folder picker stays until you close it.**
+- **Fix: on a sidebar theme, the home backup dialog no longer sits under the side menu on a phone.**
+- **Improve: a file path in the terminal is a link only when the file exists**, checked when the mouse is over the line.
+- **Fix: the Relay contact list no longer shows closed or repeated workspaces.**
+- **Fix: RESET on a workspace's Details card starts a new conversation, as its text says.**
+- **Fix: the Relay notice preview shows the wording of the newest choice**, and the Config Hub line for no installed agents is easy to read.
+- **Docs: the first-run guide, the help texts of the Relay, Plugin management and Config Hub tabs, and the README describe the plugin as it is now.**
+
 ## 2026.10.15.03
 
 &gt; **The plugin is now open source under the MIT license.** The `LICENSE` file is at the top of the repository, and the licenses of the bundled libraries are in `THIRD_PARTY_NOTICES.md`. The public history now shows each change as its own commit, and `CONTRIBUTING.md` says how a pull request is handled. The Notebook hang warning from 2026.10.13.01 still applies: if an Unraid page hangs with the Notebook on, set **Notebook** to Off on the Configuration tab and tell us on GitHub.
