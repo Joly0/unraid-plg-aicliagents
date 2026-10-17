@@ -488,6 +488,12 @@ function persistEntity(type, id) {
                 swal({ title: "Queued", text: "Queued — watch the activity tray for progress.", type: "info", timer: 2500, showConfirmButton: false });
                 clearChanged();
                 refreshStats();
+            } else if (r && r.status === 'nothing_to_save') {
+                // #567: the save did nothing. Neutral, never the green "Persisted".
+                swal({ title: "Nothing to save", text: r.message || "There were no changes to write.", type: "info", timer: 2500, showConfirmButton: false });
+            } else if (r && r.status === 'emergency') {
+                // #567: the emergency session runs on a temporary home. Warn, do not call it saved.
+                swal({ title: "Not saved", text: r.message || "This session runs on the emergency temporary home. Its work is not kept.", type: "warning", showConfirmButton: true });
             } else if (r && r.status === 'ok') {
                 // Legacy synchronous path (no baking flag) — still used for edge cases.
                 swal({ title: "Persisted", text: "Data persisted.", type: "success", timer: 2000, showConfirmButton: false });

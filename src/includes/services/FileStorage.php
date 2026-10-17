@@ -71,6 +71,12 @@ trait FileStorageExitResultTrait
      * true (the entity is usable, nothing broke) but saved is false.
      */
     public bool $saved = false;
+    /**
+     * #567: the save found nothing to write (the writable layer was empty). The
+     * seam answers exit 0 with outcome "noop". The save did nothing, so the UI
+     * must show a neutral "Nothing to save", never a green "Persisted".
+     */
+    public bool $nothingToSave = false;
 
     public static function fromExit(int $exit, ?string $deferReason): self
     {
@@ -697,7 +703,10 @@ final class FileStorage
             LogService::log("FAILED SquashFS persistence bake for $type $id.", LogService::LOG_ERROR, "FileStorage");
             LifecycleLogService::log(LifecycleLogService::LEVEL_ERROR, 'FileStorage', 'bake_failed', ['type' => $type, 'id' => $id, 'result' => $exit]);
         }
-        return FileStoragePersistResult::fromExit($exit, $reason);
+        $res = FileStoragePersistResult::fromExit($exit, $reason);
+        // #567: outcome "noop" = exit 0 with an empty writable layer.
+        $res->nothingToSave = ($exit === 0 && ((string)($bakeJson['outcome'] ?? '')) === 'noop');
+        return $res;
     }
 
     /**

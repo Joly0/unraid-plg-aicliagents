@@ -669,6 +669,11 @@ class StorageHandler {
         if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
+        // #567: a save in the emergency session keeps nothing. Say so; queue nothing.
+        require_once __DIR__ . '/../services/TaskService.php';
+        if (\AICliAgents\Services\TaskService::inEmergencyMode()) {
+            return ['status' => 'emergency', 'message' => \AICliAgents\Services\TaskService::EMERGENCY_NOT_KEPT];
+        }
         $jobId = \AICliAgents\Services\SupervisorService::enqueueJob('home', $user, 'bake', 'user_persist', 5);
         if ($jobId === null) {
             // Ledger unavailable — preserve the legacy untracked enqueue.

@@ -11,6 +11,18 @@
 namespace AICliAgents\Services;
 
 class TaskService {
+    /** #567: a save that found no change. Neutral, not a success. */
+    const NOTHING_TO_SAVE = 'Nothing to save: there were no changes to write.';
+
+    /** #567/#570: the one sentence for a save in the emergency session. */
+    const EMERGENCY_NOT_KEPT = 'Not saved: this session runs on the emergency temporary home. Its work is not kept and is lost when storage returns.';
+
+    /** #567: true while a session runs on the emergency temporary home. */
+    public static function inEmergencyMode(): bool {
+        require_once __DIR__ . '/StorageMountService.php';
+        return StorageMountService::isEmergencyMode();
+    }
+
     /**
      * Initializes a fresh home storage for a user.
      * SquashFS homes are initialized on first mount if missing.
@@ -30,6 +42,11 @@ class TaskService {
     public static function persistHome($username, $force = false) {
         if (empty($username)) return false;
 
+        // #567: a session on the emergency temporary home keeps nothing.
+        if (self::inEmergencyMode()) {
+            return ['status' => 'emergency', 'message' => self::EMERGENCY_NOT_KEPT];
+        }
+
         $lockFile = "/tmp/unraid-aicliagents/init_$username.lock";
         $fp = fopen($lockFile, "w+");
         if (!$fp || !flock($fp, LOCK_EX)) {
@@ -45,7 +62,10 @@ class TaskService {
         flock($fp, LOCK_UN);
         fclose($fp);
 
-        if ($res === 0) {
+        if ($res === 0 && $result->nothingToSave) {
+            // #567: nothing was written. Neutral, not green.
+            return ['status' => 'nothing_to_save', 'message' => self::NOTHING_TO_SAVE];
+        } elseif ($res === 0) {
             return ['status' => 'ok', 'message' => 'Persistence successful'];
         } elseif ($res === 2 && !$result->saved) {
             // #357: nothing was written (the storage lock stayed busy, or a
@@ -170,6 +190,9 @@ class TaskService {
      */
     public static function persistHomeNonBlocking($username) {
         if (empty($username)) return false;
+        if (self::inEmergencyMode()) {
+            return ['status' => 'emergency', 'message' => self::EMERGENCY_NOT_KEPT];
+        }
 
         $lockFile = "/tmp/unraid-aicliagents/init_$username.lock";
         $fp = fopen($lockFile, "w+");
@@ -190,6 +213,7 @@ class TaskService {
 
         // #357: an exit 2 that wrote no layer is "skipped" (data safe in RAM,
         // the next cycle saves it), never "ok".
+        if ($result->nothingToSave) return ['status' => 'nothing_to_save', 'message' => self::NOTHING_TO_SAVE];
         if ($result->saved) return ['status' => 'ok'];
         if ($result->exit === 2) return ['status' => 'skipped', 'message' => 'Not saved yet: the storage lock was busy. Data safe in RAM; the next save captures it.'];
         return ['status' => 'error'];
