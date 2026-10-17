@@ -278,9 +278,17 @@ _bake_source_for() {
 # upper. Remounts the home (op_mount then decides "switch": it copies the
 # directory skeleton and binds the policy upper) ONLY when the live upper holds
 # no data and no session uses the home. Always returns 0; the result is logged.
+# #565: the reason it did NOT move is written to a marker file so the UI can
+# show it (UpperPlacementService reads it). A new call clears the old marker.
+_converge_reason_file() {
+    local sid="${1//[^a-zA-Z0-9_-]/_}"
+    printf '%s/.upper_converge_reason_home_%s' "${AICLI_CONVERGE_REASON_DIR:-/tmp/unraid-aicliagents}" "$sid"
+}
 _home_upper_converge() {
-    local id="${1:-}" persist="${2:-}" live="${3:-}" mnt pol rc
+    local id="${1:-}" persist="${2:-}" live="${3:-}" mnt pol rc rf
     [ -n "$id" ] && [ -n "$persist" ] && [ -n "$live" ] || return 0
+    rf="$(_converge_reason_file "$id")"
+    rm -f "$rf" 2>/dev/null || true
     mnt="/tmp/unraid-aicliagents/work/$id/home"
     pol="$( _entity_paths home "$id" "$persist"; printf '%s' "$UPPER_DIR" )"
     [ -n "$pol" ] && [ "$pol" != "$live" ] || return 0
@@ -288,11 +296,13 @@ _home_upper_converge() {
         echo "[$(get_ts)] [INFO] [COMMIT] home $id stays on $live until it holds no data that is not baked (policy upper: $pol)" >> "$DEBUG_LOG"
         lifecycle_log "info" "commit_stack" "home_upper_mode_switch_waiting" \
             "{\"type\":\"home\",\"id\":\"$id\",\"live_upper\":\"$live\",\"policy_upper\":\"$pol\",\"reason\":\"live_upper_holds_data\"}" 2>/dev/null || true
+        printf 'live_upper_holds_data\n' > "$rf" 2>/dev/null || true
         return 0
     fi
     if home_mount_in_use "$mnt"; then
         lifecycle_log "info" "commit_stack" "home_upper_mode_switch_waiting" \
             "{\"type\":\"home\",\"id\":\"$id\",\"live_upper\":\"$live\",\"policy_upper\":\"$pol\",\"reason\":\"home_in_use\"}" 2>/dev/null || true
+        printf 'home_in_use\n' > "$rf" 2>/dev/null || true
         return 0
     fi
     if op_mount home "$id" "$persist"; then rc=0; else rc=$?; fi

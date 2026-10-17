@@ -150,6 +150,30 @@ final class UpperPlacementService
         ];
     }
 
+    /**
+     * #565: why a home did not move after a good save. The bake script writes the
+     * reason token (live_upper_holds_data, home_in_use) to a marker file. Without a
+     * marker the old general text stays.
+     */
+    public static function convergeReason(string $id, array $seams = []): string
+    {
+        $token = isset($seams['converge_reason'])
+            ? (string)$seams['converge_reason']($id)
+            : (static function (string $id): string {
+                $f = '/tmp/unraid-aicliagents/.upper_converge_reason_home_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
+                $raw = is_file($f) ? @file_get_contents($f) : false;
+                return $raw === false ? '' : trim($raw);
+            })($id);
+        switch ($token) {
+            case 'live_upper_holds_data':
+                return 'the old writable layer still holds changes that the save did not capture (files that changed during the save, or files the save could not store). Nothing was deleted. Try again when the home is idle';
+            case 'home_in_use':
+                return 'a workspace or a process is still using the home, so it could not be mounted again on the new placement';
+            default:
+                return 'the home is still in use, so it could not be mounted again on the new placement';
+        }
+    }
+
     /** Change the placement and move the data. Never leaves the setting out of step with the data. */
     public static function migrate(string $target, ?array $config = null, array $seams = []): array
     {
@@ -204,7 +228,7 @@ final class UpperPlacementService
             $after = self::homeStates($target, $config, $seams);
             $failed = [];
             foreach ($after as $h) {
-                if ($h['needs_move']) $failed[$h['id']] = $reasons[$h['id']] ?? 'the home is still in use, so it could not be mounted again on the new placement';
+                if ($h['needs_move']) $failed[$h['id']] = $reasons[$h['id']] ?? self::convergeReason($h['id'], $seams);
             }
             if ($failed !== []) {
                 $save(['storage_upper_mode' => $prev]);

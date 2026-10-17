@@ -1988,9 +1988,14 @@ selective_upper_cleanup() {
     # Protect these paths unconditionally; a never-reclaimed conversation merely
     # lingers in zram until a later bake captures it (KB-sized; negligible).
     # NOTE: when adding a new agent, add its conversation/session store here.
-    while IFS= read -r _chat_f; do
-        [ -n "$_chat_f" ] && printf '%s\n' "$_chat_f" >> "$tmpdir/excludes"
-    done < <(find "$upper" -type f \( \
+    # #565: with a confirmed bake manifest, a chat file that is in the manifest
+    # is PROVEN captured (its mtime is not newer than the marker, so it did not
+    # change during the bake, and the bake wrote it into the new layer). It no
+    # longer needs the RAM copy, and keeping it blocks a move of the writable
+    # layer to disk for ever. A chat file that is NOT in the manifest, or that
+    # is newer than the marker, stays protected here AND by the intersection (c).
+    # Without a manifest (legacy callers) every chat file stays protected.
+    find "$upper" -type f \( \
         -path '*/.claude/projects/*' -o \
         -path '*/.claude/sessions/*' -o \
         -path '*/.claude/history.jsonl' -o \
@@ -2003,7 +2008,13 @@ selective_upper_cleanup() {
         -path '*/.codex/sessions/*' -o \
         -path '*/.pi/agent/sessions/*' -o \
         -path '*/.local/state/*/prompt-history.jsonl' \
-        \) 2>/dev/null)
+        \) 2>/dev/null | sort -u > "$tmpdir/chat"
+    if [ -n "$confirmed" ] && [ -s "$confirmed" ]; then
+        sort -u "$confirmed" > "$tmpdir/chat.confirmed" 2>/dev/null || : > "$tmpdir/chat.confirmed"
+        comm -23 "$tmpdir/chat" "$tmpdir/chat.confirmed" >> "$tmpdir/excludes"
+    else
+        cat "$tmpdir/chat" >> "$tmpdir/excludes"
+    fi
 
     # (b2) Open-fd exclusion: files with an open write fd anywhere in /proc.
     # Walk /proc/*/fd, resolve each symlink, check fdinfo flags for write access.
