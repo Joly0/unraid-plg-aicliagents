@@ -120,8 +120,8 @@ class LayerManifestService {
             }
         }
         return self::withLock(function () use ($entity, $layerEntry) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
 
@@ -184,8 +184,8 @@ class LayerManifestService {
             return false;
         }
         return self::withLock(function () use ($entity, $newEntry, $newName, $oldFilename) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
             $layers = $manifest['entities'][$entity]['expected_layers'] ?? null;
@@ -229,8 +229,8 @@ class LayerManifestService {
      */
     public static function removeLayer(string $entity, string $filename): bool {
         return self::withLock(function () use ($entity, $filename) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
 
@@ -277,8 +277,8 @@ class LayerManifestService {
      */
     public static function replaceLayers(string $entity, array $layerEntries, string $persistencePath): bool {
         return self::withLock(function () use ($entity, $layerEntries, $persistencePath) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
 
@@ -398,8 +398,8 @@ class LayerManifestService {
      */
     public static function markCorrupt(string $entity, string $filename, string $reason): bool {
         return self::withLock(function () use ($entity, $filename, $reason) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
 
@@ -469,8 +469,8 @@ class LayerManifestService {
             return false;
         }
         return self::withLock(function () use ($entity, $backend) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
 
@@ -507,8 +507,8 @@ class LayerManifestService {
      */
     public static function removeEntity(string $entity): bool {
         return self::withLock(function () use ($entity) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
 
@@ -546,8 +546,8 @@ class LayerManifestService {
     public static function removeEntitiesMatching(string $pattern): int {
         $removed = 0;
         self::withLock(function () use ($pattern, &$removed) {
-            $manifest = self::readManifest() ?? self::emptyManifest();
-            if (!self::checkSchemaVersion($manifest)) {
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
                 return false;
             }
 
@@ -701,9 +701,49 @@ class LayerManifestService {
      * @return array<string, mixed>|null
      */
     private static function readManifest(): ?array {
+        $state = self::readManifestState();
+        if ($state['state'] === 'ok') {
+            return $state['data'];
+        }
+        // #569: a missing or unparsable file falls back to the previous good copy
+        // (read-only: the bad file is not touched here).
+        return self::parseFile(self::bakPath());
+    }
+
+    /** #569: path of the previous good generation, kept at each atomic rename. */
+    public static function bakPath(): string {
+        return StoragePathResolver::manifestPath() . '.bak';
+    }
+
+    /**
+     * #569: decode one manifest file without retry. Null when it is missing, empty
+     * or not valid JSON for an array.
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function parseFile(string $path): ?array {
+        if (!is_file($path)) {
+            return null;
+        }
+        $raw = @file_get_contents($path);
+        if ($raw === false || $raw === '') {
+            return null;
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * #569: read the live manifest and say what state it is in.
+     * state is 'ok' (data is the manifest), 'missing' (no file) or 'unparsable'
+     * (a file that is empty or not valid JSON after the retries).
+     *
+     * @return array{state: string, data: array<string, mixed>|null}
+     */
+    private static function readManifestState(): array {
         $path = StoragePathResolver::manifestPath();
         if (!file_exists($path)) {
-            return null;
+            return ['state' => 'missing', 'data' => null];
         }
         // Best-effort LOCK_SH (belt-and-braces vs the bash writer's LOCK_EX).
         // MUST be non-blocking: readManifest is also called from inside withLock's
@@ -722,10 +762,10 @@ class LayerManifestService {
                 }
                 $decoded = json_decode($raw, true);
                 if (is_array($decoded)) {
-                    return $decoded;
+                    return ['state' => 'ok', 'data' => $decoded];
                 }
             }
-            return null;
+            return ['state' => 'unparsable', 'data' => null];
         } finally {
             if ($haveLock) {
                 @flock($lockFd, LOCK_UN);
@@ -734,6 +774,262 @@ class LayerManifestService {
                 @fclose($lockFd);
             }
         }
+    }
+
+    /**
+     * #569: load the manifest for a mutator, inside the lock. NEVER hands a mutator
+     * an empty manifest in place of a damaged one.
+     *   - good file                  -> that manifest
+     *   - missing file               -> the .bak, else a rebuild from the layers on
+     *                                   disk, else a new empty manifest (a first run)
+     *   - empty / unparsable file    -> a copy of the bad file is kept as .corrupt,
+     *                                   then the .bak, else a rebuild from the layers
+     *                                   on disk, else null: the write is REFUSED so the
+     *                                   next save cannot replace the file with a
+     *                                   one-entity manifest.
+     * Null means "refuse and log"; every mutator returns false on null.
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function loadForWrite(): ?array {
+        $st = self::readManifestState();
+        if ($st['state'] === 'ok') {
+            return $st['data'];
+        }
+        $path = StoragePathResolver::manifestPath();
+        if ($st['state'] === 'unparsable') {
+            $keep = $path . '.corrupt';
+            if (@copy($path, $keep)) {
+                LifecycleLogService::log(LifecycleLogService::LEVEL_ERROR, self::COMPONENT,
+                    'manifest_unparsable', ['path' => $path, 'kept_copy' => $keep]);
+            } else {
+                LifecycleLogService::log(LifecycleLogService::LEVEL_ERROR, self::COMPONENT,
+                    'manifest_unparsable', ['path' => $path, 'kept_copy' => '']);
+            }
+        }
+        $bak = self::parseFile(self::bakPath());
+        if ($bak !== null) {
+            LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, self::COMPONENT,
+                'manifest_restored_from_bak', ['was' => $st['state'], 'entities' => count($bak['entities'] ?? [])]);
+            return $bak;
+        }
+        $entities = self::rebuildEntitiesFromDisk();
+        if ($entities !== []) {
+            $m = self::emptyManifest();
+            $m['entities'] = $entities;
+            LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, self::COMPONENT,
+                'manifest_rebuilt_from_layers', ['was' => $st['state'], 'entities' => array_keys($entities)]);
+            return $m;
+        }
+        if ($st['state'] === 'missing') {
+            return self::emptyManifest();
+        }
+        LifecycleLogService::log(LifecycleLogService::LEVEL_ERROR, self::COMPONENT,
+            'manifest_write_refused', ['reason' => 'unparsable_no_bak_no_layers', 'path' => $path]);
+        return null;
+    }
+
+    // -----------------------------------------------------------------------
+    // #569 / #568: rebuild manifest entries from the layer files on disk
+    // -----------------------------------------------------------------------
+
+    /** Smoke-test entity ids are never rebuilt (see supervisor cleanup-phantoms). */
+    private static function isSmokeId(string $id): bool {
+        return preg_match('/^smoke[a-z]*[0-9]*$/', $id) === 1;
+    }
+
+    /**
+     * Split a layer file name {type}_{id}_{kind}_{seq10}_{dt}.sqsh into its parts.
+     * Null for any name that does not follow the current grammar.
+     *
+     * @return array{type: string, id: string, kind: string}|null
+     */
+    public static function parseLayerName(string $filename): ?array {
+        if (preg_match('/^(home|agent)_(.+)_(delta|consolidated)_\d{10}_\d{8}T\d{6}Z\.sqsh$/', basename($filename), $m) !== 1) {
+            return null;
+        }
+        return ['type' => $m[1], 'id' => $m[2], 'kind' => $m[3]];
+    }
+
+    /**
+     * The manifest entries of one entity, from the layer files in $dir, oldest first.
+     * A zero-byte file is not a layer and is left out. Nothing is changed on disk.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public static function layerEntriesFromDir(string $dir, string $type, string $id): array {
+        if (!is_dir($dir)) {
+            return [];
+        }
+        $names = [];
+        foreach ((@scandir($dir) ?: []) as $n) {
+            $p = self::parseLayerName((string)$n);
+            if ($p !== null && $p['type'] === $type && $p['id'] === $id && is_file("$dir/$n")) {
+                $names[] = (string)$n;
+            }
+        }
+        usort($names, static fn($a, $b) => strcmp(self::layerSortKey($a), self::layerSortKey($b)));
+        $out = [];
+        foreach ($names as $n) {
+            $full  = rtrim($dir, '/') . '/' . $n;
+            $bytes = (int)@filesize($full);
+            if ($bytes <= 0) {
+                continue;
+            }
+            $out[] = [
+                'filename'     => $n,
+                'sha256'       => self::computeFileSha256($full) ?? '',
+                'bytes'        => $bytes,
+                'kind'         => self::classifyLayerKind($n),
+                'created_at'   => gmdate('Y-m-d\TH:i:s\Z', (int)@filemtime($full)),
+                'persist_path' => rtrim($dir, '/'),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * The folders that hold layers: [type => dir]. Home layers sit in the home
+     * persist folder, agent layers in the agent persist folder.
+     *
+     * @return array<string, string>
+     */
+    private static function layerDirs(): array {
+        // Test-only hook (same idea as AICLI_MANIFEST_PATH): point both folders at
+        // temp folders so a unit test never reads the real persist folders.
+        $eh = (string)getenv('AICLI_LAYER_DIR_HOME');
+        $ea = (string)getenv('AICLI_LAYER_DIR_AGENT');
+        if ($eh !== '' || $ea !== '') {
+            return ['home' => $eh, 'agent' => $ea];
+        }
+        $cfg  = ConfigService::getConfig();
+        $user = (string)($cfg['user'] ?? '');
+        if ($user === '') {
+            $user = 'root';
+        }
+        return [
+            'home'  => StoragePathResolver::homePersistPath($user),
+            'agent' => StoragePathResolver::agentPersistPath(),
+        ];
+    }
+
+    /**
+     * Entity ids (per type) that have at least one layer file in the layer folders.
+     *
+     * @return array<string, array<int, string>> ['home' => [ids], 'agent' => [ids]]
+     */
+    private static function idsOnDisk(): array {
+        $found = ['home' => [], 'agent' => []];
+        foreach (self::layerDirs() as $type => $dir) {
+            if (!is_dir($dir)) {
+                continue;
+            }
+            foreach ((@scandir($dir) ?: []) as $n) {
+                $p = self::parseLayerName((string)$n);
+                if ($p !== null && $p['type'] === $type && !self::isSmokeId($p['id'])) {
+                    $found[$type][$p['id']] = true;
+                }
+            }
+        }
+        return ['home' => array_keys($found['home']), 'agent' => array_keys($found['agent'])];
+    }
+
+    /**
+     * #569: a whole entities map rebuilt from the layers on disk (no manifest, no .bak).
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private static function rebuildEntitiesFromDisk(): array {
+        $dirs = self::layerDirs();
+        $out  = [];
+        foreach (self::idsOnDisk() as $type => $ids) {
+            foreach ($ids as $id) {
+                $entry = self::entityFromDisk($dirs[$type], $type, $id);
+                if ($entry !== null) {
+                    $out["$type/$id"] = $entry;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** @return array<string, mixed>|null null when the folder holds no usable layer */
+    private static function entityFromDisk(string $dir, string $type, string $id): ?array {
+        $layers = self::layerEntriesFromDir($dir, $type, $id);
+        if ($layers === []) {
+            return null;
+        }
+        return [
+            'expected_layers'          => $layers,
+            'last_known_good_at'       => self::now(),
+            'current_persistence_path' => rtrim($dir, '/'),
+        ];
+    }
+
+    /**
+     * #568: home ids that have layers on disk (configured user + every home found in
+     * the persist folder) but no manifest entry. Read-only. The supervisor reconciles
+     * these, as the manifest keys alone never list a home whose entry is lost.
+     *
+     * @return array<int, string>
+     */
+    public static function homeIdsMissingFromManifest(): array {
+        $have = self::getAllEntities();
+        $out  = [];
+        foreach (self::idsOnDisk()['home'] as $id) {
+            if (!isset($have["home/$id"])) {
+                $out[] = $id;
+            }
+        }
+        sort($out);
+        return $out;
+    }
+
+    /**
+     * #568: record a missing entity again from the layers on disk, in one locked
+     * atomic write. True when the entity is in the manifest afterwards. False when no
+     * usable layer exists for it, or the manifest is damaged and cannot be restored.
+     * The caller holds the per-entity bake lock.
+     */
+    public static function rebuildEntity(string $entity): bool {
+        if (strpos($entity, '/') === false) {
+            return false;
+        }
+        [$type, $id] = explode('/', $entity, 2);
+        $dirs = self::layerDirs();
+        if (!isset($dirs[$type]) || $id === '' || self::isSmokeId($id)) {
+            return false;
+        }
+        return self::withLock(function () use ($entity, $type, $id, $dirs) {
+            $fileWasGood = self::readManifestState()['state'] === 'ok';
+            $manifest = self::loadForWrite();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
+                return false;
+            }
+            if (isset($manifest['entities'][$entity]) && $fileWasGood) {
+                return true;
+            }
+            if (!isset($manifest['entities'][$entity])) {
+                $entry = self::entityFromDisk($dirs[$type], $type, $id);
+                if ($entry === null) {
+                    return false;
+                }
+                $manifest['entities'][$entity] = $entry;
+            } else {
+                // The file was damaged and loadForWrite restored or rebuilt this
+                // entity: write the restored manifest back to the live path.
+                $entry = $manifest['entities'][$entity];
+            }
+            $manifest['updated_at'] = self::now();
+            $ok = self::atomicWrite($manifest);
+            LifecycleLogService::log(
+                $ok ? LifecycleLogService::LEVEL_WARN : LifecycleLogService::LEVEL_ERROR,
+                self::COMPONENT,
+                $ok ? 'manifest_entity_rebuilt' : 'manifest_entity_rebuild_failed',
+                ['entity' => $entity, 'layers' => count($entry['expected_layers'])]
+            );
+            return $ok;
+        });
     }
 
     /**
@@ -811,6 +1107,21 @@ class LayerManifestService {
             }
         }
 
+        // #569: keep the previous good generation as .bak. Only a file that still
+        // parses is copied, so a damaged file never replaces a good .bak. The copy
+        // goes through a temp name and a rename, so the .bak is never half written.
+        if (self::parseFile($finalPath) !== null) {
+            $bak    = self::bakPath();
+            $bakTmp = $bak . '.tmp.' . getmypid();
+            if (@copy($finalPath, $bakTmp) && @rename($bakTmp, $bak)) {
+                // ok
+            } else {
+                @unlink($bakTmp);
+                LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, self::COMPONENT,
+                    'manifest_bak_failed', ['path' => $bak]);
+            }
+        }
+
         // Atomic rename
         $renamed = @rename($tmpPath, $finalPath);
         if (!$renamed) {
@@ -818,16 +1129,9 @@ class LayerManifestService {
             return false;
         }
 
-        // fsync the parent directory (ensures the rename is durable)
-        $dirFd = @opendir($dir);
-        if ($dirFd !== false) {
-            // PHP has no dir-fd fsync; closest is re-opening the dir as a file.
-            // On Linux, fsync(open(dir)) is the POSIX pattern. We use a no-op
-            // here since PHP doesn't expose this — the rename itself flushes on
-            // most Linux kernels with default mount options.
-            closedir($dirFd);
-        }
-
+        // #569: there used to be an opendir()/closedir() block here that claimed to
+        // fsync the parent directory. PHP cannot fsync a directory, so the block did
+        // nothing and was removed. The rename is durable as far as the filesystem allows.
         return true;
     }
 

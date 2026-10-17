@@ -540,14 +540,33 @@ LOWERS=""
 # at line `if ! mountpoint -q`) are NOT in this list — they may belong to a
 # concurrent / prior mount_stack run.
 _NEW_LOOP_MOUNTS=()
+# #566: what to do when one layer will not mount (layer_mount_guard.sh).
+source "$_SO_DIR/layer_mount_guard.sh" 2>/dev/null || true
+source "$_SO_DIR/manifest_write.sh" 2>/dev/null || true
+_LAYER_IDX=0
 for sqsh in "${FILES[@]}"; do
     # Mount each squashfs to a temporary loop mount if not already done
     SQSH_NAME=$(basename "$sqsh" .sqsh)
     SQSH_MNT="/tmp/unraid-aicliagents/mnt/$SQSH_NAME"
+    _LAYER_IDX=$((_LAYER_IDX + 1))
     mkdir -p "$SQSH_MNT"
     if ! mountpoint -q "$SQSH_MNT"; then
-        if ! mount -o loop,ro "$sqsh" "$SQSH_MNT"; then
-            error "Failed to mount $sqsh"
+        # #566: keep the error text. A bare "Failed to mount" named no reason.
+        if ! _LAYER_MOUNT_ERR="$(mount -o loop,ro "$sqsh" "$SQSH_MNT" 2>&1)"; then
+            if declare -f _layer_mount_failed >/dev/null 2>&1; then
+                _LAYER_MSG="$(_layer_mount_failed "$TYPE" "$ID" "$PERSIST_PATH" "$sqsh" "$_LAYER_MOUNT_ERR" "$LOWERS" "$(( ${#FILES[@]} - _LAYER_IDX ))")"
+                _LAYER_RC=$?
+            else
+                _LAYER_MSG="Failed to mount $sqsh: $_LAYER_MOUNT_ERR"
+                _LAYER_RC=1
+            fi
+            if [ "$_LAYER_RC" -eq 0 ]; then
+                # The damaged newest layer was set aside; mount the rest.
+                log "$_LAYER_MSG"
+                rmdir "$SQSH_MNT" 2>/dev/null || true
+                continue
+            fi
+            error "$_LAYER_MSG"
             # WP #1084: clean up any loop mounts we created earlier in this
             # loop so they don't leak when the layer mount fails mid-stack.
             for _lm in "${_NEW_LOOP_MOUNTS[@]}"; do

@@ -952,9 +952,49 @@ _pending_release_tick() {
         && pending_release_sweep "${dirs[@]}" >/dev/null 2>&1 ) || true
 }
 
+# _manifest_heal_missing_homes — #568: a home that has layer files in its persist
+# folder but no manifest entry is never listed by the manifest keys, so the pass
+# below would skip it for ever and the scheduled save would too. Look at the homes
+# found on disk (the configured user and every other home in the persist folder),
+# and record each missing one again from its layers (#569 rebuild). The rebuild
+# runs under the same per-entity lock a bake takes; a held lock means "try next
+# tick". Also restores a missing or damaged manifest file (from .bak or the layers).
+_manifest_heal_missing_homes() {
+    declare -f manifest_homes_missing >/dev/null 2>&1 || return 0
+    declare -f manifest_rebuild_entity >/dev/null 2>&1 || return 0
+    local ids id lockid rc
+    ids="$(manifest_homes_missing 2>/dev/null || true)"
+    [ -n "$ids" ] || return 0
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        lockid="${id//[^a-zA-Z0-9_-]/_}"
+        rc=0
+        (
+            exec 9>"${AICLI_BAKE_LOCK_DIR:-/var/run}/aicli-bake-home-${lockid}.lock" || exit 2
+            flock -n 9 || exit 3
+            manifest_rebuild_entity home "$id"
+        ) || rc=$?
+        case "$rc" in
+            0)
+                log_warn "Reconcile: home/$id had layers but no manifest entry — recorded again from the layers"
+                lifecycle_log "warn" "supervisor" "manifest_entry_restored" \
+                    "{\"entity\":\"home/$id\"}" 2>/dev/null || true
+                ;;
+            3)
+                log_info "Reconcile: home/$id has no manifest entry but its storage lock is held — will retry next tick"
+                ;;
+            *)
+                _reconcile_log_dedup warn manifest_entry_restore_failed "home/$id" "failed" \
+                    "{\"entity\":\"home/$id\",\"reason\":\"no usable layer or manifest damaged\"}"
+                ;;
+        esac
+    done <<< "$ids"
+}
+
 _op_reconcile() {
     local mpath
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    _manifest_heal_missing_homes
     [ -f "$mpath" ] || return 0
 
     # One shared-locked manifest generation governs this whole pass. Previously

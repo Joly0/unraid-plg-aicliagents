@@ -143,3 +143,30 @@ manifest_remove_entity() {
         exit($ok ? 0 : 1);
     ' "$1" "$2" "$_MW_BOOTSTRAP" 2>>"$_MW_STDERR"
 }
+
+# manifest_homes_missing
+#   #568: print, one per line, the home ids that have layer files in the persist
+#   folder (the configured user and every other home found there) but no entry in
+#   the manifest. Read-only. Prints nothing when php is missing or nothing is missing.
+manifest_homes_missing() {
+    command -v php >/dev/null 2>&1 || return 0
+    php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once $argv[1];
+        foreach (\AICliAgents\Services\LayerManifestService::homeIdsMissingFromManifest() as $id) echo $id, PHP_EOL;
+    ' "$_MW_BOOTSTRAP" 2>>"$_MW_STDERR"
+}
+
+# manifest_rebuild_entity <type> <id>
+#   #568/#569: record a missing entity again from the layer files on disk. The
+#   caller holds the per-entity bake lock. Returns 0 when the entity is in the
+#   manifest afterwards.
+manifest_rebuild_entity() {
+    command -v php >/dev/null 2>&1 || return 1
+    php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once $argv[3];
+        $ok = \AICliAgents\Services\LayerManifestService::rebuildEntity($argv[1] . "/" . $argv[2]);
+        exit($ok ? 0 : 1);
+    ' "$1" "$2" "$_MW_BOOTSTRAP" 2>>"$_MW_STDERR"
+}
