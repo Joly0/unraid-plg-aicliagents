@@ -1129,7 +1129,7 @@ class LayerManifestService {
             return false;
         }
 
-        // #569: there used to be an opendir()/closedir() block here that claimed to
+        // #569: there used to be a directory open/close block here that claimed to
         // fsync the parent directory. PHP cannot fsync a directory, so the block did
         // nothing and was removed. The rename is durable as far as the filesystem allows.
         return true;

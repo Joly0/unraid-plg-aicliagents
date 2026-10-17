@@ -970,8 +970,9 @@ _manifest_heal_missing_homes() {
         lockid="${id//[^a-zA-Z0-9_-]/_}"
         rc=0
         (
-            exec 9>"${AICLI_BAKE_LOCK_DIR:-/var/run}/aicli-bake-home-${lockid}.lock" || exit 2
-            flock -n 9 || exit 3
+            # Its own descriptor, never fd 9 (Bug #757 keeps fd 9 off the supervisor mutex).
+            exec {_heal_fd}>"${AICLI_BAKE_LOCK_DIR:-/var/run}/aicli-bake-home-${lockid}.lock" || exit 2
+            flock -n "$_heal_fd" || exit 3
             manifest_rebuild_entity home "$id"
         ) || rc=$?
         case "$rc" in
