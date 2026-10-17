@@ -3489,15 +3489,18 @@ _assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non
 
 _GR_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
 # Clear any stale defer-reason marker so the reason PHP reads is THIS run's truth.
-rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
+rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" \
+      "/tmp/unraid-aicliagents/.graduate_refusal_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
 
 _entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"   # UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE  # Phase 3: the LIVE generation's layer, not the id-keyed one
 
 # _gr_precondition_refuse <reason> — marker + lifecycle + exit 4 (precondition).
 _gr_precondition_refuse() {
-    local _why="$1"
-    error "Graduate precondition failed: $_why"
+    local _why="$1" _path="${2:-}" _first="${3:-}"
+    error "Graduate precondition failed: $_why${_path:+ ($_path${_first:+, first: $_first})}"
     write_defer_reason "$TYPE" "$ID" "graduate_precondition"
+    # #577: say WHY in the tray (reason code, folder, first entry in the way).
+    write_graduate_refusal "$TYPE" "$ID" "$_why" "$_path" "$_first"
     lifecycle_log "info" "graduate" "graduate_precondition_failed" \
         "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"why\":\"$_why\"}" 2>/dev/null || true
     exit 4
@@ -3661,14 +3664,15 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         if [ -z "$_GR_AGENT_GEN" ]; then
             if _gr_why="$(agent_convert_occupied "$PERSIST_PATH" "$ID")"; then
                 log "Plain folder of $ID is in the way: $_gr_why."
-                _gr_precondition_refuse "pt_dir_occupied"
+                _gr_precondition_refuse "pt_dir_occupied" "$AGC_STABLE" ""
             fi
             _GR_AGENT_GEN="$(agent_convert_gen_name)"
         fi
         _GR_PT_DIR="$AGC_VERSIONS/$_GR_AGENT_GEN"
-    elif [ -d "$_GR_PT_DIR" ] && [ -n "$(find "$_GR_PT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] \
-        && [ ! -f "$_GR_STAGING_MARKER" ] && [ ! -f "$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")" ]; then
-        _gr_precondition_refuse "pt_dir_occupied"
+    elif [ ! -f "$_GR_STAGING_MARKER" ] && [ ! -f "$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")" ] \
+        && _gr_first="$(pt_dir_first_entry "$_GR_PT_DIR")"; then
+        # #577: plugin housekeeping (".aicli/.*_done" zero-byte markers) is not data.
+        _gr_precondition_refuse "pt_dir_occupied" "$_GR_PT_DIR" "$_gr_first"
     fi
 
     _GR_SQLITE_DBS="$(detect_sqlite_dbs "$_GR_VIEW" 2>/dev/null)"
@@ -4050,11 +4054,14 @@ _GR_PT_DIR="$PERSIST_PATH/passthrough/${TYPE}s/$ID"
 _GR_STAGING_MARKER="$PERSIST_PATH/.graduate_staging_${TYPE}_${_GR_LOCK_ID}"
 _GR_INTENT_EXISTS=0
 [ -f "$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")" ] && _GR_INTENT_EXISTS=1
-if [ -d "$_GR_PT_DIR" ] && [ -n "$(find "$_GR_PT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] \
-    && [ ! -f "$_GR_STAGING_MARKER" ] && [ "$_GR_INTENT_EXISTS" -eq 0 ]; then
+if [ ! -f "$_GR_STAGING_MARKER" ] && [ "$_GR_INTENT_EXISTS" -eq 0 ] \
+    && _gr_first="$(pt_dir_first_entry "$_GR_PT_DIR")"; then
     # A populated pt dir we did NOT stage could be pre-existing user data from an
     # earlier passthrough life — never overwrite/delete it (data-safety).
-    _gr_precondition_refuse "pt_dir_occupied"
+    # #577: a folder with only the plugin's own zero-byte ".aicli/.*_done" markers
+    # is not populated. The rsync --delete below then drops the marker (the layer
+    # copy brings its own).
+    _gr_precondition_refuse "pt_dir_occupied" "$_GR_PT_DIR" "$_gr_first"
 fi
 
 _GR_SCRATCH="/tmp/unraid-aicliagents/.graduate_src_${TYPE}_${_GR_LOCK_ID}_$$"

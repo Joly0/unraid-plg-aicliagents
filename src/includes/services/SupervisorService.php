@@ -1167,7 +1167,12 @@ class SupervisorService {
                             ? self::backupFailureReason((string)($job['entity'] ?? ''), $jobId) : '';
                         if ($defer !== '') {
                             require_once __DIR__ . '/TaskService.php';
-                            $err = 'Could not finish. ' . TaskService::deferReasonHuman($defer, (string)($job['op'] ?? ''));
+                            // #577: a refused move to plain folders names the folder and the file in the way.
+                            $refusal = ($defer === 'graduate_precondition')
+                                ? TaskService::graduateRefusalText((string)($job['entity'] ?? '')) : '';
+                            $err = 'Could not finish. ' . ($refusal !== ''
+                                ? $refusal
+                                : TaskService::deferReasonHuman($defer, (string)($job['op'] ?? '')));
                         } elseif (self::isRemoveOldOp((string)($job['op'] ?? '')) && ($oldReason = OldVersionsJobService::failureReason($jobId)) !== '') {
                             $err = $oldReason;
                             OldVersionsJobService::cleanup($jobId);

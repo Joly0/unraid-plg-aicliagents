@@ -1703,6 +1703,41 @@ agent_convert_gen_name() {
     printf 'direct-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$"
 }
 
+# pt_dir_first_entry <dir> — #577. 0 (and prints the first name) when the plain
+# folder <dir> holds anything that is not plugin-owned housekeeping; 1 when it is
+# absent, empty, or holds only that housekeeping. Housekeeping is the folder
+# ".aicli" that holds nothing except zero-byte files named ".*_done" (the plugin
+# writes such a marker through the home mount, for example
+# ".autolaunch_agent_migration_done"). Any other entry, and any marker that is
+# not zero bytes, counts as the person's data.
+pt_dir_first_entry() {
+    local dir="${1%/}" e name inner
+    [ -d "$dir" ] || return 1
+    while IFS= read -r -d '' e; do
+        name="${e##*/}"
+        if [ "$name" = ".aicli" ] && [ -d "$e" ] && [ ! -L "$e" ]; then
+            # Anything below .aicli that is not a direct zero-byte marker is data.
+            inner="$(find "$e" -mindepth 2 -print -quit 2>/dev/null)"
+            [ -n "$inner" ] || inner="$(find "$e" -mindepth 1 -maxdepth 1 ! \( -type f -size 0 -name '.*_done' \) -print -quit 2>/dev/null)"
+            [ -n "$inner" ] || continue
+            printf '%s' "${inner#"$dir"/}"; return 0
+        fi
+        printf '%s' "$name"; return 0
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | sort -z)
+    return 1
+}
+
+# write_graduate_refusal <type> <id> <why> [path] [first] — #577. Records WHY a
+# graduate was refused, next to the defer-reason marker, so the Activity tray can
+# say it in plain words. Three lines: the reason code, the folder, the first entry.
+write_graduate_refusal() {
+    local type="${1:-}" id="${2:-}" why="${3:-}" path="${4:-}" first="${5:-}"
+    [ -n "$type" ] && [ -n "$id" ] || return 0
+    local safe="${id//[^a-zA-Z0-9_-]/_}"
+    printf '%s\n%s\n%s\n' "$why" "$path" "$first" \
+        > "/tmp/unraid-aicliagents/.graduate_refusal_${type}_${safe}" 2>/dev/null || true
+}
+
 # agent_convert_layout_paths <persist> <id> — sets AGC_STABLE (the stable link)
 # and AGC_VERSIONS (the folder that holds every plain version of the agent).
 agent_convert_layout_paths() {

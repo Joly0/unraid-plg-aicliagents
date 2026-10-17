@@ -131,6 +131,59 @@ class TaskService {
     }
 
     /**
+     * #577: the plain sentence for a refused move to plain folders. $why is the
+     * reason code the storage script wrote (storage_ops.sh _gr_precondition_refuse);
+     * $path and $first name the folder and the first entry in the way. An unknown
+     * code falls back to the generic sentence, so the tray never shows a raw token.
+     */
+    public static function graduateRefusalHuman(string $why, string $path = '', string $first = ''): string {
+        switch ($why) {
+            case 'pt_dir_occupied':
+                $where = $path !== '' ? "the plain folder $path" : 'the plain folder for this home';
+                $what  = $first !== '' ? " (first: $first)" : '';
+                return "Refused: $where already has files$what. Move them away, then try again. Nothing was changed.";
+            case 'keep_agents_compressed':
+                return 'Refused: the setting Keep agents compressed is on. Turn it off, then try again. Nothing was changed.';
+            case 'no_layers_to_convert':
+            case 'no_layers':
+                return 'Refused: this home has no saved layers to convert. Nothing was changed.';
+            case 'boot_disk_too_small':
+                return 'Refused: the boot disk does not have room for the plain folders. Free some space, then try again. Nothing was changed.';
+            case 'no_work_folder':
+                return 'Refused: the working folder of this home is not available. Nothing was changed.';
+            case 'engine_not_passthrough':
+            case 'device_not_passthrough':
+                return 'Refused: the storage device of this home cannot hold plain folders. Nothing was changed.';
+            case 'not_flash_entity':
+                return 'Refused: this home is already in plain folders. Nothing was changed.';
+            default:
+                return 'Refused: this home does not meet the move preconditions. Nothing was changed.';
+        }
+    }
+
+    /**
+     * #577: read the refusal detail the storage script left for $entity
+     * ("home/root"), and return the plain sentence, or '' when there is no detail.
+     * Three lines: reason code, folder, first entry. Stale files (over 24 h) are ignored.
+     */
+    public static function graduateRefusalText(string $entity): string {
+        if (strpos($entity, '/') === false) return '';
+        [$type, $id] = explode('/', $entity, 2);
+        $type = preg_replace('/[^a-z]/', '', $type);
+        $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
+        $file = "/tmp/unraid-aicliagents/.graduate_refusal_{$type}_{$safe}";
+        if (!is_file($file)) return '';
+        $mtime = @filemtime($file);
+        if ($mtime !== false && (time() - $mtime) >= 86400) return '';
+        $raw = @file_get_contents($file);
+        if ($raw === false) return '';
+        $lines = explode("\n", $raw);
+        $why = trim($lines[0] ?? '');
+        if ($why === '') return '';
+        return self::graduateRefusalHuman($why, trim($lines[1] ?? ''), trim($lines[2] ?? ''));
+    }
+
+    /**
      * SINGLE SOURCE for the human-readable "why is this deferred" string, keyed
      * by the raw defer-reason token (mount_busy, busy_cooldown, …) rather than a
      * marker file — so the activity tray, queued toasts, and the bash task
