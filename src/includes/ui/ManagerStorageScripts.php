@@ -208,6 +208,7 @@ function homeJobLabel(job) {
     if (job.state === 'queued') return { text: verb + ' — queued', title: verb + ' is queued behind another storage job.', deferred: false };
     if (job.state === 'deferred') {
         var why = { busy_cooldown: 'this home was saved less than 30 minutes ago and is still in use; the plugin retries when it is idle',
+                    upper_on_disk: 'the changes are kept on disk and go into a layer when the home is idle',
                     mount_busy: 'this home is in use; the plugin retries when it is idle' }[job.defer_reason] || 'the plugin will retry';
         return { text: verb + ' — waiting', title: verb + ' is waiting: ' + why + '.', deferred: true };
     }

@@ -3292,6 +3292,38 @@ _bake_backoff_active() {
     [ "$now" -lt "$next" ]
 }
 
+# #572: the defer reasons of a bake that skipped because the home is busy
+# (cooldown, or a durable disk upper). Such a skip is a good result, but it is
+# no save: the scheduler must not queue the home again before the cooldown ends.
+_bake_reason_is_busy_skip() {
+    case "${1:-}" in busy_cooldown|upper_on_disk) return 0 ;; esac
+    return 1
+}
+
+# _bake_attempt_file <type> <id> — "<next_epoch>": the time the scheduler may
+# queue this home again after a busy skip. NOT a save time.
+_bake_attempt_file() {
+    printf '%s/bake-attempt/%s_%s\n' "$SUPERVISOR_DIR" "${1:-}" "$(printf '%s' "${2:-}" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
+_bake_attempt_record() {
+    local f cd="${AICLI_BUSY_BAKE_COOLDOWN_SEC:-1800}"
+    case "$cd" in ''|*[!0-9]*) cd=1800 ;; esac
+    f="$(_bake_attempt_file "$1" "$2")"
+    mkdir -p "${f%/*}" 2>/dev/null || true
+    printf '%s\n' "$(( ${3:-$(date +%s)} + cd ))" > "$f" 2>/dev/null || true
+}
+
+# _bake_attempt_active <type> <id> [now] — 0 while a busy skip holds the schedule back.
+_bake_attempt_active() {
+    local f next now="${3:-}"
+    [ -n "$now" ] || now="$(date +%s)"
+    f="$(_bake_attempt_file "$1" "$2")"
+    [ -f "$f" ] || return 1
+    read -r next < "$f" 2>/dev/null || return 1
+    case "$next" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$now" -lt "$next" ]
+}
 # _bake_backoff_record <type> <id> <exit> <defer_reason> [now] — after each bake.
 _bake_backoff_record() {
     local type="${1:-}" id="${2:-}" ex="${3:-1}" reason="${4:-}" now="${5:-}"
@@ -3303,6 +3335,14 @@ _bake_backoff_record() {
     [ -f "$f" ] && read -r _ prev_misses prev_reason < "$f" 2>/dev/null
     case "$prev_misses" in ''|*[!0-9]*) prev_misses=0 ;; esac
     if _bake_result_saved "$ex" "$reason"; then
+        # #572: a busy skip saved nothing new and is not a real save. Remember the
+        # attempt so the scheduler waits out the cooldown; any other saved result
+        # clears it.
+        if [ "$ex" = "2" ] && _bake_reason_is_busy_skip "$reason"; then
+            _bake_attempt_record "$type" "$id" "$now"
+        else
+            rm -f "$(_bake_attempt_file "$type" "$id")" 2>/dev/null || true
+        fi
         if [ -f "$f" ]; then
             rm -f "$f" 2>/dev/null || true
             log_info "Automatic saves of $entity run on the normal schedule again: this save completed after $prev_misses save(s) that did not."
@@ -3351,6 +3391,11 @@ _auto_bake_enqueue() {
     local prio="${1:-99}" type="${2:-}" id="${3:-}" reason="${4:-schedule}"
     [ -n "$type" ] && [ -n "$id" ] || return 1
     _bake_backoff_active "$type" "$id" && return 1
+    # #572: after a busy skip wait out the cooldown, but never hold back a home
+    # that is idle now (an idle bake saves and trims at once).
+    if [ "$type" = "home" ] && _bake_attempt_active "$type" "$id" && ! _policy_consolidate_home_is_idle "$id"; then
+        return 1
+    fi
     _auto_bake_queued "$type" "$id" && return 1
     queue_enqueue "$prio" "$type" "$id" "bake" "$reason" 2>/dev/null || true
     return 0
