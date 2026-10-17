@@ -64,11 +64,11 @@ class StorageTargetService {
         // 2. Every pool from disks.ini (type="Cache" sections, trailing digits stripped).
         foreach ($pools as $pool) {
             if (!is_dir("$mnt/$pool")) continue;
-            $cands[] = self::candidate("$mnt/$pool", "Pool: $pool", 'pool', $kind, $config, $current);
+            $cands[] = self::candidate("$mnt/$pool/aicliagents", "Pool: $pool", 'pool', $kind, $config, $current);
         }
         // 3. User shares (FUSE — probe warns user_share) when shfs is up.
         if (is_dir("$mnt/user") && self::mounted("$mnt/user")) {
-            $cands[] = self::candidate("$mnt/user", 'User shares (/mnt/user)', 'user_share', $kind, $config, $current);
+            $cands[] = self::candidate("$mnt/user/appdata/aicliagents", 'User shares (/mnt/user)', 'user_share', $kind, $config, $current);
         }
         // 4. UD devices — /mnt/addons (UD-blessed plugin paths) before /mnt/disks.
         foreach (['addons' => 'ud_addons', 'disks' => 'ud_disk'] as $dir => $src) {
@@ -83,7 +83,7 @@ class StorageTargetService {
         foreach (self::subdirs($mnt) as $d) {
             if (!preg_match('/^disk\d+$/', basename($d))) continue;
             if (!self::mounted($d)) continue;
-            $cands[] = self::candidate($d, 'Array disk: ' . basename($d), 'array_disk', $kind, $config, $current, true);
+            $cands[] = self::candidate("$d/aicliagents", 'Array disk: ' . basename($d), 'array_disk', $kind, $config, $current, true);
         }
         // 6. Network remotes — discover from /proc mount metadata and NEVER
         // touch the mounted filesystem here. A dead hard NFS/CIFS mount can put
@@ -322,6 +322,18 @@ class StorageTargetService {
      */
     public static function validateTarget(string $kind, string $path, array $config): array {
         $kind = ($kind === 'agent') ? 'agent' : 'home';
+        // #563: refuse a NEW save of a bare root (/mnt/<pool>, /mnt/user,
+        // /mnt/diskN, a UD device top folder). Callers run this only for a path that
+        // differs from the saved one, so an old saved value still loads. Network
+        // paths keep their own per-kind policy below.
+        if (strncmp($path, '/mnt/remotes', 12) !== 0) {
+            require_once __DIR__ . '/StoragePathResolver.php';
+            $shape = StoragePathResolver::validatePersistPath($path, $kind);
+            if (empty($shape['ok'])) {
+                return ['ok' => false, 'warnings' => ['invalid_persist_path'], 'resolved_path' => null,
+                    'message' => "Persistence path '$path' is not allowed: " . (string)($shape['reason'] ?? 'invalid path')];
+            }
+        }
         // Issue #56: /mnt/user may exist as an ordinary rootfs stub before
         // shfs is mounted. Never probe or approve a future mkdir beneath it.
         if (!StorageMountService::isBackingMountAvailable($path)) {
