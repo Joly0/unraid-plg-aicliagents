@@ -61,7 +61,7 @@ The first time you open the AI CLI Agents tab, a window called **Welcome to AI C
 | Step | Title | What it tells you |
 | :-- | :-- | :-- |
 | 1 | **Where does your agent data live?** | The plugin keeps the data of the agents and your home on the flash drive by default. A cache drive gives faster disk access and less wear on the flash drive. If the plugin finds a better place, a box shows **Recommended** with the folder and the free space. If it finds none, the step says that the flash drive is the only available target. |
-| 2 | **Copy-Paste in the terminal** | The three ways to copy and paste: the agent copies text for you, the paste button sends your clipboard to the terminal, and Shift plus drag selects text with the browser. |
+| 2 | **Copy-Paste in the terminal** | The three ways to copy and paste: the agent copies text for you, the paste icon of the drawer (or the Paste key on a phone) sends your clipboard to the terminal, and Shift plus drag selects text with the browser. |
 | 3 | **First-launch authentication** | A list of the installed agents that need a one-time sign-in, each with its icon and a hint. |
 
 Use the buttons at the bottom of the window.
@@ -77,7 +77,7 @@ A click outside the window does not close it. You must press **Finish** or **Don
 On step 1, the link **Agent Settings → Config tab** opens the Settings page on the Configuration tab. The link leaves the wizard unfinished. The wizard opens again the next time you open the AI CLI Agents tab. On a phone the window uses the full width and its buttons are 44 pixels high.
 
 > [!NOTE]
-> Step 2 mentions a Paste button and a Mouse toggle at the top right of the terminal. In the current page, paste is the clipboard icon on the drawer tab (or in the icon row of a pinned drawer). The page has no Mouse toggle. The mouse behaviour of tmux (the session manager that keeps a terminal alive on the server) is the option **Mouse mode** in the **tmux** tab of **Session settings**. The guide [The terminal](terminal.md) explains copy and paste in full.
+> Step 2 names the paste controls that exist now. Paste is the clipboard icon on the drawer tab (or in the icon row of a pinned drawer). The page has no Mouse toggle. The mouse behaviour of tmux (the session manager that keeps a terminal alive on the server) is the option **Mouse mode** in the **tmux** tab of **Session settings**. The guide [The terminal](terminal.md) explains copy and paste in full.
 
 ### Start your first workspace
 

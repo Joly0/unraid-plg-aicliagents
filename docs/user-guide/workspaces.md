@@ -109,7 +109,7 @@ Each open workspace has one row in the drawer. Select a row to show that workspa
 
 Long names. A name that does not fit ends in "...". Point at the row, and the name scrolls once to its end. The tooltip shows the full name. If you set your computer to reduce motion, nothing scrolls and the tooltip shows the name.
 
-Details card. Point at a row for about three quarters of a second. A card opens at the side of the drawer. It shows the status (**Running** or **Stopped**), the path, the agent, the session id, the time of creation, the time of the last activity and the saved conversation. When the terminal of a workspace is stale, the card also shows two buttons. See "Move a workspace onto the current version".
+Details card. Point at a row for about three quarters of a second. A card opens at the side of the drawer. It shows the status (**Running** or **Stopped**), the path, the agent, the session id, the time of creation, the time of the last activity and the saved conversation, with a small **RESET** button that works like **Restart as new**: it asks first, then starts the workspace again as a new conversation. When the terminal of a workspace is stale, the card also shows two buttons. See "Move a workspace onto the current version".
 
 Order. Drag a row up or down to put it in another place. You can also use **Move up** and **Move down** in the row menu, or press Alt plus the up or down arrow on a row. The page saves the order. A touch screen may not support dragging, so use the row menu there.
 

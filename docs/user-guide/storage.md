@@ -64,7 +64,7 @@ The **Home Storage** tab has a bar at the top, **System Resources**, with the la
 Pick a place for **Home Storage** and **Agent Storage** in this order:
 
 1. **A cache pool path**, for example `/mnt/cache/appdata/aicliagents`. This is the fastest and safest choice. The picker marks it **recommended** when it is open to you.
-2. **An Unassigned Devices path**, for example `/mnt/disks/mydrive/aicliagents`. Use this when you have a spare drive that is not in the array or a pool. Use a folder inside the device. The plugin refuses the top folder of the device itself.
+2. **An Unassigned Devices path**, for example `/mnt/disks/mydrive/aicliagents`. Use this when you have a spare drive that is not in the array or a pool. Use a folder inside the device. The plugin refuses the top folder of the device itself, so the storage picker lists each drive as its `aicliagents` folder.
 3. **A single array disk**, for example `/mnt/disk1`. This works, but the disk spins up on every save. The picker lists array disks as **advanced**.
 4. **`/mnt/user`**, a user share. Use it only when none of the other places is open to you. For example, you have no cache pool and no spare drive, and your share spans more than one disk.
 5. **The USB flash drive.** This is the fallback and the default on a fresh install. It works everywhere, but it wears. The picker lists it near the end.
@@ -184,7 +184,7 @@ The setting applies when the persistence engine is **SquashFS layers + zram (rec
 
 Any other way to close the warning cancels the change. **Cancel** and the Escape key put the setting back to its saved value. A click outside the warning does not close it. The setting shows the new value while the warning is open. It goes back when you cancel.
 
-If a home cannot move, the plugin puts the setting back. It shows **Not moved** with the name of the home and the reason, for example that the home is in use or that there is no room. Your data stays where it was.
+If a home cannot move, the plugin puts the setting back. It shows **Not moved** with the name of the home and the reason, for example that the home is in use or that there is no room. If the old writable layer still holds changes that the save did not capture, the reason says so. A chat file that the save stored in a layer no longer blocks the move. Your data stays where it was.
 
 ## The home storage card
 
@@ -224,6 +224,8 @@ All four icons lock while a job runs on that home. The lock comes from the serve
 3. Watch the Activity tray at the bottom right. A pill shows the job: queued, running, done.
 
 A save does not close anything. If workspaces are still open, the memory number may stay high after the save. The data is safe on disk. The tray then says "Saved to flash — ~N MB stays in RAM until this home's open sessions close." The plugin frees that memory when the last workspace of the home closes.
+
+If the home has no changes since the last save, the message is **Nothing to save**. This is a neutral message, not a success and not an error. The Activity tray says the same for a save that waited in the queue.
 
 A second save inside 30 minutes of the last one waits. The card shows "Saving — waiting". When the wait ends, the tray says "Already saved." with the reason. This is not a failure.
 
@@ -471,10 +473,12 @@ Emergency Mode lets you keep working when storage is missing, for example when t
 
 When storage is missing, the terminal page shows a yellow panel **Storage Unavailable**. The drawer button changes from **New Workspace** to **Emergency Session**.
 
-- If agent storage is still there, the panel shows **Start Emergency Session**. It opens a workspace with a temporary home.
+- If agent storage is still there, the panel shows **Start Emergency Session**. It opens a workspace with a temporary home. Above the button the panel says: "Work done in an emergency session is temporary. It is lost when storage returns."
 - If agent storage is missing too, the panel shows a list of agents and the button **Install to RAM**. The plugin installs the chosen agent into RAM and starts a session at once. OpenCode is the suggested choice, because it needs no sign-in and includes free models. The installed agent is lost when the array starts again.
 
-A yellow banner shows in the session: "Emergency Mode — Temporary home, changes will not be saved. When storage returns this session will close and your saved state will be restored."
+A yellow banner shows in the session: "Emergency Mode — Temporary home. Work done here is not saved and is lost when storage returns. When storage returns this session closes and your saved state is restored."
+
+If you press **Persist** while the session runs on the temporary home, the plugin shows the warning **Not saved**. It does not save the temporary home.
 
 When the storage returns, the page reloads by itself. Copy anything you need out of the temporary session before that.
 
@@ -557,6 +561,8 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 | "Path must include a sub-directory under the Unassigned Device mount" | You chose the top folder of an Unassigned Devices drive. | Create a folder on the drive, for example `aicliagents`, and choose that folder. |
 | **Storage Unavailable** on the terminal page | The array is stopped, or the drive is gone. | Start the array or plug in the drive, or use **Emergency Session**. |
 | A full-page **Storage Attention Needed** card | The start-up check found a mismatch. | See the table in the halt section. Do not choose **Start fresh** before you try **Restore from** and a backup. |
+| An Unraid notice "AICliAgents: a saved layer of your home was damaged" | The newest saved layer of the home is empty or is not a valid file. The plugin moved it to the folder `.bad` inside the storage folder and started the home without it. Only the changes saved in that layer are missing. The file is not deleted. | Check your recent work. Keep the file in `.bad` until you are sure that you do not need it. |
+| A workspace does not start and the Debug Console says "Layer … cannot be mounted" | One saved layer of the home cannot be read. The message names the layer and the reason. The plugin does not skip a layer in the middle of the stack, because the newer layers depend on it. The file is not changed. | Ask for help on the forum and give the layer name. Do not delete the file. |
 | A Health warning about pinned space | Old layers hold disk space. | Restart the workspaces that the text names, or restart the server. |
 | A card **Legacy Migration Artifacts** shows on the **Home Storage** tab | Old files from a past storage conversion are still on disk. | Check that your agents and workspaces work. Then press **Purge All Artifacts**. This deletes the files for good. |
 
@@ -572,6 +578,9 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-17** — A save that finds no changes now says **Nothing to save**, not "Persisted". A save in an Emergency Session says **Not saved**, because the work is lost. The panel **Storage Unavailable** and the Emergency Session banner both say the work is lost. Spec `docs/specs/STORAGE_FAILURE_CASE_INTERNALIZATION.md`, issues #567 and #570.
+- **2026-10-17** — A damaged newest saved layer of a home is moved to the folder `.bad` and the home starts without it, with an Unraid notice; any other layer that cannot be mounted stops the start and the Debug Console names the layer and the reason. Spec `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issue #566.
+- **2026-10-17** — The storage picker offers a folder inside each pool, user share and array disk (for example `/mnt/cache/aicliagents`), not the bare disk. A new storage location that is a bare disk or pool is refused with a message that asks for a sub-folder. A location you saved earlier keeps working. Spec `docs/specs/STORAGE_TARGET_PICKER.md`, issue #563.
 - **2026-10-16** — The Boot disk space card warns when agent temporary files in RAM are large, and offers **Clean up temporary files of closed sessions**. Spec `docs/specs/AGENT_TEMP_FOLDER.md`, issue #554.
 - **2026-10-16** — The dialogs of the card **Boot disk space** show the time of the numbers they use and offer **Measure now** when the numbers are old. They no longer measure the disk. **Remove old versions** runs as a job with steps in the Activity tray. The measure has a time limit of 5 minutes. Spec `docs/specs/BOOT_DISK_SPACE.md` (Implementation notes #552), issue #552.
 - **2026-10-16** — New: the card **Boot disk space** at the top of the **Home Storage** tab shows where the boot disk space goes, with one line and one button for each part, **Measure now**, and **Remove** for left-over items. The full-disk warning now names the biggest part and ends with "Open Home Storage, Boot disk space." Spec `docs/specs/BOOT_DISK_SPACE.md` (R1, R2), issues #538 and #531.

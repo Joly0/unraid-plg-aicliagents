@@ -262,6 +262,8 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 | An agent says that voice is off. | The global switch is off. The agent can not turn it on. | Turn on the speaker icon in the drawer. |
 | An agent says that its workspace is muted. | The workspace is set to **Off**. | Choose **Speak** in the workspace's **Voice** menu. |
 | The agent's tool says that plugin management is off. | **Plugin management tools** is off. | Turn it on in **Settings, Configuration**. |
+| When you dictate, a note says "The speech-to-text server is not answering, so your browser is recognising your speech instead." | The transcription engine is stopped or does not answer. The plugin moved this recording to your browser's own recognition. The words you said before the switch are not typed. | Start the engine (see **Local dictation** in **Settings, Configuration, Agent voice**). The next recording uses the engine again when it answers. |
+| The microphone icon keeps pulsing after you stop. | Older versions kept the pulsing look until the last piece was transcribed. | Reload the page after the update. The icon now changes to the spinner at once, and goes back to normal when the text is typed. |
 | The voice sounds like the browser, but you set up an engine. | The engine did not answer, so the browser voice took over. **Health** shows a warning. | Check that the container runs on the Docker tab, then press **Test**. |
 | The setup says "Docker is turned off". | Docker is off in Unraid. | Turn on Docker in **Settings, Docker**. |
 | The Kokoro container keeps stopping. | See the last log line in the card. "Permission denied" means the model cache path is wrong. | Remove the **Model cache** path in the container settings. |

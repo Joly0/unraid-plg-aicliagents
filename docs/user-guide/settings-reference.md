@@ -143,7 +143,7 @@ The Notebook settings are for people. No agent can change any of them. See [The 
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
-| **Notebook** | Shows the Notebook drawer beside the terminal, and turns on the tools that let an agent put pages in it. Off hides the drawer and refuses the tools. Nothing is deleted. | On (default) | On (default); Off | Turn it off when you do not use the Notebook. | Saves. Reload the page to see the drawer appear or go. | No |
+| **Notebook** | Shows the Notebook drawer beside the terminal, and turns on the tools that let an agent put pages in it. Off hides the drawer and refuses the tools. Nothing is deleted. This switch is enough on its own: agents get the Notebook tools, the guide and the rules text with **Plugin management tools** off. | On (default) | On (default); Off | Turn it off when you do not use the Notebook. | Saves. Reload the page to see the drawer appear or go. | No |
 | **Show the Wiki as its own page** | Adds a Wiki item to the Tasks menu. You read and edit the Notebook of a project there, without a terminal. | Off (default) | On; Off (default) | Turn it on to read the wiki from a normal Unraid page. | Saves. The menu item shows after you reload the page. | No |
 | **Open the Notebook when an agent asks** | When an agent adds a page and asks to show it, the drawer opens for you. With No, the Notebook button only shows a badge. | No (default) | Yes; No (default) | Choose Yes when you want pages to appear without a click. | Saves. | No |
 | **Notebook folder name** | Sets the folder, inside each project folder, that holds its notebook. | notebook | Letters, digits, dot, dash and underscore. Up to 40 characters. It cannot start with a dot and cannot be "assets" | Change it when your project already uses the folder name "notebook". | Saves. A name that is not allowed keeps the old name. An existing notebook does not move. | No |
@@ -307,7 +307,7 @@ See [Config Hub](config-hub.md). The hub keeps one copy of your MCP servers, glo
 
 ## Agent Relay tab
 
-See [Agent Relay](relay.md). The tab opens with a status line, then shows a short note: agents share updates and send each other work requests through a shared mailbox. Messages go to each workspace's inbox. They are never typed into a running terminal. The sections below open and close. Relay is on from the first install.
+See [Agent Relay](relay.md). The tab opens with a status line, then shows a short note: agents share updates and send each other work requests through a shared mailbox. Messages go to each workspace's inbox. The plugin types a short notice into the agent's terminal so it reads the inbox; the wording is a setting on the Configuration tab. The sections below open and close. Relay is on from the first install.
 
 | Section and setting | What it does | Default | Allowed values | When to change it | At once |
 | :-- | :-- | :-- | :-- | :-- | :-- |

@@ -303,7 +303,7 @@ These settings are on the **Configuration** tab, in the **Notebook** card. Only 
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Notebook** | Shows or hides the Notebook drawer and the agent tools. **Off** hides the drawer and refuses the tools. Nothing is deleted. | On | Turn it off when you do not want agents to use a Notebook. Reload the page after the change. |
+| **Notebook** | Shows or hides the Notebook drawer and the agent tools. **Off** hides the drawer and refuses the tools. Nothing is deleted. You do not need **Plugin management tools** for agents to use the Notebook. | On | Turn it off when you do not want agents to use a Notebook. Reload the page after the change. |
 | **Show the Wiki as its own page** | Adds a **Wiki** item to the Tasks menu. | Off | Turn it on to read the wiki without a terminal. See [The wiki](wiki.md). |
 | **Open the Notebook when an agent asks** | Opens the drawer when an agent adds a note and asks to show it. | No | Turn it on when you want to see notes at once. With **No**, the tab shows a dot only. |
 | **Notebook folder name** | The folder in each project that holds the notebook. Letters, digits, dot, dash and underscore. Up to 40 characters. | notebook | Change it only before you use the Notebook. A change does not move an existing notebook. |
