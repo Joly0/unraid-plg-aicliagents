@@ -822,15 +822,21 @@ try {
             // "Tier 3 only ever proposes" in this whole file — it is how the
             // plugin's OWN home-backup cron (BackupCronService) calls in, not a
             // path an agent tool call can reach. See the header docblock.
-            $bhUser = (string)($argv[2] ?? '');
+            // #489: the cron line writes `backup-home --user=<name> --scheduled`;
+            // the hand-typed form is `backup-home <name> ...`. Accept both. Before
+            // this the user was read as the plain argument, so cron backed up a
+            // user named "--user=root" and failed (invalid_user) every time.
+            $bhUser = '';
             $bhQuiesce = null;
             $bhTarget = null;
             $bhScheduled = false;
-            foreach (array_slice($argv, 3) as $a) {
+            foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
+                if (preg_match('/^--user=(.*)$/', $a, $m)) { $bhUser = $m[1]; continue; }
                 if (preg_match('/^--quiesce=(.*)$/', $a, $m)) { $bhQuiesce = $m[1]; continue; }
                 if (preg_match('/^--target=(.*)$/', $a, $m)) { $bhTarget = $m[1]; continue; }
                 if ($a === '--scheduled') { $bhScheduled = true; continue; }
+                if (strpos($a, '--') !== 0 && $bhUser === '') { $bhUser = $a; continue; }
             }
             if ($bhScheduled && runningInsideAgentWorkspace()) {
                 $result = ['status' => 'error', 'message' => "backup-home --scheduled is the plugin's own cron calling in, not an agent tool — it refuses from inside an agent workspace. Use aicli_backup_home instead, or run this from the Manager's own scheduled job."];
@@ -843,6 +849,11 @@ try {
                 // The CLI bootstrap loads services, not the AJAX handlers: load the one we call.
                 if (!class_exists('\AICliAgents\Handlers\StorageHandler')) { require_once __DIR__ . '/../includes/handlers/StorageHandler.php'; }
                 $result = \AICliAgents\Handlers\StorageHandler::backupHome($bhUser, $bhOpts);
+                // The cron line sends stdout to /dev/null, so a failed scheduled
+                // run must leave its own record (#489).
+                if (($result['status'] ?? '') === 'error') {
+                    \AICliAgents\Services\LogService::log("Scheduled home backup for '$bhUser' failed: " . (string)($result['message'] ?? 'unknown error'), \AICliAgents\Services\LogService::LOG_ERROR, 'BackupCronService');
+                }
             } else {
                 $result = AdminMcpTools::call('aicli_backup_home', array_merge(['user' => $bhUser], $bhOpts));
             }
