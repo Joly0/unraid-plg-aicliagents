@@ -1597,13 +1597,19 @@
     .hb-ok { color: color-mix(in srgb, #16a34a 50%, var(--text-color, #1c1c1c)); }
     .storage-entity-card .se-backup-running .se-backup-status { color: color-mix(in srgb, #ff8c00 45%, var(--text-color, #1c1c1c)); }
 
+    /* SIDEBAR_THEME_LAYOUT.md (#560): on the sidebar themes Unraid's fixed menu
+       covers the left of the window. The dim layer still covers the whole
+       window, but its padding keeps the dialog right of the menu
+       (--aicli-content-left/-right are 0px on the top-menu themes). */
     .hb-backdrop {
         position: fixed; inset: 0; z-index: 10004;
         display: flex; align-items: center; justify-content: center;
         background: rgba(0,0,0,0.5);
+        box-sizing: border-box;
+        padding-left: var(--aicli-content-left, 0px); padding-right: var(--aicli-content-right, 0px);
     }
     .hb-dialog {
-        width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 48px);
+        width: min(560px, calc(100vw - 32px - var(--aicli-content-left, 0px) - var(--aicli-content-right, 0px))); max-height: calc(100dvh - 48px);
         display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden;
         background: var(--background-color, #fff); color: var(--text-color, inherit);
         border: 1px solid var(--border-color, #ccc); border-radius: 8px;
