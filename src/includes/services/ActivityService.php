@@ -236,6 +236,73 @@ class ActivityService {
     }
 
     /**
+     * #571: run a long shell command and keep the tray entry alive while it runs.
+     *
+     * A bake (mksquashfs onto the boot disk) can run for many minutes and writes
+     * nothing the parent sees. A plain exec() left heartbeatAt still, and after
+     * STALL_SECONDS the tray said "stalled" for a healthy job. This runs the
+     * command with proc_open and, every $interval seconds while the child process
+     * is alive, refreshes the heartbeat of $opId. When the bake reports a percentage
+     * (the file named in AICLI_BAKE_PCT_FILE, written by atomic_write_layer.sh),
+     * the step text carries it. When the child ends or dies, the heartbeats stop,
+     * so a really dead bake still turns "stalled" by the normal watchdog.
+     *
+     * $opId may be null or name no entry (a heartbeat on a missing entry is a no-op).
+     * Returns [exit code, output lines]; only stdout is read; the caller adds its own
+     * stderr redirect to $cmd (2>&1 or 2>/dev/null), as it did with exec().
+     *
+     * @return array{0:int,1:array<int,string>}
+     */
+    public static function runWatched(string $cmd, ?string $opId, int $interval = 15, string $stepWords = ''): array {
+        $pctFile = tempnam(sys_get_temp_dir(), 'aicli-bakepct-');
+        if ($pctFile === false) $pctFile = '';
+        $env = $pctFile !== '' ? 'export AICLI_BAKE_PCT_FILE=' . escapeshellarg($pctFile) . '; ' : '';
+        $proc = @proc_open($env . $cmd, [1 => ['pipe', 'w']], $pipes);
+        if (!is_resource($proc)) {
+            if ($pctFile !== '') @unlink($pctFile);
+            return [127, []];
+        }
+        stream_set_blocking($pipes[1], false);
+        $buf = '';
+        $rc = -1;
+        $lastBeat = time();
+        $lastPct = -1;
+        while (true) {
+            $r = [$pipes[1]]; $w = null; $e = null;
+            @stream_select($r, $w, $e, 1);
+            $chunk = @stream_get_contents($pipes[1]);
+            if (is_string($chunk) && $chunk !== '') $buf .= $chunk;
+            $st = proc_get_status($proc);
+            if (!$st['running']) {
+                if ($st['exitcode'] !== -1) $rc = (int)$st['exitcode'];
+                break;
+            }
+            if ($opId !== null && (time() - $lastBeat) >= $interval) {
+                $lastBeat = time();
+                $pct = -1;
+                if ($pctFile !== '') {
+                    $raw = trim((string)@file_get_contents($pctFile));
+                    if ($raw !== '' && ctype_digit($raw)) $pct = min(100, (int)$raw);
+                }
+                if ($pct >= 0 && $stepWords !== '' && $pct !== $lastPct) {
+                    $lastPct = $pct;
+                    self::update($opId, ['step' => $stepWords . ' (' . $pct . '%)']);
+                } else {
+                    self::heartbeat($opId);
+                }
+            }
+        }
+        $tail = @stream_get_contents($pipes[1]);
+        if (is_string($tail)) $buf .= $tail;
+        fclose($pipes[1]);
+        $closeRc = proc_close($proc);
+        if ($rc === -1) $rc = $closeRc;
+        if ($pctFile !== '') @unlink($pctFile);
+        $lines = $buf === '' ? [] : explode("\n", rtrim($buf, "\n"));
+        return [$rc, $lines];
+    }
+
+    /**
      * Terminal success: status done, progress 100. The step stays empty unless the
      * caller has a result that carries information ("Checked 14 agents in 6 s"):
      * the DONE pill already says it is done, and a leftover step would be stale.

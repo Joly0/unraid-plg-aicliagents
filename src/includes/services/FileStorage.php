@@ -510,7 +510,16 @@ final class FileStorage
         $out = [];
         $exit = 1;
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec($cmd . ' 2>/dev/null', $out, $exit);
+        // #571: a bake or merge can run for minutes with no output. Keep the install's
+        // tray entry alive while the process lives (a no-op when no such entry exists).
+        if ($verb === 'bake' || $verb === 'consolidate') {
+            require_once __DIR__ . '/ActivityService.php';
+            [$exit, $out] = \AICliAgents\Services\ActivityService::runWatched(
+                $cmd . ' 2>/dev/null', $type === 'agent' ? "install_$id" : null, 15, 'Baking SquashFS delta');
+        } else {
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            exec($cmd . ' 2>/dev/null', $out, $exit);
+        }
         $json = json_decode(implode("\n", $out), true);
         return [$exit, is_array($json) ? $json : []];
     }

@@ -1113,10 +1113,12 @@ class StorageMountService {
         $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
         $out = [];
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
+        // #571: the bake can run for minutes. Keep the install's tray entry alive
+        // (and show the percent) while the bake process lives.
+        [$res, $out] = ActivityService::runWatched(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
             . " bake --type agent --id " . escapeshellarg($agentId)
             . " --persist " . escapeshellarg($persistPath)
-            . " --staged 2>&1", $out, $res);
+            . " --staged 2>&1", "install_$agentId", 15, 'Baking SquashFS delta');
         if ((int)$res !== 0 && (int)$res !== 2) {
             LogService::log("bakeStagedInstall($agentId): failed (exit $res): " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
         }
@@ -1232,7 +1234,9 @@ class StorageMountService {
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'consolidate_start', ['type' => $type, 'id' => $id, 'old_size_mb' => $oldSizeMB]);
         // R-06: trace env prefix (see ensureAgentMounted).
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script) . " consolidate --type " . escapeshellarg($type) . " --id " . escapeshellarg($id) . " --persist " . escapeshellarg($persistPath), $out, $res);
+        // #571: keep the tray entry of an agent install alive while the merge runs.
+        [$res, $out] = ActivityService::runWatched(TraceContext::shellPrefix() . "bash " . escapeshellarg($script) . " consolidate --type " . escapeshellarg($type) . " --id " . escapeshellarg($id) . " --persist " . escapeshellarg($persistPath),
+            $type === 'agent' ? "install_$id" : null, 15, 'Merging layers');
 
         if ($res === 0) {
             $newSize = 0;

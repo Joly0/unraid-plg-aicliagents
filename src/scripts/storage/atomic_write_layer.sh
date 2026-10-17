@@ -255,7 +255,16 @@ atomic_write_layer() {
         # last number to the hook function every 5 seconds. A failure of the
         # watcher never fails the bake.
         local _awl_prog_file="" _awl_watch_pid=""
-        if [ -n "${AICLI_BAKE_PROGRESS_HOOK:-}" ] && declare -f "$AICLI_BAKE_PROGRESS_HOOK" >/dev/null 2>&1; then
+        # #571: AICLI_BAKE_PCT_FILE asks for the percentage in a file, so the PHP
+        # parent that waits for the bake can show it and keep the tray heartbeat alive.
+        local _awl_hook_ok=0
+        if [ -n "${AICLI_BAKE_PROGRESS_HOOK:-}" ] && declare -f "$AICLI_BAKE_PROGRESS_HOOK" >/dev/null 2>&1; then _awl_hook_ok=1; fi
+        _awl_report_pct() {
+            [ "$_awl_hook_ok" = 1 ] && { "$AICLI_BAKE_PROGRESS_HOOK" "$1" 2>/dev/null || true; }
+            [ -n "${AICLI_BAKE_PCT_FILE:-}" ] && { printf '%s' "$1" > "$AICLI_BAKE_PCT_FILE" 2>/dev/null || true; }
+            return 0
+        }
+        if [ "$_awl_hook_ok" = 1 ] || [ -n "${AICLI_BAKE_PCT_FILE:-}" ]; then
             _awl_prog_file="${tmp_path}.progress"
             : > "$_awl_prog_file" 2>/dev/null || _awl_prog_file=""
         fi
@@ -269,7 +278,7 @@ atomic_write_layer() {
                 while :; do
                     sleep "${AICLI_BAKE_PROGRESS_INTERVAL:-5}"
                     _awl_pct="$(_awl_last_percent "$_awl_prog_file")"
-                    [ -n "$_awl_pct" ] && "$AICLI_BAKE_PROGRESS_HOOK" "$_awl_pct" 2>/dev/null
+                    [ -n "$_awl_pct" ] && _awl_report_pct "$_awl_pct"
                 done
             ) > /dev/null 2>&1 &
             _awl_watch_pid=$!
@@ -288,7 +297,7 @@ atomic_write_layer() {
         fi
         if [ -n "$_awl_prog_file" ]; then
             _awl_pct="$(_awl_last_percent "$_awl_prog_file")"
-            [ -n "$_awl_pct" ] && "$AICLI_BAKE_PROGRESS_HOOK" "$_awl_pct" 2>/dev/null
+            [ -n "$_awl_pct" ] && _awl_report_pct "$_awl_pct"
         fi
         if [ "$_awl_mksq_rc" -ne 0 ]; then
             # #490: keep mksquashfs's own message. Read it before the temp file goes.
