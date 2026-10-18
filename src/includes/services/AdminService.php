@@ -2216,62 +2216,49 @@ class AdminService {
         try {
             $id = (string)($params['id'] ?? '');
             if ($id === '') return ['error' => 'This pending item has no workspace id recorded.'];
-
-            // Serialize removal with every start, close and restart for this id.
-            // The lock is re-entrant, so graceful_close below can use its normal path.
-            if (!SessionLaunchLock::acquire($id, SessionLaunchLock::CLOSE_WAIT_SECONDS)) {
-                return ['error' => 'This workspace is still starting, closing or restarting. Try the delete again in a moment.'];
+            $session = self::findSession($id);
+            if ($session === null) {
+                return ['error' => "Workspace '$id' no longer exists; nothing to delete."];
             }
+
             try {
-                $session = self::findSession($id);
-                if ($session === null) {
-                    return ['error' => "Workspace '$id' no longer exists; nothing to delete."];
+                $actor = AgentRelayService::actorStatus($id);
+                if (!empty($actor['is_actor']) && empty($actor['paused'])) {
+                    AgentRelayService::pauseActorWorkspace($id);
                 }
-
-                try {
-                    $actor = AgentRelayService::actorStatus($id);
-                    if (!empty($actor['is_actor']) && empty($actor['paused'])) {
-                        AgentRelayService::pauseActorWorkspace($id);
-                    }
-                } catch (\Throwable $e) {
-                    // Best-effort — a Relay fault must not block the delete itself.
-                }
-
-                $workspaces = ConfigService::getWorkspaces();
-                $remaining = array_values(array_filter(
-                    $workspaces['sessions'] ?? [],
-                    static fn($w): bool => is_array($w) && (string)($w['id'] ?? '') !== $id
-                ));
-                $ok = ConfigService::saveWorkspaces(['sessions' => $remaining, 'activeId' => $workspaces['activeId'] ?? null], [$id]);
-                if (!$ok) {
-                    return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the workspace removal.'];
-                }
-
-                // Publish the deletion before close completes. A stale browser tab may
-                // request start as soon as it sees the agent stop; the registry check
-                // in TerminalService then refuses that id while this lock is held.
-                if (ProcessManager::isRunning($id)) {
-                    \AICliAgents\Handlers\TerminalHandler::handle('graceful_close', $id);
-                }
-
-                try { AgentRelayService::forgetSessionRelayTraces($id); }
-                catch (\Throwable $e) { /* best-effort cleanup, same as UtilityHandler::saveWorkspaces() */ }
-
-                // This delete path goes through ConfigService::saveWorkspaces() directly,
-                // not the save_workspaces AJAX action — UtilityHandler::saveWorkspaces()'s
-                // own event-subscription sweep never runs for it, so sweep here too.
-                if (class_exists('\\AICliAgents\\Services\\EventSubscriptionStore')) {
-                    try { EventSubscriptionStore::reapStale(array_column($remaining, 'id')); }
-                    catch (\Throwable $e) { /* best-effort, same as the Relay-trace cleanup above */ }
-                }
-
-                try { AgentRelayService::reAdoptOwnersByIdentity(); }
-                catch (\Throwable $e) { /* best-effort, same as UtilityHandler::saveWorkspaces() */ }
-
-                return ['id' => $id, 'name' => (string)($session['name'] ?? $id)];
-            } finally {
-                SessionLaunchLock::release($id);
+            } catch (\Throwable $e) {
+                // Best-effort — a Relay fault must not block the delete itself.
             }
+
+            if (ProcessManager::isRunning($id)) {
+                \AICliAgents\Handlers\TerminalHandler::handle('graceful_close', $id);
+            }
+
+            try { AgentRelayService::forgetSessionRelayTraces($id); }
+            catch (\Throwable $e) { /* best-effort cleanup, same as UtilityHandler::saveWorkspaces() */ }
+
+            $workspaces = ConfigService::getWorkspaces();
+            $remaining = array_values(array_filter(
+                $workspaces['sessions'] ?? [],
+                static fn($w): bool => is_array($w) && (string)($w['id'] ?? '') !== $id
+            ));
+            $ok = ConfigService::saveWorkspaces(['sessions' => $remaining, 'activeId' => $workspaces['activeId'] ?? null], [$id]);
+            if (!$ok) {
+                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the workspace removal.'];
+            }
+
+            // This delete path goes through ConfigService::saveWorkspaces() directly,
+            // not the save_workspaces AJAX action — UtilityHandler::saveWorkspaces()'s
+            // own event-subscription sweep never runs for it, so sweep here too.
+            if (class_exists('\\AICliAgents\\Services\\EventSubscriptionStore')) {
+                try { EventSubscriptionStore::reapStale(array_column($remaining, 'id')); }
+                catch (\Throwable $e) { /* best-effort, same as the Relay-trace cleanup above */ }
+            }
+
+            try { AgentRelayService::reAdoptOwnersByIdentity(); }
+            catch (\Throwable $e) { /* best-effort, same as UtilityHandler::saveWorkspaces() */ }
+
+            return ['id' => $id, 'name' => (string)($session['name'] ?? $id)];
         } catch (\Throwable $e) {
             return self::failure('executeApprovedDeleteWorkspace', $e);
         }

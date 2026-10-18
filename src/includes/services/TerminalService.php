@@ -25,10 +25,9 @@ class TerminalService {
      * the same conversation: two `claude --resume <id>` processes in two tmux
      * servers, one of them invisible. See docs/specs/WORKSPACE_RELOAD_ONTO_CURRENT.md.
      *
-     * #611: returns ['ok' => bool, 'reason' => string]. A refused start (lock timeout, unknown
-     * workspace, path unavailable, array stopping, unknown agent, no terminal server, failed
-     * mount, ensure-session timeout, no ttyd socket) is ok=false, so a caller can tell it from a
-     * start that worked.
+     * #611: returns ['ok' => bool, 'reason' => string]. A refused start (lock timeout, path
+     * unavailable, array stopping, unknown agent, no terminal server, failed mount, ensure-session
+     * timeout, no ttyd socket) is ok=false, so a caller can tell it from a start that worked.
      * $lockWaitSeconds lets a web request wait less than the request time limit.
      * @return array{ok:bool,reason:string}
      */
@@ -38,10 +37,6 @@ class TerminalService {
             return ['ok' => false, 'reason' => 'lock_timeout'];
         }
         try {
-            if (!ConfigService::hasWorkspace((string)$id)) {
-                LogService::log("Start of $id refused: the workspace is no longer registered.", LogService::LOG_WARN, "TerminalService");
-                return ['ok' => false, 'reason' => 'unknown_workspace'];
-            }
             return self::startTerminalLocked($id, $path, $chatId, $agentId, $origin);
         } finally {
             SessionLaunchLock::release((string)$id);

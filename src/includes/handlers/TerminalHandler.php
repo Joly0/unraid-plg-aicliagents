@@ -535,8 +535,6 @@ class TerminalHandler {
     }
 
     private static function start($id) {
-        $unknown = self::unknownWorkspaceRefusal((string)$id);
-        if ($unknown !== null) return $unknown;
         $config = getAICliConfig();
         $persistPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
         // Never default the agent: starting the WRONG agent in a user's
@@ -752,9 +750,6 @@ class TerminalHandler {
                 'message' => 'Home storage is available, so an emergency session is not needed. Start the workspace normally.'];
         }
 
-        $unknown = self::unknownWorkspaceRefusal((string)$id);
-        if ($unknown !== null) return $unknown;
-
         // Clean up any previous emergency state (allow starting fresh)
         if (\AICliAgents\Services\StorageMountService::isEmergencyMode()) {
             aicli_log("Cleaning previous emergency state before new session.", AICLI_LOG_INFO, "TerminalHandler");
@@ -766,8 +761,6 @@ class TerminalHandler {
         $busy = self::takeLaunchLock((string)$id, 'emergencyStart');
         if ($busy !== null) return $busy;
         try {
-            $unknown = self::unknownWorkspaceRefusal((string)$id);
-            if ($unknown !== null) return $unknown;
             \AICliAgents\Services\ProcessManager::stopTerminal($id, true, 'stop');
         } finally {
             \AICliAgents\Services\SessionLaunchLock::release((string)$id);
@@ -1641,8 +1634,6 @@ class TerminalHandler {
         $busy = self::takeLaunchLock((string)$id, 'restart');
         if ($busy !== null) return $busy;
         try {
-            $unknown = self::unknownWorkspaceRefusal((string)$id);
-            if ($unknown !== null) return $unknown;
             // Restart is a continue-current-conversation action. Reuse the same
             // quiesce + pane/disk capture pipeline as Close before replacing the
             // terminal, so agents whose id is not present in browser state still
@@ -1700,8 +1691,6 @@ class TerminalHandler {
         $busy = self::takeLaunchLock((string)$id, 'reloadOntoCurrent');
         if ($busy !== null) return $busy;
         try {
-            $unknown = self::unknownWorkspaceRefusal((string)$id);
-            if ($unknown !== null) return $unknown;
             return self::reloadOntoCurrentLocked((string)$id);
         } finally {
             if (\AICliAgents\Services\SessionLaunchLock::heldHere((string)$id)) {
@@ -1928,20 +1917,8 @@ class TerminalHandler {
             return ['status' => 'busy', 'reason' => 'launch_in_progress',
                 'message' => 'This workspace is still starting, closing or restarting. Try again in a moment.'];
         }
-        if ($reason === 'unknown_workspace') {
-            return ['status' => 'error', 'reason' => $reason,
-                'message' => 'This workspace no longer exists. Reload the workspace list before starting it.'];
-        }
         return ['status' => 'error', 'reason' => $reason,
             'message' => 'The workspace did not start (' . $reason . '). Check the Activity tray for the cause.'];
-    }
-
-    /** A browser-held id cannot start or replace a workspace absent from the server registry. */
-    private static function unknownWorkspaceRefusal(string $id): ?array {
-        if (\AICliAgents\Services\ConfigService::hasWorkspace($id)) return null;
-        aicli_log("Workspace action refused for session=$id: the workspace is no longer registered.", AICLI_LOG_WARN, "TerminalHandler");
-        return ['status' => 'error', 'reason' => 'unknown_workspace',
-            'message' => 'This workspace no longer exists. Reload the workspace list before starting it.'];
     }
 
     private static function startedResponse($id, array $extra = []): array {
@@ -1979,8 +1956,6 @@ class TerminalHandler {
         $busy = self::takeLaunchLock((string)$id, 'restartFresh');
         if ($busy !== null) return $busy;
         try {
-            $unknown = self::unknownWorkspaceRefusal((string)$id);
-            if ($unknown !== null) return $unknown;
             self::gracefulClose($id);
             $relay = [];
             if (class_exists('\AICliAgents\Services\AgentRelayService')) {
