@@ -40,9 +40,38 @@ class CodexProjector extends VendorProjector {
         return $block === null ? [] : [self::FENCE_KEY => $block];
     }
 
+    /** Server names a TOML text defines as [mcp_servers.NAME...] tables or mcp_servers.NAME.key lines. */
+    public static function tomlServerNames(string $text): array {
+        $name = '(?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_-]+))';
+        $names = [];
+        $res = [
+            '/^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*' . $name . '[ \t]*[\].]/m',
+            '/^[ \t]*mcp_servers[ \t]*\.[ \t]*' . $name . '[ \t]*[.=]/m',
+        ];
+        foreach ($res as $re) {
+            if (!preg_match_all($re, $text, $m, PREG_SET_ORDER)) continue;
+            foreach ($m as $hit) { $hit = array_pad($hit, 4, ''); $names[] =$hit[1] !== '' ? $hit[1] : ($hit[2] !== '' ? $hit[2] : $hit[3]); }
+        }
+        return array_values(array_unique($names));
+    }
+
+    public function conflictsOutside(string $file, $value): array {
+        if (!is_file($file) || !is_string($value)) return [];
+        $raw = (string)@file_get_contents($file);
+        $fence = self::extractFence($raw, self::FENCE_OPEN, self::FENCE_CLOSE);
+        $outside = $fence === null ? $raw : str_replace($fence, '', $raw);
+        $mine = self::tomlServerNames($value);
+        $theirs = self::tomlServerNames($outside);
+        $hit = array_values(array_intersect($mine, $theirs));
+        sort($hit);
+        return $hit;
+    }
+
     public function write(string $file, array $set, array $remove): bool {
         $raw = is_file($file) ? (string)@file_get_contents($file) : '';
         if (array_key_exists(self::FENCE_KEY, $set)) {
+            // A same-name table outside the fence would make a duplicate key; Codex then rejects the file (#642).
+            if (!empty($this->conflictsOutside($file, (string)$set[self::FENCE_KEY]))) return false;
             $raw = self::replaceOrAppendFence($raw, (string)$set[self::FENCE_KEY], self::FENCE_OPEN, self::FENCE_CLOSE);
         } elseif (in_array(self::FENCE_KEY, $remove, true)) {
             $raw = self::stripFence($raw, self::FENCE_OPEN, self::FENCE_CLOSE);

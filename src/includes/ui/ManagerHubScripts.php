@@ -742,7 +742,7 @@
         var built = hubBuildServer();
         if (built.error) { swal('Check the form', built.error, 'error'); return; }
         hubAjax('hub_save_mcp_server', { name: name, server: JSON.stringify(built.server) }).then(function (res) {
-            if (res.status !== 'ok') { swal('Save failed', res.message || 'unknown error', 'error'); return; }
+            if (res.status !== 'ok') { hubShowSaveError('Save failed', name, res); return; }
             window.hubCloseEditor();
             window.hubLoadState();
             if ((res.unresolved || []).length) swal('Saved, with a warning', hubUnresolvedNote(res.unresolved), 'warning');
@@ -770,8 +770,28 @@
 
     function hubSetServerDisabled(name, disabled) {
         hubAjax('hub_set_server_disabled', { name: name, disabled: disabled ? '1' : '0' }).then(function (res) {
-            if (res.status !== 'ok') { swal('Change failed', res.message || 'unknown error', 'error'); return; }
+            if (res.status !== 'ok') { hubShowSaveError('Change failed', name, res); return; }
             window.hubLoadState();
+        });
+    }
+
+    // F10: a server saved earlier with a typed secret is refused on every later save.
+    // The reply carries canMoveToVault; offer the one-click fix instead of only an error.
+    function hubShowSaveError(title, name, res) {
+        if (!res.canMoveToVault) { swal(title, res.message || 'unknown error', 'error'); return; }
+        swal({
+            title: title,
+            text: res.message || 'unknown error',
+            type: 'warning', showCancelButton: true,
+            confirmButtonText: 'Move to the secrets vault', cancelButtonText: 'Cancel', closeOnConfirm: false
+        }, function (confirmed) {
+            if (!confirmed) return;
+            hubAjax('hub_move_server_secrets', { name: name }).then(function (r) {
+                if (r.status !== 'ok') { swal('Move failed', r.message || 'unknown error', 'error'); return; }
+                var keys = (r.keys || []).join(', ');
+                swal('Moved to the vault', (keys ? 'Vault keys: ' + keys + '. ' : '') + 'Save the server again, then run "Apply to agents".', 'success');
+                window.hubLoadState();
+            });
         });
     }
 

@@ -37,9 +37,50 @@ class GooseProjector extends VendorProjector {
         return $block === null ? [] : [self::FENCE_KEY => $block];
     }
 
+    /** Extension names the user wrote under the top-level `extensions:` map, outside our fence. */
+    public static function extensionNames(string $text): array {
+        if (!preg_match('/^extensions:[ \t]*(?:#.*)?$/m', $text, $m, PREG_OFFSET_CAPTURE)) return [];
+        $body = substr($text, $m[0][1] + strlen($m[0][0]));
+        $names = [];
+        $level = null; // indent of the first entry; deeper keys (cmd:, enabled:) are not names
+        foreach (preg_split('/\R/', $body) ?: [] as $line) {
+            if ($line !== '' && !preg_match('/^[ \t]/', $line)) {
+                if ($line[0] === '#') continue;
+                break; // next top-level key
+            }
+            if (!preg_match('/^([ \t]+)(?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_.-]+))[ \t]*:/', $line, $k)) continue;
+            $k = array_pad($k, 5, '');
+            $indent = strlen($k[1]);
+            if ($level === null) $level = $indent;
+            if ($indent !== $level) continue;
+            $names[] = $k[2] !== '' ? $k[2] : ($k[3] !== '' ? $k[3] : $k[4]);
+        }
+        return $names;
+    }
+
+    public function conflictsOutside(string $file, $value): array {
+        if (!is_file($file) || !is_string($value)) return [];
+        $raw = (string)@file_get_contents($file);
+        $fence = CodexProjector::extractFence($raw, self::FENCE_OPEN, self::FENCE_CLOSE);
+        $outside = $fence === null ? $raw : str_replace($fence, '', $raw);
+        // Names in our block are its keys at the first indent level.
+        $mine = [];
+        foreach (preg_split('/\R/', $value) ?: [] as $line) {
+            if (preg_match('/^  (?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_.-]+)):[ \t]*$/', $line, $k)) {
+                $k = array_pad($k, 4, '');
+                $mine[] = $k[1] !== '' ? $k[1] : ($k[2] !== '' ? $k[2] : $k[3]);
+            }
+        }
+        $hit = array_values(array_intersect($mine, self::extensionNames($outside)));
+        sort($hit);
+        return $hit;
+    }
+
     public function write(string $file, array $set, array $remove): bool {
         $raw = is_file($file) ? (string)@file_get_contents($file) : '';
         if (array_key_exists(self::FENCE_KEY, $set)) {
+            if (!empty($this->conflictsOutside($file, (string)$set[self::FENCE_KEY]))) return false; // #642
+
             $raw = self::placeFence($raw, (string)$set[self::FENCE_KEY]);
         } elseif (in_array(self::FENCE_KEY, $remove, true)) {
             $raw = CodexProjector::stripFence($raw, self::FENCE_OPEN, self::FENCE_CLOSE);
@@ -66,10 +107,12 @@ class GooseProjector extends VendorProjector {
             return "extensions:\n" . $block . "\n";
         }
         // 3. Top-level extensions: key (block map or empty flow map) → nest under it.
-        if (preg_match('/^extensions:[ \t]*(\{\s*\})?[ \t]*$/m', $raw, $m, PREG_OFFSET_CAPTURE)) {
+        // A trailing comment ("extensions: # x") still counts as the key; it is kept (#642).
+        if (preg_match('/^extensions:[ \t]*(\{\s*\})?[ \t]*(#[^\n]*)?$/m', $raw, $m, PREG_OFFSET_CAPTURE)) {
             $lineStart = $m[0][1];
             $lineLen = strlen($m[0][0]);
-            return substr($raw, 0, $lineStart) . 'extensions:' . "\n" . $block . substr($raw, $lineStart + $lineLen);
+            $comment = isset($m[2]) && $m[2][1] >= 0 ? ' ' . rtrim($m[2][0]) : '';
+            return substr($raw, 0, $lineStart) . 'extensions:' . $comment . "\n" . $block . substr($raw, $lineStart + $lineLen);
         }
         // 4. No extensions key → append one at EOF.
         return rtrim($raw, "\n") . "\n\nextensions:\n" . $block . "\n";

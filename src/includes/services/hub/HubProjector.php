@@ -581,11 +581,18 @@ class HubProjector {
                     'message' => 'The agent home overlay is not mounted — start a session or the array, then retry. Projection never writes to an unmounted home.'];
         }
         $home = $homeInfo['home'];
+        // A damaged store file reads as empty; projecting that would remove every
+        // managed entry from every vendor file (#641). Stop and say why.
+        $problem = HubStore::storeProblem();
+        if ($problem !== null) {
+            LogService::log('hub project stopped: ' . $problem, LogService::LOG_ERROR, 'HubProjector');
+            return ['status' => 'error', 'reason' => 'store_corrupt', 'message' => $problem, 'drift' => []];
+        }
         $servers = HubStore::getMcp()['servers'];
         $state = HubStore::getState();
 
         $installed = $installedOverride ?? self::installedSupportedAgentIds();
-        $targets = ($targetAgentIds === null) ? $installed : array_values(array_intersect($targetAgentIds, $installed));
+        $targets =($targetAgentIds === null) ? $installed : array_values(array_intersect($targetAgentIds, $installed));
 
         $results = [];
         $driftAll = [];
@@ -736,6 +743,11 @@ class HubProjector {
                     'message' => 'The agent home overlay is not mounted — start a session or the array, then retry. Projection never writes to an unmounted home.'];
         }
         $home = $homeInfo['home'];
+        $problem = HubStore::stateProblem();
+        if ($problem !== null) {
+            LogService::log('hub policy projection stopped: ' . $problem, LogService::LOG_ERROR, 'HubProjector');
+            return ['status' => 'error', 'reason' => 'store_corrupt', 'message' => $problem, 'drift' => []];
+        }
         $state = HubStore::getState();
 
         $installed = $installedOverride ?? self::installedSupportedAgentIds();
@@ -823,6 +835,10 @@ class HubProjector {
             return ['status' => 'error', 'reason' => 'home_unavailable', 'drift' => []];
         }
         $home = $homeInfo['home'];
+        $problem = HubStore::storeProblem();
+        if ($problem !== null) {
+            return ['status' => 'error', 'reason' => 'store_corrupt', 'message' => $problem, 'drift' => []];
+        }
         $servers = HubStore::getMcp()['servers'];
         $state = HubStore::getState();
         $installed = $installedOverride ?? self::installedSupportedAgentIds();
@@ -858,6 +874,16 @@ class HubProjector {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $installed));
             if (empty($serving)) continue;
             $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, false);
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+        }
+
+        // Plugin-management (Admin) skill, read-only. Gated like the write pass, so a
+        // feature that is off reports a leftover copy as drift (#640).
+        $adminWanted = self::adminSkillWanted();
+        foreach (self::adminSkillVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $installed));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $adminWanted ? $projector->desired([]) : [], $state, false);
             foreach ($r['drift'] as $d) $driftAll[] = $d;
         }
 
@@ -951,9 +977,14 @@ class HubProjector {
         // Matching the user projector for a Relay key made desired[key] null, and
         // the overwrite branch treats null as "remove" — so Overwrite reported
         // success while deleting the guidance it was asked to restore.
-        $projector = null; $isRelay = false; $isPolicy = false;
+        $projector = null; $isRelay = false; $isPolicy = false; $isAdmin = false;
         foreach (array_merge(array_values(self::relayInstructionVendors()), self::relaySkillVendors()) as $p) {
             if ($p->ledgerKey() === $file && array_key_exists($key, $p->desired([]))) { $projector = $p; $isRelay = true; break; }
+        }
+        // The Admin skill is plugin-owned like the Relay guidance: its row must never
+        // fall into the user skills branch (#640).
+        if ($projector === null) foreach (self::adminSkillVendors() as $p) {
+            if ($p->ledgerKey() === $file) { $projector = $p; $isAdmin = true; break; }
         }
         // Policy (file-path-convention) projectors BEFORE the generic instanceof
         // InstructionProjector check below: FilePathConventionProjector extends
@@ -975,8 +1006,9 @@ class HubProjector {
             if ($p->ledgerKey() === $file) { $projector = $p; break; }
         }
         if ($projector === null) return ['status' => 'error', 'message' => "unknown vendor file '$file'"];
-        $isInstruction = $projector instanceof InstructionProjector && !$isPolicy;
-        $isTree = $projector instanceof TreeProjector;
+        // Relay and Admin rows are plugin-owned: they are neither user instructions nor user trees (#640).
+        $isInstruction = $projector instanceof InstructionProjector && !$isPolicy && !$isRelay;
+        $isTree = $projector instanceof TreeProjector && !$isRelay && !$isAdmin;
 
         $homeInfo = self::resolveHome();
         if (!$homeInfo['ok']) return ['status' => 'error', 'reason' => 'home_unavailable', 'message' => 'agent home is not mounted'];
@@ -995,6 +1027,10 @@ class HubProjector {
         } elseif ($isRelay) {
             $serverName = null;
             $desired = $projector->desired([]);
+        } elseif ($isAdmin) {
+            // Empty while the feature is off: Overwrite then removes the copy.
+            $serverName = null;
+            $desired = self::adminSkillWanted() ? $projector->desired([]) : [];
         } elseif ($isPolicy) {
             // Always-on policy content — never gated by instructions_enabledFor,
             // and desired() ignores its argument entirely (see
@@ -1028,7 +1064,8 @@ class HubProjector {
                 $entry['managedKeys'] = array_values(array_diff($entry['managedKeys'] ?? [], [$key]));
                 self::putLedgerEntry($state, $file, $entry);
                 HubStore::saveState($state);
-                if ($isPolicy || $isClaudeCompat) {
+                if ($isPolicy || $isClaudeCompat || $isRelay || $isAdmin) {
+                    // Relay and Admin rows are plugin-owned too: no user target list (#640).
                     // Always-on policy content has no target list to remove the
                     // agent from (it is unconditional for every installed agent,
                     // never gated by instructions_enabledFor) — falling through to
@@ -1068,7 +1105,14 @@ class HubProjector {
                 $ok = ($want !== null)
                     ? $projector->write($abs, [$key => $want], [])
                     : $projector->write($abs, [], [$key]);
-                if (!$ok) return ['status' => 'error', 'message' => 'vendor file write failed (unparseable file is never clobbered)'];
+                if (!$ok) {
+                    $clash = ($want !== null) ? $projector->conflictsOutside($abs, $want) : [];
+                    if (!empty($clash)) {
+                        return ['status' => 'error', 'message' => 'the file already defines ' . implode(', ', $clash)
+                            . ' outside the managed block; remove or rename that entry in the file, then apply again'];
+                    }
+                    return ['status' => 'error', 'message' => 'vendor file write failed (unparseable file is never clobbered)'];
+                }
                 if ($want !== null) {
                     $entry['lastProjectedHash'][$key] = VendorProjector::valueHash($want);
                     if (!in_array($key, $entry['managedKeys'] ?? [], true)) $entry['managedKeys'][] = $key;
@@ -1230,6 +1274,14 @@ class HubProjector {
             $base = $hashes[$key] ?? null;
             $wantHash = ($want !== null) ? VendorProjector::valueHash($want) : null;
             $curHash = $hasCur ? VendorProjector::valueHash($cur) : null;
+
+            // #642: a fenced file (TOML, YAML) cannot hold two entries with one name.
+            // When the user wrote the same name outside our fence, report it and write nothing.
+            if ($want !== null && ($clash = $projector->conflictsOutside($abs, $want))) {
+                $drift[] = self::driftRec($file, $key, $agentId, 'unmanaged_conflict',
+                    'Defined outside the managed block: ' . implode(', ', $clash), $want);
+                continue;
+            }
 
             if ($want !== null) {
                 if (!$hasCur) {
@@ -1452,16 +1504,30 @@ class HubProjector {
         if (!is_array($v)) return null;
         $enabledFor = $existing['enabledFor'] ?? [$agentId];
         if (!empty($v['command'])) {
-            return ['transport' => 'stdio', 'command' => (string)$v['command'],
-                    'args' => array_values(array_map('strval', $v['args'] ?? [])),
-                    'env' => is_array($v['env'] ?? null) ? $v['env'] : [],
+            $command = $v['command'];
+            $args = is_array($v['args'] ?? null) ? $v['args'] : [];
+            if (is_array($command)) {
+                // #647: OpenCode and Kilo keep the binary and its arguments in ONE list,
+                // and the variables under "environment". Split them back apart.
+                $list = array_values(array_filter($command, 'is_scalar'));
+                if (empty($list)) return null;
+                $command = array_shift($list);
+                $args = array_merge($list, $args);
+            }
+            $env = $v['env'] ?? $v['environment'] ?? [];
+            return ['transport' => 'stdio', 'command' => (string)$command,
+                    'args' => array_values(array_map('strval', $args)),
+                    'env' => is_array($env) ? $env : [],
                     'enabledFor' => $enabledFor];
         }
         $url = (string)($v['url'] ?? $v['httpUrl'] ?? '');
         if ($url !== '') {
+            // OpenCode/Kilo say type "remote" for both http and sse: keep what the hub already holds.
+            $kept = in_array($existing['transport'] ?? '', ['http', 'sse'], true) ? $existing['transport'] : 'http';
             $transport = isset($v['httpUrl']) ? 'http'
-                : ((($v['type'] ?? '') === 'sse') ? 'sse' : ((($v['type'] ?? '') === 'http') ? 'http' : 'sse'));
-            $out = ['transport' => $transport, 'url' => $url, 'enabledFor' => $enabledFor];
+                : ((($v['type'] ?? '') === 'remote') ? $kept
+                : ((($v['type'] ?? '') === 'sse') ? 'sse' : ((($v['type'] ?? '') === 'http') ? 'http' : 'sse')));
+            $out =['transport' => $transport, 'url' => $url, 'enabledFor' => $enabledFor];
             // Codex-style TOML names the map http_headers; every JSON vendor uses headers.
             $headers = $v['headers'] ?? $v['http_headers'] ?? null;
             if (is_array($headers) && !empty($headers)) {

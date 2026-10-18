@@ -51,6 +51,7 @@ class HubHandler
             case 'hub_set_commands_targets':    return self::setTreeTargets('commands');
             case 'hub_project':                 return self::project();
             case 'hub_set_server_disabled':     return self::setServerDisabled();
+            case 'hub_move_server_secrets':     return self::moveServerSecrets();
             case 'hub_get_drift':               return HubProjector::detectDrift();
             case 'hub_resolve_drift':           return self::resolveDrift();
             default:                            return null;
@@ -61,7 +62,7 @@ class HubHandler
     public static function actions(): array
     {
         return ['hub_get_state', 'hub_save_mcp_server', 'hub_delete_mcp_server',
-                'hub_set_server_targets', 'hub_set_server_disabled', 'hub_test_mcp_server', 'hub_get_instructions', 'hub_save_instructions',
+                'hub_set_server_targets', 'hub_set_server_disabled', 'hub_move_server_secrets', 'hub_test_mcp_server', 'hub_get_instructions', 'hub_save_instructions',
                 'hub_set_instruction_targets', 'hub_list_skills', 'hub_save_skill_file',
                 'hub_delete_skill', 'hub_list_commands', 'hub_save_command',
                 'hub_delete_command', 'hub_set_skills_targets', 'hub_set_commands_targets',
@@ -207,10 +208,61 @@ class HubHandler
 
         $errors = [];
         if (!HubStore::saveServer($name, $raw, $errors)) {
-            return ['status' => 'error', 'message' => implode('; ', $errors) ?: 'save failed'];
+            return self::saveFailure($name, $errors);
         }
         return ['status' => 'ok', 'name' => $name, 'hint' => 'Run "Apply to agents" to project the change.',
                 'unresolved' => HubProjector::unresolvedPlaceholders(HubStore::getServer($name) ?? [])];
+    }
+
+    /**
+     * Error reply for a failed server save. F10: a server saved before the raw-secret
+     * refusal keeps its typed value (a "keep" row carries it forward), so every later
+     * save is refused. Say what to do, and flag the editor to offer the one-click move.
+     */
+    private static function saveFailure(string $name, array $errors): array
+    {
+        $res = ['status' => 'error', 'message' => implode('; ', $errors) ?: 'save failed'];
+        $stored = HubStore::getServer($name);
+        if ($stored !== null && !empty(HubStore::rawSecretProblems([$name => $stored]))) {
+            $res['canMoveToVault'] = true;
+            $res['message'] .= ' This server was saved earlier with a typed secret. '
+                . 'Press "Move to the secrets vault": the Config Hub puts each secret in the vault and keeps only its key in braces.';
+        }
+        return $res;
+    }
+
+    /**
+     * POST: name. One-click fix for a server saved with a typed secret (F10): each raw
+     * credential in an env variable, header or URL goes into the secrets vault and the
+     * stored server keeps only its {KEY}. The reply names the places and the vault keys,
+     * never a value.
+     */
+    private static function moveServerSecrets(): array
+    {
+        $name = (string)($_REQUEST['name'] ?? '');
+        if (!preg_match(HubStore::NAME_RE, $name)) return ['status' => 'error', 'message' => 'invalid server name'];
+        $stored = HubStore::getServer($name);
+        if ($stored === null) return ['status' => 'error', 'message' => 'unknown server'];
+        $vault = \AICliAgents\Services\SecretService::getAgentSecrets();
+        $moved = HubStore::moveRawSecretsOut($name, $stored, $vault);
+        if (empty($moved['fields'])) return ['status' => 'ok', 'moved' => [], 'keys' => [], 'message' => 'Nothing to move: this server holds no typed secret.'];
+
+        $errors = [];
+        // Check the new definition first, so the vault is not changed for a server that still would not save.
+        if (HubStore::normalizeServer($moved['def'], $errors) === null) {
+            return ['status' => 'error', 'message' => 'The server still cannot be saved: ' . implode('; ', $errors)];
+        }
+        if (!\AICliAgents\Services\SecretService::saveAgentSecrets(array_merge($vault, $moved['secrets']))) {
+            return ['status' => 'error', 'message' => 'The secrets vault could not be written. Nothing was changed.'];
+        }
+        $freeform = \AICliAgents\Services\SecretService::getFreeformKeys();
+        \AICliAgents\Services\SecretService::setFreeformKeys(array_values(array_unique(array_merge($freeform, array_keys($moved['secrets'])))));
+        if (!HubStore::saveServer($name, $moved['def'], $errors)) {
+            return ['status' => 'error', 'message' => 'The secrets are in the vault, but the server could not be saved: ' . implode('; ', $errors)];
+        }
+        LogService::log("moved " . count($moved['fields']) . " typed secret(s) of MCP server '$name' to the vault", LogService::LOG_INFO, 'HubHandler');
+        return ['status' => 'ok', 'moved' => $moved['fields'], 'keys' => array_keys($moved['secrets']),
+                'hint' => 'Run "Apply to agents" to project the change.'];
     }
 
     /** Merge masked env and header entries against the stored def of $name (if any). */
@@ -286,7 +338,7 @@ class HubHandler
         if ($err !== null) return ['status' => 'error', 'message' => $err];
         $errors = [];
         if (!HubStore::setServerTargets($name, array_map('strval', $ids), $errors)) {
-            return ['status' => 'error', 'message' => implode('; ', $errors) ?: 'save failed'];
+            return self::saveFailure($name, $errors);
         }
         return ['status' => 'ok'];
     }
@@ -299,7 +351,7 @@ class HubHandler
         $disabled = in_array((string)($_REQUEST['disabled'] ?? ''), ['1', 'true'], true);
         $errors = [];
         if (!HubStore::setServerDisabled($name, $disabled, $errors)) {
-            return ['status' => 'error', 'message' => implode('; ', $errors) ?: 'save failed'];
+            return self::saveFailure($name, $errors);
         }
         return ['status' => 'ok', 'disabled' => $disabled,
                 'hint' => 'Run "Apply to agents" to ' . ($disabled ? 'remove it from' : 'add it back to') . ' the agent configs.'];

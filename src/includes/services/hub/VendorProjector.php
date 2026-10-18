@@ -56,6 +56,17 @@ abstract class VendorProjector {
      */
     abstract public function write(string $file, array $set, array $remove): bool;
 
+    /**
+     * Names that the managed value $value would define AND that the user already
+     * defined elsewhere in the file (#642). A fenced vendor (TOML, YAML) cannot
+     * hold two entries with one name, so projection refuses and reports drift
+     * instead. JSON vendors merge by key and never need this: they return [].
+     * @return string[]
+     */
+    public function conflictsOutside(string $file, $value): array {
+        return [];
+    }
+
     /** Ledger key for this vendor file ('~/' + relPath). */
     public function ledgerKey(): string {
         return '~/' . $this->relPath();

@@ -72,6 +72,55 @@ class HubStore {
     public static function skillsDir(): string        { return self::baseDir() . '/skills'; }
     public static function commandsDir(): string      { return self::baseDir() . '/commands'; }
 
+    // ---------- damaged store files (#641) ----------
+
+    /**
+     * Why a store file cannot be trusted, or null when it is healthy or absent.
+     * A file that exists but does not parse (a git restore that left conflict
+     * markers, a torn write) is NOT the same as an empty store: reading it as
+     * empty makes the next projection remove every managed vendor entry. The
+     * first time a damaged file is seen, a copy is kept next to it.
+     */
+    private static function fileProblem(string $file, string $requiredKey, string $label): ?string {
+        if (!is_file($file)) return null;
+        $raw = (string)@file_get_contents($file);
+        if (trim($raw) === '') return null; // nothing in it to lose
+        $data = json_decode($raw, true);
+        if (is_array($data) && isset($data[$requiredKey]) && is_array($data[$requiredKey])) return null;
+        $kept = self::keepCorruptCopy($file, $raw);
+        return "$label cannot be read (it is not valid JSON). The Config Hub changed nothing. "
+             . ($kept !== null ? "A copy is kept as " . basename($kept) . '. ' : '')
+             . "Repair the file, or delete it to start with an empty list: $file";
+    }
+
+    /** Copy a damaged file once per distinct content. Returns the copy path, or null. */
+    private static function keepCorruptCopy(string $file, string $raw): ?string {
+        $hash = substr(sha1($raw), 0, 12);
+        foreach (glob($file . '.corrupt-*') ?: [] as $existing) {
+            if (substr($existing, -12) === $hash) return $existing;
+        }
+        $copy = $file . '.corrupt-' . gmdate('YmdHis') . '-' . $hash;
+        if (@file_put_contents($copy, $raw) === false) return null;
+        @chmod($copy, 0600);
+        LogService::log(basename($file) . ' is damaged; a copy was kept as ' . basename($copy), LogService::LOG_ERROR, 'HubStore');
+        return $copy;
+    }
+
+    /** Null when mcp.json is healthy or absent, else a plain-words reason. */
+    public static function mcpProblem(): ?string {
+        return self::fileProblem(self::mcpFile(), 'servers', 'The MCP server list (mcp.json)');
+    }
+
+    /** Null when state.json is healthy or absent, else a plain-words reason. */
+    public static function stateProblem(): ?string {
+        return self::fileProblem(self::stateFile(), 'projections', 'The Config Hub state (state.json)');
+    }
+
+    /** First problem of either store file, or null. Projection stops when this is set. */
+    public static function storeProblem(): ?string {
+        return self::mcpProblem() ?? self::stateProblem();
+    }
+
     // ---------- mcp.json (canonical server registry) ----------
 
     /** @return array{schema:int,servers:array<string,array>} */
@@ -89,6 +138,11 @@ class HubStore {
     }
 
     public static function saveMcp(array $mcp): bool {
+        // Never overwrite a damaged file with a partial list (#641).
+        if (self::mcpProblem() !== null) {
+            LogService::log('refused to write mcp.json: the existing file is damaged', LogService::LOG_ERROR, 'HubStore');
+            return false;
+        }
         $mcp['schema'] = self::SCHEMA;
         if (!isset($mcp['servers']) || !is_array($mcp['servers'])) $mcp['servers'] = [];
         ksort($mcp['servers']);
@@ -247,6 +301,64 @@ class HubStore {
         return $out;
     }
 
+    /** UPPER_SNAKE vault key from a server name and a field name (e.g. github + api-token -> GITHUB_API_TOKEN). */
+    private static function vaultKeyFor(string $server, string $field, array $taken): string {
+        $base = strtoupper(trim((string)preg_replace('/[^A-Za-z0-9]+/', '_', "{$server}_{$field}"), '_'));
+        if ($base === '' || !preg_match('/^[A-Z]/', $base)) $base = 'MCP_' . $base;
+        $base = substr($base, 0, 120);
+        $key = $base;
+        for ($i = 2; isset($taken[$key]); $i++) $key = $base . '_' . $i;
+        return $key;
+    }
+
+    /**
+     * F10 (#590): a server saved before the raw-secret refusal can still hold a typed
+     * credential in an env variable, a header or the URL. Swap each one for a {KEY}
+     * placeholder and return the values to put in the vault. Pure: writes nothing.
+     * A raw value that equals an existing vault value reuses that key.
+     * @param array<string,string> $vault current vault map (KEY => value)
+     * @return array{def:array,secrets:array<string,string>,fields:string[]} fields name the places moved, never values
+     */
+    public static function moveRawSecretsOut(string $server, array $def, array $vault = []): array {
+        $secrets = []; $fields = [];
+        $reserve = static function (string $field, string $value) use ($server, $vault, &$secrets): string {
+            foreach (array_merge($vault, $secrets) as $k => $v) {
+                if ((string)$v === $value) return (string)$k;
+            }
+            $key = self::vaultKeyFor($server, $field, array_merge($vault, $secrets));
+            $secrets[$key] = $value;
+            return $key;
+        };
+        foreach ((array)($def['env'] ?? []) as $k => $v) {
+            if (self::valueSecretProblem('env value', (string)$k, (string)$v) === null) continue;
+            $def['env'][$k] = '{' . $reserve((string)$k, (string)$v) . '}';
+            $fields[] = "env '$k'";
+        }
+        foreach ((array)($def['headers'] ?? []) as $k => $v) {
+            if (self::headerSecretProblem((string)$k, (string)$v) === null) continue;
+            $scheme = ''; $raw = (string)$v;
+            if (preg_match('/^(Bearer|Basic|Token)\s+(.*)$/i', $raw, $m)) { $scheme = $m[1] . ' '; $raw = $m[2]; }
+            $def['headers'][$k] = $scheme . '{' . $reserve((string)$k, $raw) . '}';
+            $fields[] = "header '$k'";
+        }
+        $url = (string)($def['url'] ?? '');
+        if ($url !== '' && self::urlSecretProblem($url) !== null) {
+            $url = (string)preg_replace_callback('~^([a-z][a-z0-9+.-]*://[^:/@?#]*:)([^@/?#]*)(@)~i', function ($m) use ($reserve, &$fields) {
+                if (self::valueSecretProblem('url', 'password', rawurldecode($m[2])) === null) return $m[0];
+                $fields[] = 'url password';
+                return $m[1] . '{' . $reserve('password', rawurldecode($m[2])) . '}' . $m[3];
+            }, $url);
+            $url = (string)preg_replace_callback('~([?&])([^=&#]+)=([^&#]*)~', function ($m) use ($reserve, &$fields) {
+                $name = rawurldecode($m[2]);
+                if (self::valueSecretProblem('url parameter', $name, rawurldecode($m[3])) === null) return $m[0];
+                $fields[] = "url parameter '$name'";
+                return $m[1] . $m[2] . '={' . $reserve($name, rawurldecode($m[3])) . '}';
+            }, $url);
+            $def['url'] = $url;
+        }
+        return ['def' => $def, 'secrets' => $secrets, 'fields' => $fields];
+    }
+
     /**
      * A credential header must not hold a raw secret: mcp.json is plain text, and the Hub git
      * backup commits it. The value must be vault placeholders only, after an optional scheme
@@ -270,6 +382,8 @@ class HubStore {
         if (!preg_match(self::NAME_RE, $name)) { $errors[] = 'invalid server name (allowed: [a-zA-Z0-9_-]{1,64})'; return false; }
         $norm = self::normalizeServer($def, $errors);
         if ($norm === null) return false;
+        $problem = self::mcpProblem();
+        if ($problem !== null) { $errors[] = $problem; return false; }
         $mcp = self::getMcp();
         $mcp['servers'][$name] = $norm;
         $ok = self::saveMcp($mcp);
@@ -643,6 +757,11 @@ class HubStore {
     }
 
     public static function saveState(array $state): bool {
+        // A damaged ledger or target set is repaired by a person, not overwritten (#641).
+        if (self::stateProblem() !== null) {
+            LogService::log('refused to write state.json: the existing file is damaged', LogService::LOG_ERROR, 'HubStore');
+            return false;
+        }
         $state['schema'] = self::SCHEMA;
         if (!isset($state['projections']) || !is_array($state['projections'])) $state['projections'] = [];
         ksort($state['projections']);

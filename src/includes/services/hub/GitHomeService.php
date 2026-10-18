@@ -179,16 +179,29 @@ class GitHomeService {
             // marketplace caches). git recursing into one that is mid-init, has an unborn
             // branch, or a malformed HEAD used to fail the whole backup. Never recurse.
             '-c', 'submodule.recurse=false',
-        ], $args);
+        ], self::hardeningArgs(), $args);
 
-        $env = null;
+        // #643: this process runs as root, but ~/.git belongs to the session user, so
+        // an agent can write to .git/config and to ~/.gitconfig. Pin every setting that
+        // can run a program (above), ignore the system and global config files here,
+        // and never inherit GIT_* variables from the web context.
+        $hard = ['GIT_CONFIG_NOSYSTEM' => '1', 'GIT_CONFIG_GLOBAL' => '/dev/null', 'GIT_ATTR_NOSYSTEM' => '1'];
         if ($extraEnv !== null) {
             // proc_open's env REPLACES the environment — rebuild a minimal one.
             $env = array_merge([
                 'PATH' => (string)(getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'),
                 'HOME' => $home,
-            ], $extraEnv);
+            ], $extraEnv, $hard);
+        } else {
+            // The clean/smudge filter script needs the normal environment to open the vault.
+            $env = [];
+            foreach (getenv() as $k => $v) {
+                if (strpos((string)$k, 'GIT_') === 0) continue;
+                $env[$k] = (string)$v;
+            }
+            $env = array_merge($env, $hard);
         }
+        self::scrubRepoConfig($home);
 
         $desc = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
         if ($stdin !== null) $desc[0] = ['pipe', 'r'];
@@ -225,6 +238,118 @@ class GitHomeService {
         // observation — which is exactly the $status the loop broke on.
         $rc = (int)$status['exitcode'];
         return ['rc' => $rc, 'out' => trim($out), 'err' => trim($err)];
+    }
+
+    /**
+     * #643: `-c` flags that win over the repository's own .git/config. They switch off
+     * every git setting that can start a program (hooks, file-system monitor, ssh and
+     * proxy commands, credential helpers, pagers, external diff, the ext:: transport)
+     * and pin the two secret filters to their real commands.
+     * @return string[]
+     */
+    private static function hardeningArgs(): array {
+        $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(self::filterScriptPath());
+        $f = 'filter.' . self::SECRET_FILTER;
+        $c = 'filter.' . self::SECRET_FILTER_CLEAN_ONLY;
+        return [
+            '-c', 'core.hooksPath=/dev/null',
+            '-c', 'core.fsmonitor=false',
+            '-c', 'core.sshCommand=ssh',
+            '-c', 'core.pager=cat',
+            '-c', 'core.askPass=',
+            '-c', 'core.editor=true',
+            '-c', 'credential.helper=',
+            '-c', 'protocol.ext.allow=never',
+            '-c', "$f.clean=$cmd clean",
+            '-c', "$f.smudge=$cmd smudge",
+            '-c', "$f.required=true",
+            '-c', "$c.clean=$cmd clean",
+            '-c', "$c.smudge=cat",
+            '-c', "$c.required=true",
+        ];
+    }
+
+    /**
+     * Settings in the repository's own config that can start a program and that a `-c`
+     * pin cannot cover (a filter, diff or merge driver with any name, an include file,
+     * an alias, a rewritten URL). Pure: takes the config text, returns the dotted names.
+     * @return string[] e.g. ['filter.evil', 'include.path', 'core.fsmonitor']
+     */
+    public static function unsafeConfigEntries(string $configText): array {
+        $bad = [];
+        $section = ''; $sub = '';
+        foreach (preg_split('/\R/', $configText) ?: [] as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#' || $line[0] === ';') continue;
+            if (preg_match('/^\[\s*([A-Za-z0-9-]+)(?:\s+"((?:[^"\\\\]|\\\\.)*)"|\.([^\]\s]+))?\s*\]/', $line, $m)) {
+                $section = strtolower($m[1]);
+                $sub = ($m[2] ?? '') !== '' ? $m[2] : (string)($m[3] ?? '');
+                if (in_array($section, ['include', 'includeif', 'alias', 'url', 'pager', 'protocol', 'credential', 'submodule'], true)) {
+                    $bad[] = $section . ($sub !== '' ? ".$sub" : '') . ' (section)';
+                } elseif ($section === 'filter' && !in_array($sub, [self::SECRET_FILTER, self::SECRET_FILTER_CLEAN_ONLY], true)) {
+                    $bad[] = "filter.$sub (section)";
+                } elseif (in_array($section, ['diff', 'merge', 'difftool', 'mergetool'], true) && $sub !== '') {
+                    $bad[] = "$section.$sub (section)";
+                }
+                // A key may follow the header on the same line; it is rare and covered by -c pins.
+                continue;
+            }
+            $key = strtolower(trim(explode('=', $line, 2)[0]));
+            if ($section === 'core' && in_array($key, ['fsmonitor', 'hookspath', 'sshcommand', 'gitproxy', 'pager', 'editor', 'askpass', 'attributesfile', 'worktree'], true)) {
+                $bad[] = "core.$key";
+            } elseif (in_array($section, ['diff', 'merge'], true) && in_array($key, ['external', 'tool', 'textconv', 'command', 'driver'], true)) {
+                $bad[] = "$section.$key";
+            } elseif ($section === 'filter' && $key === 'process') {
+                $bad[] = "filter.$sub.process"; // a long-running filter: the -c pins cannot unset it
+            } elseif ($section === 'gpg' && substr($key, -7) === 'program') {
+                $bad[] = "gpg.$key";
+            } elseif ($section === 'remote' && in_array($key, ['proxy', 'uploadpack', 'receivepack', 'vcs'], true)) {
+                $bad[] = "remote.$sub.$key";
+            } elseif (in_array($section, ['uploadpack', 'receive'], true) && $key !== '') {
+                if (in_array($key, ['packobjectshook', 'procreceive'], true)) $bad[] = "$section.$key";
+            } elseif (in_array($section, ['sequence', 'init'], true) && in_array($key, ['editor', 'templatedir'], true)) {
+                $bad[] = "$section.$key";
+            }
+        }
+        return array_values(array_unique($bad));
+    }
+
+    /** True while scrubRepoConfig is healing, so its own git calls do not scrub again. */
+    private static $scrubbing = false;
+    /** Config file stamp already found clean in this process (path|mtime|size). */
+    private static $scrubbedStamp = '';
+
+    /**
+     * #643: remove program-starting entries from ~/.git/config before git reads it as root.
+     * The `-c` pins in hardeningArgs() are the main defence; this covers the entries a
+     * pin cannot name. A removal is logged. Residual risk: an agent that rewrites the
+     * file between this check and the git call (the pins still hold).
+     */
+    private static function scrubRepoConfig(string $home): void {
+        if (self::$scrubbing) return;
+        $cfg = "$home/.git/config";
+        if (!is_file($cfg) || is_link($cfg)) return;
+        clearstatcache(true, $cfg);
+        $stamp = $cfg . '|' . (int)@filemtime($cfg) . '|' . (int)@filesize($cfg);
+        if ($stamp === self::$scrubbedStamp) return;
+        $bad = self::unsafeConfigEntries((string)@file_get_contents($cfg));
+        if (empty($bad)) { self::$scrubbedStamp = $stamp; return; }
+        self::$scrubbing = true;
+        try {
+            foreach ($bad as $name) {
+                if (substr($name, -10) === ' (section)') {
+                    self::git(['config', '--local', '--remove-section', substr($name, 0, -10)]);
+                } else {
+                    self::git(['config', '--local', '--unset-all', $name]);
+                }
+            }
+            LogService::log('hub git: removed program-starting entries from the backup repository config: '
+                . implode(', ', $bad), LogService::LOG_WARN, 'GitHomeService');
+        } finally {
+            self::$scrubbing = false;
+        }
+        clearstatcache(true, $cfg);
+        self::$scrubbedStamp = $cfg . '|' . (int)@filemtime($cfg) . '|' . (int)@filesize($cfg);
     }
 
     // ------------------------------------------------------------------
@@ -995,7 +1120,7 @@ class GitHomeService {
         $err = self::validatePathRef($path, $ref);
         if ($err !== null) return ['status' => 'error', 'message' => $err];
         if (!self::initialized()) return ['status' => 'error', 'message' => 'git layer not initialized'];
-        $r = self::git(['diff', $ref, '--', $path]);
+        $r = self::git(['diff', '--no-ext-diff', '--no-textconv', $ref, '--', $path]); // #643: no program from a driver
         if ($r['rc'] !== 0 && $r['rc'] !== 1) { // diff exits 1 with differences under some configs
             return ['status' => 'error', 'message' => 'git diff failed: ' . $r['err']];
         }
@@ -1033,16 +1158,25 @@ class GitHomeService {
             return ['status' => 'busy', 'message' => 'a home bake is in flight — retry shortly'];
         }
         try {
+            // #644: an edit made inside the auto-commit delay is not in history yet, and the
+            // checkout below would discard it. Save it as its own commit first, so the
+            // restore stays undoable.
+            self::git(['add', '-A', '--', $path]);
+            if (self::git(['diff', '--cached', '--quiet', '--', $path])['rc'] === 1) {
+                $s = self::git(['commit', '-m', "hub: save pending edits to $path before restore", '--', $path]);
+                if ($s['rc'] !== 0) return ['status' => 'error', 'message' => 'could not save your pending edits before the restore: ' . $s['err']];
+            }
             $co = self::git(['checkout', $ref, '--', $path]);
             if ($co['rc'] !== 0) return ['status' => 'error', 'message' => 'git checkout failed: ' . $co['err']];
             $short = substr($ref, 0, 12);
             self::git(['add', '-A', '--', $path]);
-            $st = self::git(['status', '--porcelain']);
-            if ($st['rc'] === 0 && $st['out'] !== '') {
-                $c = self::git(['commit', '-m', "hub: restore $path from $short"]);
+            // Decide on THIS path only. The whole-tree status is rarely empty, so a restore of
+            // identical content (nothing staged) used to reach `git commit` and fail.
+            if (self::git(['diff', '--cached', '--quiet', '--', $path])['rc'] === 1) {
+                $c = self::git(['commit', '-m', "hub: restore $path from $short", '--', $path]);
                 if ($c['rc'] !== 0) return ['status' => 'error', 'message' => 'restored but commit failed: ' . $c['err']];
             }
-            self::fixOwnership(dirname(rtrim((string)self::home(), '/') . '/' . $path));
+            self::fixOwnership(rtrim((string)self::home(), '/') . '/' . $path);
             LogService::log("hub git: restored $path from $short", LogService::LOG_INFO, 'GitHomeService');
             return ['status' => 'ok'];
         } finally {
