@@ -1128,6 +1128,42 @@ _retention_persist_dirs() {
     return 0
 }
 
+# _reconcile_recover_untracked_layer <type> <id> <persist_path> <filename> <scratch_mount>
+# A loop mount can fail briefly while the kernel releases a loop device. Retry
+# once before treating a valid untracked layer as unreadable user data.
+_reconcile_recover_untracked_layer() {
+    local type="$1" id="$2" persist_path="$3" act_file="$4" scratch_mnt="$5"
+    local full_path="${persist_path%/}/${act_file}" sample_ok=0 attempt sha256="" file_bytes=0
+    mkdir -p "$scratch_mnt" 2>/dev/null || true
+    for attempt in 1 2; do
+        if mount -o loop,ro "$full_path" "$scratch_mnt" 2>/dev/null; then
+            find "$scratch_mnt" -type f 2>/dev/null | head -5 | while IFS= read -r sample_f; do
+                head -c 1 "$sample_f" >/dev/null 2>&1 || true
+            done
+            sample_ok=1
+            umount "$scratch_mnt" 2>/dev/null || true
+            break
+        fi
+        [ "$attempt" -eq 2 ] || sleep 1
+    done
+    rmdir "$scratch_mnt" 2>/dev/null || true
+
+    if [ "$sample_ok" -eq 1 ]; then
+        sha256=$(sha256sum "$full_path" 2>/dev/null | awk '{print $1}' || echo "")
+        file_bytes=$(stat -c '%s' "$full_path" 2>/dev/null || echo 0)
+        manifest_record_layer "$type" "$id" "$persist_path" "$act_file" "recovered" || true
+        lifecycle_log "info" "supervisor" "reconcile_recovered_layer" \
+            "{\"entity\":\"$type/$id\",\"filename\":\"$act_file\",\"sha256\":\"$sha256\",\"bytes\":$file_bytes}" 2>/dev/null || true
+    else
+        local untracked_dir="${persist_path%/}/.untracked"
+        mkdir -p "$untracked_dir" 2>/dev/null || true
+        mv -f "$full_path" "$untracked_dir/" 2>/dev/null || true
+        log_error "Reconcile: quarantined unreadable layer $act_file to .untracked/"
+        lifecycle_log "critical" "supervisor" "reconcile_quarantined_layer" \
+            "{\"entity\":\"$type/$id\",\"filename\":\"$act_file\",\"quarantine_dir\":\"$untracked_dir\"}" 2>/dev/null || true
+    fi
+}
+
 _op_reconcile() {
     local mpath
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
@@ -1457,43 +1493,10 @@ _op_reconcile() {
                 [ "$act_file" = "$exp_file" ] && in_manifest=1 && break
             done
             if [ "$in_manifest" -eq 0 ]; then
-                local full_path="${persist_path}/${act_file}"
                 log_info "Reconcile: untracked layer $act_file for $entity — attempting recovery"
-                # Try to mount RO and sample-read
-                local scratch_mnt
-                scratch_mnt="/tmp/unraid-aicliagents/.reconcile_verify_$$"
-                mkdir -p "$scratch_mnt" 2>/dev/null || true
-                local sample_ok=0
-                if mount -o loop,ro "$full_path" "$scratch_mnt" 2>/dev/null; then
-                    find "$scratch_mnt" -type f 2>/dev/null | head -5 | while IFS= read -r sample_f; do
-                        head -c 1 "$sample_f" >/dev/null 2>&1 || true
-                    done
-                    sample_ok=1
-                    umount "$scratch_mnt" 2>/dev/null || true
-                fi
-                rmdir "$scratch_mnt" 2>/dev/null || true
-
-                if [ "$sample_ok" -eq 1 ]; then
-                    # Compute sha256
-                    local sha256=""
-                    sha256=$(sha256sum "$full_path" 2>/dev/null | awk '{print $1}' || echo "")
-                    local file_bytes=0
-                    file_bytes=$(stat -c '%s' "$full_path" 2>/dev/null || echo 0)
-                    # F6 (WP#1331): register via the SINGLE manifest writer (kind=recovered;
-                    # sha256/bytes recomputed PHP-side). Replaces the inline double-quoted
-                    # php -r addLayer copy (anti-pattern + 4th drifting writer).
-                    manifest_record_layer "$type" "$id" "$persist_path" "$act_file" "recovered" || true
-                    lifecycle_log "info" "supervisor" "reconcile_recovered_layer" \
-                        "{\"entity\":\"$entity\",\"filename\":\"$act_file\",\"sha256\":\"$sha256\",\"bytes\":$file_bytes}" 2>/dev/null || true
-                else
-                    # Sample-read failed — quarantine
-                    local untracked_dir="${persist_path}/.untracked"
-                    mkdir -p "$untracked_dir" 2>/dev/null || true
-                    mv -f "$full_path" "$untracked_dir/" 2>/dev/null || true
-                    log_error "Reconcile: quarantined unreadable layer $act_file to .untracked/"
-                    lifecycle_log "critical" "supervisor" "reconcile_quarantined_layer" \
-                        "{\"entity\":\"$entity\",\"filename\":\"$act_file\",\"quarantine_dir\":\"$untracked_dir\"}" 2>/dev/null || true
-                fi
+                # F27: give a transient loop-mount failure one retry before quarantine.
+                _reconcile_recover_untracked_layer "$type" "$id" "$persist_path" "$act_file" \
+                    "/tmp/unraid-aicliagents/.reconcile_verify_$$"
             fi
         done
 

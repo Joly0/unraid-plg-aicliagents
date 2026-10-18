@@ -657,7 +657,7 @@
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.10.18.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/cleanup.sh</URL>
-<SHA256>f592c607c7b385fceda9fde5524773b466e554c87de4bf32d1d9578159fae6ce</SHA256>
+<SHA256>d532bd0ec7a22d7128e798db3a85e2daaeec9901e5b8e35080ff41312255e926</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.10.18.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/migrate-from-geminicli.sh</URL>

@@ -4,7 +4,7 @@
 
 PLUGIN_BIN="/usr/local/emhttp/plugins/unraid-aicliagents/bin"
 ZRAM_BASE="/tmp/unraid-aicliagents/zram_upper"
-DEBUG_LOG="/tmp/unraid-aicliagents/debug.log"
+DEBUG_LOG="${AICLI_DEBUG_LOG:-/tmp/unraid-aicliagents/debug.log}"
 
 # #1322: detect_backend.sh provides the GENUINE device test (entity_upper_mode /
 # backend_for) that _entity_paths uses for the zram-vs-disk upper-mode. It is a
@@ -1682,6 +1682,23 @@ release_layer_loops() {
 # convert_lock_path <type> <id> — the file a running conversion holds (its pid).
 convert_lock_path() { printf '%s/.converting_%s_%s' "${AICLI_CONVERT_LOCK_DIR:-/tmp/unraid-aicliagents}" "$1" "$2"; }
 
+# convert_lock_begin <path> — write this process id and remove it on every exit.
+convert_lock_begin() {
+    local path="${1:-}"
+    printf '%s\n' "${BASHPID:-$$}" > "$path" 2>/dev/null || true
+    AICLI_CONVERT_LOCK_PATH="$path"
+    AICLI_CONVERT_LOCK_OWNER="${BASHPID:-$$}"
+    aicli_on_exit convert_lock_cleanup
+}
+
+# Remove only this process's lock; an exit hook must not remove a newer owner.
+convert_lock_cleanup() {
+    local path="${AICLI_CONVERT_LOCK_PATH:-}" owner="${AICLI_CONVERT_LOCK_OWNER:-}"
+    [ -n "$path" ] && [ -n "$owner" ] || return 0
+    [ "$(cat "$path" 2>/dev/null)" = "$owner" ] || return 0
+    rm -f -- "$path" 2>/dev/null || true
+}
+
 # convert_mount_blocked <persist> <type> <id> — #505: 0 (and a reason) when a
 # conversion owns this home, so no mount may build its old layered view: a
 # conversion process is alive, or a conversion intent is still open (recovery
@@ -1821,6 +1838,19 @@ pt_dir_first_entry() {
         printf '%s' "$name"; return 0
     done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | sort -z)
     return 1
+}
+
+# graduate_legacy_target_preflight <plain_dir> <staging_marker> <intent_file>
+# Return 1 and print the first entry when an unstaged target already has data.
+# Check before bake/consolidate so a refusal cannot mutate the existing layers.
+graduate_legacy_target_preflight() {
+    local target="${1:-}" staging="${2:-}" intent="${3:-}" first
+    if [ -f "$staging" ] || [ -f "$intent" ]; then return 0; fi
+    if first="$(pt_dir_first_entry "$target")"; then
+        printf '%s\n' "$first"
+        return 1
+    fi
+    return 0
 }
 
 # write_graduate_refusal <type> <id> <why> [path] [first] — #577. Records WHY a

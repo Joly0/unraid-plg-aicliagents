@@ -417,11 +417,51 @@ if [ "$UPGRADE_MODE" = "1" ]; then
             _u="${_d%/upper}"; printf '%s\t%s\n' "${_u##*/}" "$_d"
         done
     }
+    _CLEANUP_BAKE_LOCK_FD=""
+    _cleanup_take_home_bake_lock() { # <home id> -> takes the shared bake lock, bounded wait
+        local id="${1:-}" lock_id lock_dir lock_path limit deadline fd
+        _CLEANUP_BAKE_LOCK_FD=""
+        lock_id="${id//[^a-zA-Z0-9_-]/_}"
+        lock_dir="${AICLI_BAKE_LOCK_DIR:-/var/run}"
+        lock_path="$lock_dir/aicli-bake-home-$lock_id.lock"
+        command -v flock >/dev/null 2>&1 || return 1
+        mkdir -p "$lock_dir" 2>/dev/null || return 1
+        { exec {fd}>>"$lock_path"; } 2>/dev/null || return 1
+
+        limit="${AICLI_BAKE_LOCK_WAIT_S:-30}"
+        case "$limit" in ''|*[!0-9]*) limit=30 ;; esac
+        [ "$limit" -le 120 ] || limit=120
+        deadline=$((SECONDS + limit))
+        while :; do
+            if flock -n "$fd" 2>/dev/null; then
+                _CLEANUP_BAKE_LOCK_FD="$fd"
+                return 0
+            fi
+            [ "$SECONDS" -lt "$deadline" ] || break
+            sleep 0.25 || true
+        done
+        { exec {fd}>&-; } 2>/dev/null || true
+        log_status "      [!!] Could not take the home/$id bake lock after ${limit}s."
+        return 1
+    }
+    _cleanup_release_home_bake_lock() {
+        local fd="${_CLEANUP_BAKE_LOCK_FD:-}"
+        [ -n "$fd" ] || return 0
+        { exec {fd}>&-; } 2>/dev/null || true
+        _CLEANUP_BAKE_LOCK_FD=""
+    }
     if declare -f atomic_write_layer >/dev/null 2>&1; then
         lifecycle_log "info" "installer_cleanup" "installer_cleanup_start" "{}" 2>/dev/null || true
         while IFS=$'\t' read -r user upper_dir; do
             [ -n "$user" ] && [ -d "$upper_dir" ] || continue
-            [ -z "$(find "$upper_dir" -type f 2>/dev/null | head -1)" ] && continue
+            # Use the same per-home lock as storagectl bakes. The earlier
+            # drain is best effort; taking this lock closes the race with a
+            # save that starts after that scan.
+            _cleanup_take_home_bake_lock "$user" || continue
+            if [ -z "$(find "$upper_dir" -type f 2>/dev/null | head -1)" ]; then
+                _cleanup_release_home_bake_lock
+                continue
+            fi
             PERSIST_DIR=$(home_persist_path "$user" 2>/dev/null || echo "")
             [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}"
             log_status "      [ZRAM] Baking home delta for $user..."
@@ -439,6 +479,7 @@ if [ "$UPGRADE_MODE" = "1" ]; then
             else
                 log_status "      [!!] Delta bake failed for $user."
             fi
+            _cleanup_release_home_bake_lock
         done < <(_cleanup_home_uppers)
     fi
 

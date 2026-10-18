@@ -3678,7 +3678,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         error "Conversion refused: $_gr_why."
         exit 1
     fi
-    printf '%s\n' "$BASHPID" > "$_GR_CONVERT_LOCK" 2>/dev/null || true
+    convert_lock_begin "$_GR_CONVERT_LOCK"
 
     # The view must be mounted and idle. The conversion copies the live view as it
     # is, so a mounted home is NOT refreshed: the refresh-only op_mount reported
@@ -4104,6 +4104,16 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     exit 0
 fi
 
+# ---- 2. Refuse an occupied legacy target before saving any layers ------------
+# A refusal must not bake or consolidate the source before it reports the path
+# that blocks conversion. Staged retries and open intents keep their target.
+_GR_PT_DIR="$PERSIST_PATH/passthrough/${TYPE}s/$ID"
+_GR_STAGING_MARKER="$PERSIST_PATH/.graduate_staging_${TYPE}_${_GR_LOCK_ID}"
+_GR_INTENT_PATH="$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")"
+if _gr_first="$(graduate_legacy_target_preflight "$_GR_PT_DIR" "$_GR_STAGING_MARKER" "$_GR_INTENT_PATH")"; then :; else
+    _gr_precondition_refuse "pt_dir_occupied" "$_GR_PT_DIR" "$_gr_first"
+fi
+
 # ---- 2. Flush the upper (op_bake path; serialises itself on the bake lock) ---
 log "Flushing upper before migration (op_bake)..."
 if op_bake "$TYPE" "$ID" "$PERSIST_PATH"; then :; else
@@ -4165,20 +4175,6 @@ fi
 
 # ---- 5. Copy the consolidated content into the passthrough plain dir ---------
 # Layout MUST match storagectl _pt_dir: $PERSIST/passthrough/<type>s/<id>
-_GR_PT_DIR="$PERSIST_PATH/passthrough/${TYPE}s/$ID"
-_GR_STAGING_MARKER="$PERSIST_PATH/.graduate_staging_${TYPE}_${_GR_LOCK_ID}"
-_GR_INTENT_EXISTS=0
-[ -f "$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")" ] && _GR_INTENT_EXISTS=1
-if [ ! -f "$_GR_STAGING_MARKER" ] && [ "$_GR_INTENT_EXISTS" -eq 0 ] \
-    && _gr_first="$(pt_dir_first_entry "$_GR_PT_DIR")"; then
-    # A populated pt dir we did NOT stage could be pre-existing user data from an
-    # earlier passthrough life — never overwrite/delete it (data-safety).
-    # #577: a folder with only the plugin's own zero-byte ".aicli/.*_done" markers
-    # is not populated. The rsync --delete below then drops the marker (the layer
-    # copy brings its own).
-    _gr_precondition_refuse "pt_dir_occupied" "$_GR_PT_DIR" "$_gr_first"
-fi
-
 _GR_SCRATCH="/tmp/unraid-aicliagents/.graduate_src_${TYPE}_${_GR_LOCK_ID}_$$"
 mkdir -p "$_GR_SCRATCH" 2>/dev/null
 _gr_cleanup_scratch() {
