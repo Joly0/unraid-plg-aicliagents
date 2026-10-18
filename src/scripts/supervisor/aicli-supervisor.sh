@@ -162,6 +162,11 @@ _entity_upper_for_supervisor() {
 # shellcheck source=../storage/manifest_write.sh
 [ -f "$STORAGE_DIR/manifest_write.sh" ] && { source "$STORAGE_DIR/manifest_write.sh" 2>/dev/null || true; }
 
+# #580 (F3): layer_files_of / layer_name_is_of — the EXACT layer matcher (bob never
+# matches bob_smith). Functions only; no side effects on source.
+# shellcheck source=../storage/detect_backend.sh
+[ -f "$STORAGE_DIR/detect_backend.sh" ] && { source "$STORAGE_DIR/detect_backend.sh" 2>/dev/null || true; }
+
 # ---------------------------------------------------------------------------
 # Source queue helpers
 # ---------------------------------------------------------------------------
@@ -666,12 +671,23 @@ _glob_layers() {
     [ -d "$persist_path" ] || return 0
     local safe_id
     safe_id=$(printf '%s' "$id" | sed 's/[^A-Za-z0-9._-]/_/g')
-    shopt -s nullglob
-    local files=("$persist_path/${type}_${safe_id}_"*.sqsh)
-    shopt -u nullglob
-    for f in "${files[@]:-}"; do
-        [ -f "$f" ] && echo "$f"
-    done
+    # #580 (F3): exact matcher. A prefix glob let "bob" claim bob_smith's layers.
+    local found
+    if ! declare -f layer_files_of >/dev/null 2>&1; then
+        # Matcher file missing (broken install): never report "no layers" — that halts.
+        shopt -s nullglob
+        local files=("$persist_path/${type}_${safe_id}_"*.sqsh)
+        shopt -u nullglob
+        for f in "${files[@]:-}"; do [ -f "$f" ] && echo "$f"; done
+        return 0
+    fi
+    found="$(layer_files_of "$persist_path" "$type" "$id")"
+    if [ -z "$found" ] && [ "$safe_id" != "$id" ]; then
+        found="$(layer_files_of "$persist_path" "$type" "$safe_id")"
+    fi
+    while IFS= read -r f; do
+        [ -n "$f" ] && [ -f "$f" ] && echo "$f"
+    done <<< "$found"
 }
 
 # F1 (WP#1325): echo ONLY the contents of the intent's "delete":[ ... ] array, so a
@@ -685,6 +701,81 @@ _intent_delete_segment() {
     esac
     local _seg="${1#*\"delete\":[}"
     printf '%s' "${_seg%%]*}"
+}
+
+# _intent_keep_name <intent_json> — the intent's "keep" layer basename ("" if none).
+_intent_keep_name() {
+    printf '%s' "$1" | grep -oE '"keep":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+# _intent_old_layer_is_dead <intent_json> <layer_basename> <persist_path> [manifest_layer...]
+# 0 when the intent's delete plan names <layer_basename>, its keep layer is in the
+# manifest list given and is on disk. Then the old layer holds only data the keep
+# layer already has (or data deleted before the merge) and must not be recorded
+# again. A graduate intent (keep "") never matches. (#595, R-017)
+_intent_old_layer_is_dead() {
+    local json="$1" name="$2" persist="$3"; shift 3
+    local keep m
+    keep="$(_intent_keep_name "$json")"
+    [ -n "$keep" ] || return 1
+    case "$(_intent_delete_segment "$json")" in *"\"$name\""*) : ;; *) return 1 ;; esac
+    [ -f "${persist%/}/$keep" ] || return 1
+    for m in "$@"; do [ "$m" = "$keep" ] && return 0; done
+    return 1
+}
+
+# _intent_plan_complete <intent_json> <persist_path> [manifest_layer...]
+# 0 when the intent has a keep layer that is in the manifest list and on disk and
+# no layer of its delete plan is left on disk. (#595, R-017)
+_intent_plan_complete() {
+    local json="$1" persist="$2"; shift 2
+    local keep m ok=0 bn
+    keep="$(_intent_keep_name "$json")"
+    [ -n "$keep" ] || return 1
+    case "$json" in *'"delete":['*) : ;; *) return 1 ;; esac
+    [ -f "${persist%/}/$keep" ] || return 1
+    for m in "$@"; do [ "$m" = "$keep" ] && ok=1; done
+    [ "$ok" -eq 1 ] || return 1
+    while IFS= read -r bn; do
+        [ -n "$bn" ] || continue
+        [ -e "${persist%/}/$bn" ] && return 1
+    done < <(_intent_delete_segment "$json" | grep -oE '"[^"]+"' | tr -d '"')
+    return 0
+}
+
+# _reconcile_finish_intent <entity> <persist_path> <intent_json> <intent_file> [manifest_layer...]
+# #595 (R-017): an interrupted consolidate leaves its write-ahead intent, the new
+# layer in the manifest and some old layers on disk. Each old layer the delete
+# plan names is dead data: retire it (the next check would otherwise record it
+# again and bring its deleted files back). When the plan is complete, clear the
+# intent. Returns 0 when it changed anything (the caller lists the disk again).
+# The caller holds the per-entity storage lock.
+_reconcile_finish_intent() {
+    local entity="$1" persist="$2" json="$3" ifile="$4"; shift 4
+    local type="${entity%%/*}" id="${entity#*/}" f bn changed=1
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        bn="$(basename "$f")"
+        _intent_old_layer_is_dead "$json" "$bn" "$persist" "$@" || continue
+        # Only a layer the manifest does not name (the caller's list is the manifest).
+        local listed=0 m
+        for m in "$@"; do [ "$m" = "$bn" ] && listed=1; done
+        [ "$listed" -eq 0 ] || continue
+        log_info "Reconcile: leftover old layer $bn of an interrupted $entity merge — finishing the delete (write-ahead intent)"
+        ( source "${AICLI_STORAGE_COMMON_SH:-${STORAGE_DIR}/common.sh}" >/dev/null 2>&1 \
+            && layer_retire_file "$f" "/tmp/unraid-aicliagents/mnt/${bn%.sqsh}" ) || true
+        lifecycle_log "info" "supervisor" "reconcile_intent_delete_finished" \
+            "{\"entity\":\"$entity\",\"filename\":\"$bn\"}" 2>/dev/null || true
+        changed=0
+    done < <(_glob_layers "$type" "$id" "$persist" 2>/dev/null)
+    if _intent_plan_complete "$json" "$persist" "$@"; then
+        rm -f "$ifile" 2>/dev/null || true
+        log_info "Reconcile: write-ahead intent of $entity is complete — cleared"
+        lifecycle_log "info" "supervisor" "reconcile_intent_cleared" \
+            "{\"entity\":\"$entity\"}" 2>/dev/null || true
+        changed=0
+    fi
+    return "$changed"
 }
 
 # ---------------------------------------------------------------------------
@@ -750,6 +841,9 @@ _OP_DEFER_REASON=""
 # success/failure callsites so _clear/_relaunch can read the epoch from the
 # ledger (keyed by job_id) instead of a per-entity sidecar.
 _CURRENT_JOB_ID=""
+# R-025 (#603): the tracked job this supervisor runs right now (any op). The
+# orphan sweep never ends this one.
+_RUNNING_JOB_ID=""
 
 _on_term() {
     _STOPPING=1
@@ -1223,6 +1317,11 @@ _op_reconcile() {
                             && manifest_set_backend "$type" "$id" "passthrough"; then
                             rm -f "$_intent_file" "$_gr_ver" "${persist_path%/}/.graduate_staging_${type}_${_gr_safe_id}" 2>/dev/null || true
                             [ "$_gr_mode" = "staged" ] && [ -n "$_gr_c" ] && [ "$_gr_c" != "$_gr_pt_dir" ] && rm -rf "$_gr_c" 2>/dev/null
+                            # #579 (F2): the switch is done and the intent is gone, so the
+                            # parked RAM writable layer is no longer needed. Without this
+                            # it stays in RAM for ever (the converter removes it after
+                            # clear_intent; a crash skipped that).
+                            [ -n "$_gr_u" ] && [ -d "$_gr_u.convert-keep" ] && rm -rf "$_gr_u.convert-keep" 2>/dev/null
                             lifecycle_log "info" "supervisor" "graduate_intent_completed_forward" "{\"entity\":\"$entity\",\"mode\":\"$_gr_mode\"}" 2>/dev/null || true
                         else
                             log_warn "Reconcile: conversion forward manifest write failed for $entity — will retry next tick"
@@ -1285,6 +1384,15 @@ _op_reconcile() {
                 continue
                 ;;
         esac
+
+        # #595 (R-017): finish the delete of an interrupted consolidate BEFORE the
+        # untracked-layer check below would record the old layers again.
+        if [ -n "$_intent_json" ] && _reconcile_finish_intent "$entity" "$persist_path" "$_intent_json" "$_intent_file" "${expected_files[@]:-}"; then
+            actual_files=()
+            while IFS= read -r f; do
+                [ -n "$f" ] && actual_files+=("$(basename "$f")")
+            done < <(_glob_layers "$type" "$id" "$persist_path" 2>/dev/null)
+        fi
 
         # Check for files in manifest but not on disk (missing layers)
         local has_missing=0
@@ -3115,6 +3223,70 @@ _reap_job_ledger() {
     fi
 }
 
+# _job_runner_alive <job_id> — 0 when some process other than this shell has the
+# job id as one exact argument (the history, old-version and temp-folder runners
+# get it that way: `php runner.php <job_id>`). A dead supervisor leaves such a
+# runner behind; the runner keeps the job real until it ends. /proc is read with
+# no pgrep, so this shell never matches itself.
+_job_runner_alive() {
+    local want="${1:-}" p arg
+    [ -n "$want" ] || return 1
+    for p in /proc/[0-9]*; do
+        [ "${p#/proc/}" = "$$" ] && continue
+        [ "${p#/proc/}" = "${BASHPID:-$$}" ] && continue
+        [ -r "$p/cmdline" ] || continue
+        while IFS= read -r -d '' arg; do
+            [ "$arg" = "$want" ] && return 0
+        done < "$p/cmdline" 2>/dev/null
+    done
+    return 1
+}
+
+# _reap_orphan_running_jobs [grace_s] — R-025 (#603) and F1 (#587). The
+# supervisor runs one job at a time, in this process. A ledger entry in state
+# "running" that is not the job in hand, and that no runner process serves, is
+# the leftover of a supervisor that died mid-job (kill -9, out of memory, an
+# installer restart). Nothing else ever ends it: the Home card stays locked and
+# the Activity tray row stays alive. Mark it failed (reason supervisor_restart).
+# An entry that changed less than <grace_s> seconds ago is left alone (default
+# 30; start-up passes 0). A history runner that outlived the supervisor keeps
+# its entry until it ends. Prints how many entries it ended.
+_reap_orphan_running_jobs() {
+    local grace="${1:-30}" f jid state now updated age n=0
+    local ent op type id attempt queued_at started_at trace epoch
+    [ -d "$JOBS_DIR" ] || { echo 0; return 0; }
+    declare -f job_ledger_write >/dev/null 2>&1 || { echo 0; return 0; }
+    now=$(date +%s)
+    for f in "$JOBS_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        state="$(queue_read_field "$f" state 2>/dev/null)"
+        [ "$state" = "running" ] || continue
+        jid="$(basename "$f" .json)"
+        [ "$jid" = "${_RUNNING_JOB_ID:-}" ] && continue
+        updated="$(queue_read_field "$f" updated_at 2>/dev/null)"
+        case "$updated" in ''|*[!0-9]*) updated="$(stat -c '%Y' "$f" 2>/dev/null || echo "$now")" ;; esac
+        age=$(( now - updated ))
+        [ "$age" -ge "$grace" ] || continue
+        _job_runner_alive "$jid" && continue
+        ent="$(queue_read_field "$f" entity 2>/dev/null)"
+        op="$(queue_read_field "$f" op 2>/dev/null)"
+        type="${ent%%/*}"; id="${ent#*/}"
+        attempt="$(queue_read_field "$f" attempt 2>/dev/null)"
+        queued_at="$(queue_read_field "$f" queued_at 2>/dev/null)"
+        started_at="$(queue_read_field "$f" started_at 2>/dev/null)"
+        trace="$(queue_read_field "$f" trace 2>/dev/null)"
+        epoch="$(queue_read_field "$f" consolidate_epoch 2>/dev/null)"
+        job_ledger_write "$jid" "$op" "$type" "$id" "failed" "1" "" \
+            "$attempt" "$queued_at" "$started_at" "$now" "supervisor_restart" "$trace" "$epoch" || continue
+        n=$((n + 1))
+        log_warn "Job $jid ($ent, op=$op) was running when the supervisor stopped — marked failed (supervisor_restart)"
+        lifecycle_log "warn" "supervisor" "job_orphan_failed" \
+            "{\"job_id\":\"$jid\",\"entity\":\"$ent\",\"op\":\"$op\"}" 2>/dev/null || true
+    done
+    [ "$n" -gt 0 ] && _publish_storage_status
+    echo "$n"
+}
+
 # _bake_cooldown_marker_sweep — Forgejo #244. storage_ops.sh writes
 # `.bake_busy_cooldown_<type>_<id>` (an epoch) when it persists a BUSY home, and
 # removes it only on that home's next idle bake. A home that is deleted first
@@ -4441,6 +4613,9 @@ _work_tick() {
     # backoff) back into the queue.
     _check_job_retries
 
+    # Step 3e: R-025 (#603) — end ledger entries a dead supervisor left "running".
+    _reap_orphan_running_jobs 30 >/dev/null
+
     # Step 4: Pop and process one queue item
     local qdepth
     qdepth="$(queue_depth 2>/dev/null || echo 0)"
@@ -4511,6 +4686,7 @@ _work_tick() {
                 fi
 
                 # S-08: tracked job → ledger goes running before the op spawns.
+                _RUNNING_JOB_ID="$req_job"
                 if [ -n "$req_job" ]; then
                     _job_mark_running "$req_job" "$req_op" "$req_type" "$req_id" "$req_reason" "$req_trace"
                 fi
@@ -4558,6 +4734,7 @@ _work_tick() {
                 if [ -n "$req_job" ]; then
                     _job_finalize "$req_job" "$req_op" "$req_type" "$req_id" "$req_reason" "$req_trace" "$req_prio"
                 fi
+                _RUNNING_JOB_ID=""
             fi
         fi
     fi
@@ -4732,6 +4909,11 @@ _do_start() {
         _v=$(grep -oP '^bake_backoff_cap_seconds="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
         [ -n "$_v" ] && BAKE_BACKOFF_CAP_S="$_v"
     fi
+
+    # R-025 (#603): we hold the lock and ran no job yet, so every "running" ledger
+    # entry is a leftover of the predecessor. End it now (no grace) so the Home
+    # card unlocks. A history runner that outlived the predecessor is kept.
+    _reap_orphan_running_jobs 0 >/dev/null
 
     log_info "Supervisor starting (pid $$, version $DAEMON_VERSION)"
     lifecycle_log "info" "supervisor" "supervisor_started" "{\"pid\":$$,\"version\":\"$DAEMON_VERSION\"}" 2>/dev/null || true

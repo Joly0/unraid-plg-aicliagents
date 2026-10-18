@@ -38,6 +38,55 @@ cd "$EMHTTP_DEST"
 log_progress "20"
 log_step "[2/5] Restoring Backend Payload..."
 
+# --- Payload check (R-019, #597) ----------------------------------------------
+# Unraid fetches a <FILE> only when the cached copy is missing. A truncated
+# download or a proxy error page that was saved under the cache name therefore
+# stayed there, and every install and every boot of this version failed on it
+# until a person deleted the file by hand. The check below finds such a file,
+# deletes the flash cache copy and fetches the payload once more. A SHA-256
+# declared in the .plg (<SHA256> in the <FILE> entry, exported by the installer as
+# AICLI_SRC_SHA256) is enforced as well; with none declared, the archive must
+# still be a complete, readable tar.gz.
+# BEGIN payload-check
+aicli_payload_ok() {   # <file> [expected_sha256] -> 0 when the archive is complete
+    local f="${1:-}" want="${2:-}"
+    [ -s "$f" ] || return 1
+    gzip -t "$f" 2>/dev/null || return 1
+    tar -tzf "$f" >/dev/null 2>&1 || return 1
+    [ -z "$want" ] && return 0
+    [ "$(sha256sum "$f" 2>/dev/null | awk '{print $1}')" = "$want" ]
+}
+aicli_ensure_src_payload() {   # verify /tmp/aicli-src.tar.gz; on failure fetch it again
+    local tmp="${AICLI_SRC_TMP:-/tmp/aicli-src.tar.gz}"
+    local cache="${CONFIG_DIR}/aicli-src-${VERSION}.tar.gz"
+    local url="${AICLI_SRC_URL:-${GIT_URL}/src.tar.gz}"
+    local want="${AICLI_SRC_SHA256:-}"
+    if aicli_payload_ok "$tmp" "$want"; then return 0; fi
+    log_status "  > The cached source payload is damaged or incomplete. Deleting it and downloading it again..."
+    # The damaged flash copy goes first: even when the new download fails, the
+    # next install fetches a fresh file instead of reading this one again.
+    rm -f "$tmp" "$cache"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --max-time 300 -o "$tmp.dl" "$url" 2>/dev/null || rm -f "$tmp.dl"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 60 -O "$tmp.dl" "$url" 2>/dev/null || rm -f "$tmp.dl"
+    fi
+    if [ -f "$tmp.dl" ] && aicli_payload_ok "$tmp.dl" "$want"; then
+        mkdir -p "$(dirname "$cache")" 2>/dev/null
+        cp -f "$tmp.dl" "$cache.tmp.$$" 2>/dev/null && mv -f "$cache.tmp.$$" "$cache" 2>/dev/null || rm -f "$cache.tmp.$$"
+        mv -f "$tmp.dl" "$tmp"
+        log_status "  > Source payload downloaded again and checked."
+        return 0
+    fi
+    rm -f "$tmp.dl"
+    return 1
+}
+# END payload-check
+if ! aicli_ensure_src_payload; then
+    log_fail "Source payload (src.tar.gz) is damaged and could not be downloaded again. Check the network, then install again; the damaged cache copy is deleted."
+    exit 1
+fi
+
 # Extract the unified src.tar.gz into a private staging directory.  Nothing in
 # the active generation is modified until validation and the migration gate
 # have both passed.

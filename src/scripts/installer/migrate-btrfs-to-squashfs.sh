@@ -18,6 +18,19 @@ source "$SCRIPT_DIR/../storage/common.sh"
 # Source canonical path resolver (Phase 5 — replaces inline cfg greps)
 source "$SCRIPT_DIR/../storage/resolve_paths.sh" 2>/dev/null || true
 
+# #580 (F4): "does this entity already have a layer?" with the EXACT matcher
+# (detect_backend.sh via common.sh). The old prefix glob let "bob" see the layers
+# of "bob_smith" and skip bob's migration. Falls back to the glob only when the
+# matcher is missing.
+_mig_has_layers() {
+    local persist="$1" type="$2" id="$3"
+    if declare -f _entity_has_layers >/dev/null 2>&1; then
+        [ "$(_entity_has_layers "$persist" "$type" "$id")" = "1" ]
+    else
+        compgen -G "$persist/${type}_${id}_*.sqsh" > /dev/null 2>&1
+    fi
+}
+
 mkdir -p "$(dirname "$LOCK_FILE")"
 
 # Use flock to prevent concurrent migration runs
@@ -170,7 +183,7 @@ localize_state() {
 }
 
 # Skip localization if user already has SquashFS home (state is already inside the sqsh)
-if ! compgen -G "$HOME_PERSIST_PATH/home_${CFG_USER}_*.sqsh" > /dev/null 2>&1; then
+if ! _mig_has_layers "$HOME_PERSIST_PATH" home "$CFG_USER"; then
     TARGET_HOME_RAW="$PERSIST_PATH/persistence/$CFG_USER"
     [ ! -d "$TARGET_HOME_RAW" ] && [ -d "$PERSIST_PATH/$CFG_USER" ] && TARGET_HOME_RAW="$PERSIST_PATH/$CFG_USER"
 
@@ -220,7 +233,7 @@ if [ -n "$MONO_IMG" ]; then
                 log "  > Agent $AGENT_ID already extracted. Skipping."
                 continue
             fi
-            if compgen -G "$PERSIST_PATH/agent_${AGENT_ID}_*.sqsh" > /dev/null 2>&1; then
+            if _mig_has_layers "$PERSIST_PATH" agent "$AGENT_ID"; then
                 log "  > Agent $AGENT_ID already has SquashFS. Skipping extraction."
                 continue
             fi
@@ -260,7 +273,7 @@ if [ -d "$RAW_AGENTS" ]; then
         fi
 
         # Skip if ANY sqsh files exist for this agent (not just _v1_vol1)
-        if compgen -G "$PERSIST_PATH/agent_${AGENT_ID}_*.sqsh" > /dev/null 2>&1; then
+        if _mig_has_layers "$PERSIST_PATH" agent "$AGENT_ID"; then
             log "  > Agent $AGENT_ID already has SquashFS volumes. Deleting legacy folder."
             rm -rf "$agent_dir"
             continue
@@ -295,7 +308,7 @@ for home_img in "$PERSIST_PATH/persistence/home_"*.img "$PERSIST_PATH/home_"*.im
     fi
 
     # Skip if ANY sqsh files exist for this user
-    if compgen -G "$HOME_PERSIST_PATH/home_${USER_NAME}_*.sqsh" > /dev/null 2>&1; then
+    if _mig_has_layers "$HOME_PERSIST_PATH" home "$USER_NAME"; then
         log "  > Home $USER_NAME already converted. Moving image to backup."
         mv "$home_img" "$MIGRATED_DIR/homes/"
         continue
@@ -331,7 +344,7 @@ for home_parent in "$PLUGIN_BASE/persistence" "$PLUGIN_BASE" "$HOME_PERSIST_PATH
         mountpoint -q "$home_dir" && continue
 
         # Skip if this user already has ANY .sqsh file
-        if compgen -G "$HOME_PERSIST_PATH/home_${USER_NAME}_*.sqsh" > /dev/null 2>&1; then
+        if _mig_has_layers "$HOME_PERSIST_PATH" home "$USER_NAME"; then
             log "  > Home $USER_NAME already has SquashFS volumes. Skipping raw folder."
             continue
         fi

@@ -112,6 +112,12 @@ _backup_load_options() {
 _backup_hosting_mode() {
     local id="${1:-}" persist
     persist="$(home_persist_path "$id" 2>/dev/null)"
+    # #580 (F4): exact matcher (detect_backend.sh) — a prefix glob let "bob" see the
+    # layers of "bob_smith" and pick the wrong hosting mode.
+    if [ -n "$persist" ] && declare -f _entity_has_layers >/dev/null 2>&1; then
+        [ "$(_entity_has_layers "$persist" home "$id")" = "1" ] && { printf 'layers'; return 0; }
+        printf 'direct'; return 0
+    fi
     if [ -n "$persist" ] && compgen -G "${persist}/home_${id}_*.sqsh" > /dev/null 2>&1; then
         printf 'layers'
     else

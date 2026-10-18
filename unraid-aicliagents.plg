@@ -697,7 +697,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.10.18.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/install-engine.sh</URL>
-<SHA256>42416945fcf82960b3c8d0c46a034679506324141a4d48a9dc252dfc5b6025da</SHA256>
+<SHA256>8e15c8762a8fae491a4b72bdbe36c5fab9e14d5037b1e9d0305dd1bd443d3795</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.10.18.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/uninstaller/uninstall-engine.sh</URL>
@@ -801,6 +801,35 @@ for f in "$LOCAL_CACHE"/aicli-*-"$CACHE_VERSION".sh "$LOCAL_CACHE"/aicli-*-"$CAC
     cp -f "$f" "/tmp/${base/-$CACHE_VERSION./.}" 2&gt;/dev/null
 done
 chmod +x /tmp/aicli-*.sh
+
+# R-019 (#597): Unraid fetches a FILE only when the cached copy is missing, so a
+# truncated download or a proxy error page kept under the cache name blocked every
+# install of this version. Two guards:
+#  1. The engine must parse. A copy that does not is deleted (flash and /tmp) and
+#     fetched once more. If it is still bad, the abort below runs and no damaged
+#     copy is left on flash for the next try.
+#  2. A SHA-256 that the plugin file declares for the source payload (a SHA256
+#     element inside its FILE entry; Unraid checks it too) is passed to the engine.
+#     The engine checks the payload and downloads it again when it is damaged.
+if [ -f /tmp/aicli-engine.sh ] &amp;&amp; ! bash -n /tmp/aicli-engine.sh 2&gt;/dev/null; then
+    rm -f /tmp/aicli-engine.sh "$LOCAL_CACHE/aicli-engine-$CACHE_VERSION.sh"
+    if curl -fsSL --retry 2 --max-time 60 -o /tmp/aicli-engine.sh.dl "$GIT_URL/src/scripts/installer/install-engine.sh" 2&gt;/dev/null &amp;&amp; bash -n /tmp/aicli-engine.sh.dl 2&gt;/dev/null; then
+        cp -f /tmp/aicli-engine.sh.dl "$LOCAL_CACHE/aicli-engine-$CACHE_VERSION.sh" 2&gt;/dev/null
+        mv -f /tmp/aicli-engine.sh.dl /tmp/aicli-engine.sh
+        chmod +x /tmp/aicli-engine.sh
+    else
+        rm -f /tmp/aicli-engine.sh.dl
+    fi
+fi
+AICLI_PLG_SELF=""
+for _p in "/tmp/plugins/unraid-aicliagents.plg" "/boot/config/plugins/unraid-aicliagents.plg"; do
+    [ -f "$_p" ] &amp;&amp; { AICLI_PLG_SELF="$_p"; break; }
+done
+AICLI_SRC_SHA256=""
+if [ -n "$AICLI_PLG_SELF" ]; then
+    AICLI_SRC_SHA256=$(awk '/[&lt;]FILE / &amp;&amp; /aicli-src-[^"]*[.]tar[.]gz"/ {f=1} f &amp;&amp; /[&lt;]SHA256[>]/ {s=$0; sub(/.*[&lt;]SHA256[>]/,"",s); sub(/[&lt;]\/SHA256[>].*/,"",s); print s; exit} /[&lt;]\/FILE[>]/ {f=0}' "$AICLI_PLG_SELF" 2&gt;/dev/null | tr -cd '0-9a-fA-F' | tr 'A-F' 'a-f')
+fi
+export AICLI_SRC_SHA256
 
 mkdir -p /tmp/unraid-aicliagents "$CONFIG_DIR"
 LOG_FILE="$CONFIG_DIR/install.log"
