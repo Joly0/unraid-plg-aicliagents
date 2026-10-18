@@ -102,10 +102,13 @@ final class UpperPlacementService
     {
         $mounts = $seams['mounts'] ?? (is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '');
         if (is_callable($mounts)) $mounts = $mounts();
-        if (!StorageMountService::mountTableHasTarget((string)$mounts, StoragePathResolver::ZRAM_BASE)) return 0;
+        // zramBase(), not the ZRAM_BASE constant: the state root can be redirected (#646), and the
+        // rest of this service (liveMode, homeStates) already reads zramBase(). Production: the same path.
+        $zramBase = StoragePathResolver::zramBase();
+        if (!StorageMountService::mountTableHasTarget((string)$mounts, $zramBase)) return 0;
         $bytes = isset($seams['zram_disk_total'])
             ? (float)$seams['zram_disk_total']()
-            : (float)@disk_total_space(StoragePathResolver::ZRAM_BASE);
+            : (float)@disk_total_space($zramBase);
         return (int)floor($bytes / 1048576);
     }
 
