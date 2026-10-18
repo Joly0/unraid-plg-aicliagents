@@ -754,7 +754,7 @@ class UtilityHandler {
      * createDirectory() above; production callers still just pass the
      * $_POST values (see the `save_file` case in handle()).
      */
-    public static function saveFile($rawPath, $rawFilename, $b64data, bool $secretFlag = false) {
+    public static function saveFile($rawPath, $rawFilename, $b64data, bool $secretFlag = false, ?int $maxFileBytesOverride = null) {
         aicli_log("[Upload/SaveFile] Received: '$rawFilename' to '$rawPath' (" . strlen((string)$b64data) . " b64 chars)", AICLI_LOG_DEBUG, "UtilityHandler");
 
         $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
@@ -800,16 +800,41 @@ class UtilityHandler {
         // ValidationService::sanitizeFilename. Destination cannot escape the
         // allowlisted bases.
         $dest = rtrim($targetPath, '/') . '/' . $filename;
+
+        // #648: the directory is checked above, the file name is not. A link at the
+        // file name must not carry the write outside the allowed places (an agent
+        // can plant notes.md -> /etc/shadow, and this process may run as root). A
+        // live link is allowed only when its real target passes the same allow-list
+        // and is not under /boot. A dangling link is replaced by the atomic write.
+        if (is_link($dest)) {
+            $real = ValidationService::validatePath($dest);
+            if ($real === false || strpos($real, '/boot/') === 0) {
+                aicli_log("[Upload/SaveFile] REJECTED: '$dest' is a link that leaves the allowed folders", AICLI_LOG_ERROR, "UtilityHandler");
+                return ['status' => 'error', 'message' => 'The file name is a link that points outside the allowed folders.'];
+            }
+        }
+
+        // #648: whole-file saves obey the same size cap as chunked uploads (0 = no cap).
+        $maxFileBytes = $maxFileBytesOverride ?? self::getUploadLimits()['max_file_bytes'];
+        if ($maxFileBytes > 0 && strlen($data) > $maxFileBytes) {
+            aicli_log("[Upload/SaveFile] REJECTED: " . strlen($data) . " bytes exceed the upload_max_bytes limit ($maxFileBytes bytes)", AICLI_LOG_ERROR, "UtilityHandler");
+            return ['status' => 'error', 'message' => 'This file is larger than the configured limit.'];
+        }
+
+        // #648: temp file + rename, so a full disk cannot leave a truncated file. The
+        // rename makes a new inode, so keep the mode of the file it replaces.
+        $oldMode = @fileperms($dest);
         error_clear_last();
-        // nosemgrep: php.lang.security.tainted-url-to-connection.tainted-url-to-connection
-        $bytes = @file_put_contents($dest, $data);
+        $ok = \AICliAgents\Services\AtomicWriteService::write($dest, $data);
+        $bytes = $ok ? strlen($data) : false;
+        if ($ok && $oldMode !== false && !$isSecret) @chmod($dest, $oldMode & 07777);
         if ($bytes !== false) {
             if ($isSecret) @chmod($dest, 0600);
             aicli_log("[Upload/SaveFile] Complete: $filename ($bytes bytes) saved to $targetPath", AICLI_LOG_INFO, "UtilityHandler");
             return ['status' => 'ok', 'filename' => $filename, 'bytes' => $bytes];
         }
-        $phpErr = error_get_last();
-        $errDetail = $phpErr ? $phpErr['message'] : 'unknown error';
+        $failure = \AICliAgents\Services\AtomicWriteService::lastFailure();
+        $errDetail = $failure ? ($failure['stage'] . ': ' . ($failure['warning'] !== '' ? $failure['warning'] : 'failed')) : 'unknown error';
         aicli_log("[Upload/SaveFile] FAILED: Could not write to $dest — $errDetail", AICLI_LOG_ERROR, "UtilityHandler");
         return ['status' => 'error', 'message' => 'Failed to write file to ' . $dest . ' (' . $errDetail . ')'];
     }

@@ -478,7 +478,7 @@ function persistEntity(type, id) {
         // AJAX→PHP→shell mutation path the trace id is designed to join.
         const req = (type === 'agent')
             ? aicliAjax('persist_agent', { id: id })
-            : aicliAjax('persist_home', {});
+            : aicliAjax('persist_home', { user: id });
         // R2 (HOME_PERSIST_PILL_AND_FEEDBACK): never leave the spinner frozen.
         req.fail(function() {
             swal("Persistence Failed", "The request did not complete. Check debug.log / network.", "error");
@@ -516,7 +516,7 @@ function repairStorage(type, id) {
     if (aicliBlockedByConsolidate('repairing storage')) return false;
     swal({ title: "Repair " + type + " storage?", text: "Unmount and remount the OverlayFS stack for " + id + ". This may briefly interrupt active sessions.", type: "warning", showCancelButton: true, confirmButtonText: "Repair", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
         const action = (type === 'agent') ? 'repair_agent_storage' : 'repair_home_storage';
-        aicliAjax(action, { id: id }, function(r) {
+        aicliAjax(action, (type === 'agent') ? { id: id } : { id: id, user: id }, function(r) {
             if (r.status === 'ok') swal({ title: "Repaired", text: "Storage stack remounted.", type: "success", timer: 1500, showConfirmButton: false });
             else swal("Repair Failed", r.message, "error");
             refreshStats();
@@ -801,13 +801,20 @@ function deleteHomeStorage(id) {
                 swal.showInputError('Type DELETE exactly (uppercase) to confirm — or Cancel to back out.');
                 return false;
             }
-            aicliAjax('delete_home_storage', { id: id, root_confirmed: '1' }, function(r) {
-                if (r && r.status === 'ok') {
-                    swal({ title: 'Deleted', text: r.message || 'Home storage deleted.', type: 'success', timer: 2500, showConfirmButton: false });
-                    refreshStats();
-                } else {
-                    swal('Delete Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
+            // #654: the server makes a short single-use token once DELETE is typed.
+            aicliAjax('delete_home_confirm_token', { id: id }, function(t) {
+                if (!t || t.status !== 'ok' || !t.token) {
+                    swal('Delete Failed', (t && t.message) || 'Could not get a confirmation from the server.', 'error');
+                    return;
                 }
+                aicliAjax('delete_home_storage', { id: id, confirm_token: t.token }, function(r) {
+                    if (r && r.status === 'ok') {
+                        swal({ title: 'Deleted', text: r.message || 'Home storage deleted.', type: 'success', timer: 2500, showConfirmButton: false });
+                        refreshStats();
+                    } else {
+                        swal('Delete Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
+                    }
+                });
             });
         });
     } else {

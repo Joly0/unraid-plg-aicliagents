@@ -252,6 +252,35 @@ class StorageTargetService {
                 'The backup target cannot be inside the plugin persistence directory.');
         }
 
+        // #653: a backup must survive a reboot and must be able to hold a "latest"
+        // link. Fold "." and ".." out of the path first (so /mnt/cache/../../tmp/x is
+        // seen as /tmp/x), follow links on the part that exists, then refuse RAM
+        // (tmpfs, ramfs, rootfs), the flash drive (/boot, vfat) and the RAM folders.
+        $resolved = self::collapseDots($resolved);
+        [$anc, $suffix] = self::existingAncestor($resolved);
+        $realAnc = ($anc !== '' && file_exists($anc)) ? realpath($anc) : false;
+        $real = ($realAnc !== false ? rtrim($realAnc, '/') : $anc) . $suffix;
+        foreach ([$resolved, $real] as $candidate) {
+            if (self::isUnderPath($candidate, '/boot') || self::isUnderPath($candidate, '/dev/shm')) {
+                return self::backupTargetResult(false, $resolved, $fstype, 0,
+                    "Target '$resolved' is on the flash drive or in RAM. A backup there is lost or cannot be linked. Pick a pool or disk path.");
+            }
+        }
+        $realFs = self::findmntFstype($real);
+        if ($realFs !== '') $fstype = $realFs;
+        if (in_array(strtolower($fstype), ['tmpfs', 'ramfs', 'rootfs', 'vfat', 'exfat', 'msdos'], true)) {
+            return self::backupTargetResult(false, $resolved, $fstype, 0,
+                "Target '$resolved' is on a $fstype filesystem (RAM or flash). A backup there is lost at reboot or cannot be linked. Pick a pool or disk path.");
+        }
+        if ($fstype === '') {
+            foreach (['/tmp', '/root', '/var'] as $volatileRoot) {
+                if (self::isUnderPath($real, $volatileRoot)) {
+                    return self::backupTargetResult(false, $resolved, $fstype, 0,
+                        "Target '$resolved' is in a RAM folder. A backup there is lost at reboot. Pick a pool or disk path.");
+                }
+            }
+        }
+
         $writableCheck = is_dir($resolved) ? $resolved : self::existingAncestor($resolved)[0];
         if ($writableCheck === '' || !is_dir($writableCheck) || !is_writable($writableCheck)) {
             return self::backupTargetResult(false, $resolved, $fstype, 0,
@@ -264,6 +293,17 @@ class StorageTargetService {
     /** @return array{ok:bool, resolved:string, fs:string, free_bytes:int, message:string} */
     private static function backupTargetResult(bool $ok, string $resolved, string $fs, int $freeBytes, string $message): array {
         return ['ok' => $ok, 'resolved' => $resolved, 'fs' => $fs, 'free_bytes' => $freeBytes, 'message' => $message];
+    }
+
+    /** #653: fold "." and ".." segments out of an absolute path without touching the disk. */
+    private static function collapseDots(string $path): string {
+        $out = [];
+        foreach (explode('/', $path) as $seg) {
+            if ($seg === '' || $seg === '.') continue;
+            if ($seg === '..') { array_pop($out); continue; }
+            $out[] = $seg;
+        }
+        return '/' . implode('/', $out);
     }
 
     /** $path === $root or a path strictly below it (both compared literally, no realpath). */

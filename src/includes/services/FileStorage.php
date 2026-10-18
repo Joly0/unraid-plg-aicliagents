@@ -1107,6 +1107,36 @@ final class FileStorage
         return is_file(self::markerPath());
     }
 
+    /**
+     * #652: the exclusive right to start a path migration. A non-blocking flock on
+     * a lock file beside the marker, so two requests cannot both pass the "no
+     * marker" check and then overwrite each other's marker. Returns the open lock
+     * handle (keep it until the request ends, then release it with
+     * releaseMigrationLock()) or null when another migration holds it.
+     * @return resource|null
+     */
+    public static function acquireMigrationLock()
+    {
+        $path = self::markerPath() . '.lock';
+        @mkdir(dirname($path), 0755, true);
+        $fh = @fopen($path, 'c');
+        if ($fh === false) return null;
+        if (!@flock($fh, LOCK_EX | LOCK_NB)) {
+            @fclose($fh);
+            return null;
+        }
+        return $fh;
+    }
+
+    /** @param resource|null $fh */
+    public static function releaseMigrationLock($fh): void
+    {
+        if (is_resource($fh)) {
+            @flock($fh, LOCK_UN);
+            @fclose($fh);
+        }
+    }
+
     private static function writeMigrationMarker(array $plan): void
     {
         $marker = self::markerPath();

@@ -90,11 +90,12 @@ class StorageHandler {
             case 'repair_agent_storage':        $result = self::repairAgent($id); break;
             case 'repair_home_storage':         $result = self::repairHome(); break;
             case 'delete_home_storage':         $result = self::deleteHome(); break; // Bug #1379
+            case 'delete_home_confirm_token':   return self::deleteHomeConfirmTokenAction(); // #654: single-use token, no storage change
             case 'wipe_storage':                $result = self::wipe(); break;
             case 'nuclear_rebuild_storage':     $result = self::wipe(); break;
             case 'purge_artifacts':             $result = self::purgeArtifacts(); break;
             case 'preflight_migrate':           return self::preflightMigrate();
-            case 'execute_migrate':             $result = self::executeMigrate(); break;
+            case 'execute_migrate':             $result = self::executeMigrateExclusive(); break;
             case 'execute_storage_backend':     $result = self::executeStorageBackend(); break;
             case 'execute_upper_mode':          $result = self::executeUpperMode(); break;
             default:                            return null;
@@ -113,7 +114,7 @@ class StorageHandler {
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
-                'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
+                'repair_agent_storage', 'repair_home_storage', 'delete_home_storage', 'delete_home_confirm_token',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
                 'get_home_backup_settings', 'set_home_backup_setting',
@@ -645,10 +646,30 @@ class StorageHandler {
         return ['status' => 'ok', 'message' => 'Persistence queued. The supervisor will bake the agent layer shortly.', 'baking' => true, 'job_id' => $jobId];
     }
 
-    /** AJAX: persist the configured home user (the Storage tab's Persist button). */
+    /**
+     * #651: the home a Persist or Repair button was clicked for. The card sends
+     * `id` (the page for the configured home sends nothing); a caller may also
+     * send `user`, or the older `type=home_<user>`. Only when none is present
+     * does the action fall back to the configured home. Returns '' for a name
+     * that is not a plain user id.
+     */
+    public static function homeActionUser(): string {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = trim((string)($_REQUEST['id'] ?? ''));
+        if ($user === '') {
+            $type = (string)($_REQUEST['type'] ?? '');
+            if (strpos($type, 'home_') === 0) $user = substr($type, 5);
+        }
+        if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
+        if ($user === '0') $user = 'root';
+        return preg_match('/^[A-Za-z0-9._-]+$/', $user) ? $user : '';
+    }
+
+    /** AJAX: persist the home that was clicked (the Storage tab's Persist button). */
     private static function persistHomeAction(): array {
-        $config = getAICliConfig();
-        return self::persistHome((string)($config['user'] ?? ''));
+        $user = self::homeActionUser();
+        if ($user === '') return ['status' => 'error', 'message' => 'invalid_user'];
+        return self::persistHome($user);
     }
 
     /**
@@ -1896,15 +1917,13 @@ class StorageHandler {
              'from' => ($kind === 'agent' ? $oldAgentPath : $oldHomePath)]
         );
 
-        // Drive the proven relocation via execute_migrate. It reads the new/old
-        // paths from $_GET — set ONLY the chosen kind's path; leave the other
-        // kind unchanged (same path in = no-op for that kind).
+        // Drive the proven relocation via execute_migrate. It reads the NEW paths
+        // from $_GET (the old paths come from the live config, #652) — set ONLY the
+        // chosen kind's path; leave the other kind unchanged (same path in = no-op).
         $_GET['agent_storage_path'] = ($kind === 'agent') ? $target : $oldAgentPath;
         $_GET['home_storage_path']  = ($kind === 'home')  ? $target : $oldHomePath;
-        $_GET['old_agent_path']     = $oldAgentPath;
-        $_GET['old_home_path']      = $oldHomePath;
 
-        $result = self::executeMigrate();
+        $result = self::executeMigrateExclusive();
         \AICliAgents\Services\LifecycleLogService::log(
             \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
             'storage', 'storage_graduate_relocate_done',
@@ -1936,10 +1955,9 @@ class StorageHandler {
     }
 
     private static function repairHome() {
-        $type = $_GET['type'] ?? 'home';
-        $user = $_GET['user'] ?? '';
-        if (empty($user) && strpos($type, 'home_') === 0) $user = substr($type, 5);
-        if (empty($user)) $user = getAICliConfig()['user'];
+        // #651: repair the home that was clicked (`id`), not the configured one.
+        $user = self::homeActionUser();
+        if ($user === '') return ['status' => 'error', 'message' => 'invalid_user'];
         // #131: a repair remounts the overlay — refuse while a consolidation is
         // baking that same home, or the reclaim aborts (mirrors the client guard
         // and how the interactive `start` is gated).
@@ -1963,6 +1981,56 @@ class StorageHandler {
      *
      * Response: { "status":"ok"|"error", "message":"..." }
      */
+    /**
+     * #654: why a home cannot be deleted right now, or null. A queued or running job
+     * for the home (backup, restore, consolidate, convert, bake) or a running tidy-up
+     * blocks the delete. $jobs is the test seam (SupervisorService::listJobs shape).
+     */
+    public static function deleteHomeBlocker(string $id, ?array $jobs = null): ?string {
+        require_once __DIR__ . '/../services/ConsolidateState.php';
+        $active = \AICliAgents\Services\SupervisorService::activeJobFor("home/$id", $jobs);
+        if ($active !== null) {
+            return "Home $id has a running or queued storage job ({$active['op']}). Wait for it to finish, then try again.";
+        }
+        if (\AICliAgents\Services\ConsolidateState::isHomeConsolidating($id)) {
+            return "Storage tidy-up is in progress for $id. Wait for it to finish, then try again.";
+        }
+        return null;
+    }
+
+    private static function deleteConfirmPath(string $id): string {
+        $base = rtrim(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents', '/');
+        return $base . '/.delete_home_confirm_' . preg_replace('/[^A-Za-z0-9._-]/', '_', $id) . '.json';
+    }
+
+    /** #654: make a single-use confirm token for deleting a primary home. Valid for 120 seconds. */
+    public static function issueDeleteConfirmToken(string $id): string {
+        $token = bin2hex(random_bytes(16));
+        $path = self::deleteConfirmPath($id);
+        @mkdir(dirname($path), 0755, true);
+        \AICliAgents\Services\AtomicWriteService::write($path, json_encode(['token' => $token, 'exp' => time() + 120]));
+        @chmod($path, 0600);
+        return $token;
+    }
+
+    /** #654: true once for a token made by issueDeleteConfirmToken() and not yet expired. */
+    public static function consumeDeleteConfirmToken(string $id, string $token): bool {
+        $path = self::deleteConfirmPath($id);
+        $rec = is_file($path) ? json_decode((string)@file_get_contents($path), true) : null;
+        @unlink($path);
+        return is_array($rec) && $token !== '' && isset($rec['token'], $rec['exp'])
+            && hash_equals((string)$rec['token'], $token) && (int)$rec['exp'] >= time();
+    }
+
+    /** AJAX: the dialog calls this after the person typed DELETE for a primary home. */
+    private static function deleteHomeConfirmTokenAction(): array {
+        $id = trim((string)($_REQUEST['id'] ?? ''));
+        if (!in_array($id, ['root', 'aicliagent'], true)) {
+            return ['status' => 'error', 'message' => 'A confirm token is only needed for root and aicliagent.'];
+        }
+        return ['status' => 'ok', 'token' => self::issueDeleteConfirmToken($id)];
+    }
+
     private static function deleteHome(): array {
         $id = trim((string)($_REQUEST['id'] ?? ''));
 
@@ -1973,11 +2041,19 @@ class StorageHandler {
         // Extra server-side guard for the primary home users: the client swal
         // already gates these behind typed confirmation, but we enforce it here
         // too so a rogue direct AJAX call cannot silently wipe root's home.
-        // A missing 'root_confirmed' flag from the client means the user did not
-        // go through the typed-confirmation dialog.
+        // #654: root_confirmed was a plain flag any caller could send. The dialog now
+        // asks the server for a short single-use token (delete_home_confirm_token)
+        // after the person types DELETE; the delete must present that token.
         $rootLike = in_array($id, ['root', 'aicliagent'], true);
-        if ($rootLike && empty($_REQUEST['root_confirmed'])) {
-            return ['status' => 'error', 'message' => "Deleting '$id' requires explicit root_confirmed confirmation — use the UI dialog."];
+        if ($rootLike && !self::consumeDeleteConfirmToken($id, (string)($_REQUEST['confirm_token'] ?? ''))) {
+            return ['status' => 'error', 'message' => "Deleting '$id' requires the typed confirmation in the dialog. Open the dialog again and type DELETE."];
+        }
+
+        // #654: the browser disables the button while a job runs, but a stale tab or
+        // a direct call is not stopped by that. Refuse here, before anything is removed.
+        $blocker = self::deleteHomeBlocker($id);
+        if ($blocker !== null) {
+            return ['status' => 'error', 'message' => $blocker];
         }
 
         // This is a plain-text log call, not a SQL sink, and $id passed the strict allowlist above.
@@ -2139,14 +2215,71 @@ class StorageHandler {
     /**
      * Execute storage path migration with per-file progress via Nchan.
      */
+    /**
+     * #652: the one entry for a storage path move. Only one move runs at a time:
+     * a non-blocking lock, and a refusal while the crash-safe marker of an earlier
+     * move is still there (that move must finish or resume first). A client that
+     * sends old paths which differ from the live settings (a stale tab) is
+     * refused before anything is touched. The old paths are never taken from
+     * the client.
+     */
+    public static function executeMigrateExclusive(): array {
+        require_once __DIR__ . '/../services/FileStorage.php';
+        $config = getAICliConfig();
+        foreach (['old_agent_path' => 'agent_storage_path', 'old_home_path' => 'home_storage_path'] as $param => $key) {
+            if (isset($_GET[$param]) && (string)$_GET[$param] !== (string)($config[$key] ?? '/boot/config/plugins/unraid-aicliagents/persistence')) {
+                aicli_log("Storage Migration: refusing — $param from the browser differs from the live settings", AICLI_LOG_WARN);
+                return ['status' => 'error', 'message' => 'The storage settings changed since this page was loaded. Reload the page and try again.'];
+            }
+        }
+        $lock = \AICliAgents\Services\FileStorage::acquireMigrationLock();
+        if ($lock === null) {
+            return ['status' => 'error', 'message' => 'Another storage move is already running. Wait for it to finish.'];
+        }
+        try {
+            if (\AICliAgents\Services\FileStorage::isMigrationInProgress()) {
+                return ['status' => 'error', 'message' => 'An earlier storage move did not finish. It must finish or resume first.'];
+            }
+            return self::executeMigrate();
+        } finally {
+            \AICliAgents\Services\FileStorage::releaseMigrationLock($lock);
+        }
+    }
+
+    /**
+     * #652: wait until the supervisor has drained the queued saves and merges of
+     * each entity ([type, id] pairs). $budgetSec is the total wait. Returns null
+     * when all finished, else a plain message. $drain is the test seam; it has the
+     * shape of SupervisorService::waitForOpsToDrain(type, id, timeoutSec).
+     * @param array<int,array{0:string,1:string}> $entities
+     */
+    public static function waitForPreMigrationJobs(array $entities, int $budgetSec, ?callable $drain = null): ?string {
+        $drain = $drain ?? static function (string $t, string $i, int $sec): array {
+            return \AICliAgents\Services\SupervisorService::waitForOpsToDrain($t, $i, $sec);
+        };
+        $deadline = time() + max(1, $budgetSec);
+        $seen = [];
+        foreach ($entities as [$type, $id]) {
+            if (isset($seen["$type/$id"])) continue;
+            $seen["$type/$id"] = true;
+            $left = $deadline - time();
+            $res = $left > 0 ? $drain($type, $id, $left) : ['status' => 'timeout'];
+            if (($res['status'] ?? '') === 'timeout') {
+                return "The save of unsaved changes for $type $id did not finish in time. Nothing was moved. Try again when the server is quiet.";
+            }
+        }
+        return null;
+    }
+
     private static function executeMigrate() {
         set_time_limit(600);
         $config = getAICliConfig();
         $newAgentPath = $_GET['agent_storage_path'] ?? '';
         $newHomePath = $_GET['home_storage_path'] ?? '';
-        // Old paths passed explicitly from JS — config is already saved with new values by this point
-        $oldAgentPath = $_GET['old_agent_path'] ?? ($config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence');
-        $oldHomePath = $_GET['old_home_path'] ?? ($config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence');
+        // #652: the old paths are the live settings (the move saves the new paths only
+        // after the copy). The browser's old_* values are never used, only compared above.
+        $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $oldHomePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
 
         aicli_log("Storage Migration: Starting path migration...", AICLI_LOG_INFO);
 
@@ -2187,24 +2320,6 @@ class StorageHandler {
             }
         }
         unset($__mcVerdict);
-
-        // Safety: ensure config still has old paths so persist/consolidate target the right location.
-        // If a concurrent save already updated the paths, we must revert BEFORE any I/O.
-        $liveConfig = getAICliConfig();
-        $liveHomePath = $liveConfig['home_storage_path'] ?? '';
-        $liveAgentPath = $liveConfig['agent_storage_path'] ?? '';
-        $needsRevert = false;
-        if ($newHomePath && $liveHomePath !== $oldHomePath && $liveHomePath === $newHomePath) $needsRevert = true;
-        if ($newAgentPath && $liveAgentPath !== $oldAgentPath && $liveAgentPath === $newAgentPath) $needsRevert = true;
-        if ($needsRevert) {
-            aicli_log("Storage Migration: Config already updated to new paths by concurrent save — reverting to old paths.", AICLI_LOG_WARN);
-            // Revert only the path keys, preserve everything else from live config
-            $liveConfig['home_storage_path'] = $oldHomePath;
-            $liveConfig['agent_storage_path'] = $oldAgentPath;
-            \AICliAgents\Services\ConfigService::writeConfigFile($liveConfig);
-            // Re-read to confirm revert took effect
-            usleep(100000);
-        }
 
         // Follow-on #1: a settings path change is an EXPLICIT, crash-safe TOLD
         // migration. migratePath() marker-BRACKETS this proven copy flow (it does
@@ -2253,7 +2368,14 @@ class StorageHandler {
 
         self::migrateProgress('Flushing dirty ZRAM layers before migration...', 10, [], 'Saving unsaved changes');
         aicli_log("Storage Migration: Enqueuing pre-migration bakes via supervisor...", AICLI_LOG_INFO);
-        \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_migrate', 5);
+        // #652: remember each entity that gets a pre-migration job, so the copy below
+        // starts only after the supervisor has finished them.
+        $__preJobs = [];
+        if (!\AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_migrate', 5)) {
+            $__migResult = ['status' => 'error', 'message' => 'Could not queue the save of unsaved changes. Nothing was moved.'];
+            return false;
+        }
+        $__preJobs[] = ['home', $user];
 
         // Enqueue pre-migration consolidations at OLD path (skip if on Flash)
         $oldAgentOnFlash = (strpos($oldAgentPath, '/boot/') === 0 || strpos($oldAgentPath, '/boot') === 0);
@@ -2267,6 +2389,7 @@ class StorageHandler {
                     if (count(glob("$oldAgentPath/agent_{$aid}_*.sqsh")) > 1) {
                         self::migrateProgress("Queuing consolidation for agent: $aid...", 15, [], 'Merging agent layers first');
                         \AICliAgents\Services\SupervisorService::enqueue('agent', $aid, 'consolidate', 'pre_migrate', 5);
+                        $__preJobs[] = ['agent', $aid];
                     }
                 }
             }
@@ -2278,6 +2401,17 @@ class StorageHandler {
                 self::migrateProgress('Queuing home layer consolidation...', 20, [], 'Merging home layers first');
                 \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'consolidate', 'pre_migrate', 5);
             }
+        }
+
+        // #652: the copy must start only after the saves and merges above are done,
+        // or the last changes stay in the old folder. If they do not finish, stop
+        // here: nothing has been copied or changed.
+        self::migrateProgress('Waiting for the saves to finish...', 22, [], 'Saving unsaved changes');
+        $__waitError = self::waitForPreMigrationJobs($__preJobs, 420);
+        if ($__waitError !== null) {
+            aicli_log("Storage Migration: $__waitError", AICLI_LOG_ERROR);
+            $__migResult = ['status' => 'error', 'message' => $__waitError];
+            return false;
         }
 
         // 3. Build file list (after consolidation — minimal set)
@@ -2415,7 +2549,7 @@ class StorageHandler {
             foreach (glob("$oldAgentPath/agent_*.sqsh") as $oldFile) {
                 $name = basename($oldFile);
                 $newFile = "$newAgentPath/$name";
-                if (file_exists($newFile) && filesize($newFile) > 0) {
+                if (file_exists($newFile) && filesize($newFile) > 0 && filesize($newFile) === filesize($oldFile)) {
                     @unlink($oldFile);
                     $cleanedUp++;
                 } else {
@@ -2427,7 +2561,7 @@ class StorageHandler {
             foreach (glob("$oldHomePath/home_*.sqsh") as $oldFile) {
                 $name = basename($oldFile);
                 $newFile = "$newHomePath/$name";
-                if (file_exists($newFile) && filesize($newFile) > 0) {
+                if (file_exists($newFile) && filesize($newFile) > 0 && filesize($newFile) === filesize($oldFile)) {
                     @unlink($oldFile);
                     $cleanedUp++;
                 } else {
