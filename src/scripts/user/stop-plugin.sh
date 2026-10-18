@@ -99,7 +99,7 @@ _safe_excluded() {
 }
 safe_pkill() {
     local pattern="$1" pid
-    for pid in $(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true); do
+    for pid in $(pgrep -f "$pattern" 2>/dev/null | grep -vx "$$" || true); do
         _safe_excluded "$pid" && continue
         kill -9 "$pid" >/dev/null 2>&1 || true
     done
@@ -107,7 +107,7 @@ safe_pkill() {
 # Graceful: SIGTERM the pattern, then poll up to <wait>s for a clean exit.
 safe_pterm() {
     local pattern="$1" wait="${2:-5}" pid waited=0
-    for pid in $(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true); do
+    for pid in $(pgrep -f "$pattern" 2>/dev/null | grep -vx "$$" || true); do
         _safe_excluded "$pid" && continue
         kill -TERM "$pid" >/dev/null 2>&1 || true
     done

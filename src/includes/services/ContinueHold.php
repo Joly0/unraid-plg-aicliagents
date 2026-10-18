@@ -62,6 +62,23 @@ class ContinueHold
         @file_put_contents($marker, (string)($now ?? time()));
     }
 
+    /**
+     * Settle the hold once restart() has returned (R-101). The first stamp was made
+     * BEFORE the restart and a slow restart can use most of HOLD_SECONDS, so a good
+     * restart stamps again: the hold then covers the window after the launch, when a
+     * page asks for its Continue. A failed restart clears the hold: no launch follows.
+     *
+     * @param array<string,mixed> $restartResult the array restart() returned
+     */
+    public static function afterRestart(string $id, array $restartResult, ?int $now = null): void
+    {
+        if (($restartResult['status'] ?? '') === 'ok') {
+            self::hold($id, $now);
+        } else {
+            self::clear($id);
+        }
+    }
+
     /** Remove the hold (the restart failed, so no launch follows). */
     public static function clear(string $id): void
     {

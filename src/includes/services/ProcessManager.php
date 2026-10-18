@@ -1030,6 +1030,17 @@ class ProcessManager {
     }
 
     /**
+     * R-100: the `pgrep -f` pattern that finds the wrappers naming this session on their
+     * command line. It is anchored: the id must end at a character that cannot be part of an id, or at the end of the line, so
+     * "ws1" never matches "ws10". An empty id returns null (an empty id would match all).
+     */
+    public static function sessionArgvPattern(string $id): ?string {
+        $id = (string)preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+        if ($id === '') return null;
+        return "AICLI_SESSION_ID=" . $id . "([^a-zA-Z0-9_-]|$)";
+    }
+
+    /**
      * Stops a terminal session and cleans up its artifacts.
      * @param string $id The session ID.
      * @param bool $killTmux Whether to also kill the associated tmux session.
@@ -1040,6 +1051,12 @@ class ProcessManager {
      */
     public static function stopTerminal($id = 'default', $killTmux = false, string $reason = 'stop') {
         $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+        // R-100: an id that sanitises to nothing names no session. Going on would build
+        // an "AICLI_SESSION_ID=" pattern that matches every session on the host.
+        if ($id === '') {
+            LogService::log("stopTerminal refused: empty session id.", LogService::LOG_WARN, "ProcessManager");
+            return;
+        }
         LogService::log("Initiating termination sequence for session: $id...", LogService::LOG_INFO, "ProcessManager");
         
         $sock = "/var/run/aicliterm-$id.sock";
@@ -1057,7 +1074,7 @@ class ProcessManager {
         
         // 2. Kill agent processes (Node)
         $nodePids = [];
-        $escapedId = escapeshellarg("AICLI_SESSION_ID=$id");
+        $escapedId = escapeshellarg((string)self::sessionArgvPattern($id));
         exec("pgrep -f $escapedId 2>/dev/null", $nodePids);
         foreach ($nodePids as $np) {
             $np = trim($np);

@@ -606,6 +606,16 @@ final class TmuxDuplicateService
                 self::tmux(['-S', (string)$sock['path'], 'send-keys', '-t', $name, 'C-c']);
                 $agentPid = (int)$t['agentPid'];
                 if ($agentPid > 1) self::waitGone($agentPid, 5.0);
+                // R-109: a legacy shared server can hold the sessions of other workspaces.
+                // kill-server would end them all, so with more than one session there only
+                // this session is killed and the server (and its process groups) stay.
+                [, $listed] = self::tmux(['-S', (string)$sock['path'], 'list-sessions', '-F', '#{session_name}']);
+                $sessionCount = count(array_filter(array_map('trim', explode("\n", $listed)), static fn($l) => $l !== ''));
+                if ($sessionCount > 1) {
+                    self::tmux(['-S', (string)$sock['path'], 'kill-session', '-t', $name]);
+                    self::log("stop session=$sessionId server=$serverPid shared by $sessionCount sessions: killed this session only", 'warn');
+                    return ['status' => 'ok', 'method' => 'session', 'shared' => true];
+                }
                 self::tmux(['-S', (string)$sock['path'], 'kill-server']);
                 if (self::waitGone($serverPid, 3.0)) $method = 'graceful';
             }

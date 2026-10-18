@@ -94,12 +94,15 @@
             main.appendChild(el('strong', 'acp-row-name', p.name));
             main.appendChild(el('span', 'acp-row-meta', agentLabel(p.agent) + ' · ' + kindLabel(p.kind) + (p.source === 'mcp' ? ' · added by an agent' : '')));
             main.appendChild(el('code', 'acp-row-re', p.re));
+            // A saved pattern that the checks now refuse is listed, switched off, with its reason.
+            if (p.refused) main.appendChild(el('div', 'acp-row-refused', 'Not in use: ' + p.refused + '. Edit the pattern to fix it, or delete it.', { role: 'note' }));
             li.appendChild(main);
 
             var actions = el('div', 'acp-row-actions');
             var tog = el('label', 'acp-toggle');
             var cb = el('input', null, null, { type: 'checkbox', id: 'acp-en-' + p.id, 'aria-label': 'Use pattern ' + p.name });
             cb.checked = !!p.enabled;
+            if (p.refused) cb.disabled = true;
             tog.appendChild(cb);
             tog.appendChild(el('span', null, 'On'));
             actions.appendChild(tog);

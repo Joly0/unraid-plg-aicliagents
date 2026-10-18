@@ -67,6 +67,17 @@ class TerminalService {
     /** Forgejo #521: seconds between the stop signal and the kill signal. */
     public const ENSURE_KILL_AFTER_SECONDS = 5;
 
+    /** R-115: nginx (user nobody) reaches the ttyd socket as its owner; no other user needs it. */
+    public const TTYD_SOCKET_MODE = 0660;
+
+    /** R-115: restrict the ttyd socket to its owner (nobody) and group (users). */
+    public static function secureTtydSocket(string $sock): void
+    {
+        @chmod($sock, self::TTYD_SOCKET_MODE);
+        @chown($sock, 'nobody');
+        @chgrp($sock, 'users');
+    }
+
     /** Wrap the ensure-session command so it can never block the start request forever. */
     public static function wrapEnsureTimeout(string $cmd): string
     {
@@ -557,9 +568,7 @@ class TerminalService {
             $found = false;
             for ($i=0; $i<20; $i++) {
                 if (file_exists($sock)) {
-                    @chmod($sock, 0666);
-                    @chown($sock, 'nobody');
-                    @chgrp($sock, 'users');
+                    self::secureTtydSocket($sock);
                     // RESPONSIVE_PRIORITY.md R5: raise the new ttyd (and its tmux server) when "Keep the terminal responsive" is on.
                     ConfigService::runResponsivePriority('auto');
                     LogService::log("Successfully established terminal socket and launched session for $id.", LogService::LOG_INFO, "TerminalService");

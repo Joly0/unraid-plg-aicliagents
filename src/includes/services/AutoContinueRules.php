@@ -325,9 +325,16 @@ final class AutoContinueRules
                     $re = (string)($p['re'] ?? '');
                     $id = (string)($p['id'] ?? '');
                     $err = in_array($kind, self::KINDS, true) ? self::runtimeError($re, $kind) : 'unknown kind';
-                    if ($err !== null || !preg_match('/^u-[a-f0-9]{8}$/', $id)) {
-                        $data['errors'][] = "Pattern '" . substr((string)($p['name'] ?? $id), 0, 60) . "' is not used: " . ($err ?? 'bad id') . '.';
-                        continue;
+                    if (!preg_match('/^u-[a-f0-9]{8}$/', $id)) {
+                        // A hand-edited id: give it a stable one, so the row can be edited or deleted.
+                        $id = 'u-' . substr(md5($kind . '|' . (string)($p['name'] ?? '') . '|' . $re), 0, 8);
+                        $err = $err ?? 'bad id';
+                    }
+                    // F11 (#616): a saved pattern that the checks now refuse is NOT dropped. It is
+                    // listed, switched off, with the reason, so the operator can fix or delete it.
+                    // It is never used (forAgent() and mergeInto() skip a disabled pattern).
+                    if ($err !== null) {
+                        $data['errors'][] = "Pattern '" . substr((string)($p['name'] ?? $id), 0, 60) . "' is not used: " . $err . '.';
                     }
                     $data['patterns'][] = [
                         'id' => $id,
@@ -336,7 +343,8 @@ final class AutoContinueRules
                         'kind' => $kind,
                         're' => $re,
                         'sample' => (string)($p['sample'] ?? ''),
-                        'enabled' => !array_key_exists('enabled', $p) || (bool)$p['enabled'],
+                        'enabled' => $err === null && (!array_key_exists('enabled', $p) || (bool)$p['enabled']),
+                        'refused' => $err,
                         'source' => (string)($p['source'] ?? 'ui'),
                         'created_at' => (int)($p['created_at'] ?? 0),
                         'updated_at' => (int)($p['updated_at'] ?? 0),
@@ -360,7 +368,9 @@ final class AutoContinueRules
     {
         $path = self::overlayPath();
         @mkdir(dirname($path), 0755, true);
-        $ok = AtomicWriteService::writeJson($path, ['version' => self::SCHEMA, 'patterns' => array_values($patterns)]);
+        // 'refused' is worked out again at every load; it is never stored.
+        $stored = array_map(static function (array $p): array { unset($p['refused']); return $p; }, array_values($patterns));
+        $ok = AtomicWriteService::writeJson($path, ['version' => self::SCHEMA, 'patterns' => $stored]);
         self::resetCache();
         return $ok;
     }
@@ -385,7 +395,8 @@ final class AutoContinueRules
         $found = false;
         foreach ($all as $i => $old) {
             if ($p['id'] !== '' && $old['id'] === $p['id']) {
-                $all[$i] = array_merge($old, $p, ['updated_at' => $now]);
+                // The edit passed validate(): the pattern is no longer refused.
+                $all[$i] = array_merge($old, $p, ['updated_at' => $now, 'refused' => null]);
                 $p = $all[$i];
                 $found = true;
                 break;
@@ -419,6 +430,9 @@ final class AutoContinueRules
         $all = self::load()['patterns'];
         foreach ($all as $i => $p) {
             if ($p['id'] !== $id) continue;
+            if ($enabled && !empty($p['refused'])) {
+                return ['error' => 'This pattern cannot be turned on: ' . $p['refused'] . '. Edit it first.'];
+            }
             $all[$i]['enabled'] = $enabled;
             $all[$i]['updated_at'] = time();
             if (!self::write($all)) return ['error' => 'Could not write auto-continue-rules.json.'];

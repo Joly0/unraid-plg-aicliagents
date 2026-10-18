@@ -3,7 +3,7 @@
 #
 # Installed as the forced-command in authorized_keys for SSH launch links (#747).
 # When invoked with SSH_ORIGINAL_COMMAND set to a valid aicli session name,
-# attaches to that tmux session (or creates it if missing).
+# attaches to that tmux session. It refuses when no live server owns the session.
 # When invoked interactively (no SSH_ORIGINAL_COMMAND), lists all aicli-agent-*
 # sessions for the user to pick from.
 #
@@ -67,19 +67,18 @@ _attach_session() {
     if [ -n "$sock" ]; then
         exec tmux -S "$sock" attach-session -t "$session"
     fi
-    # No live server owns it — create it on this session's own private socket
-    # so the new server is never shared with another workspace.
-    local sid="${session##*-}"
-    local newsock="$TMUX_TMPDIR/s-$sid"
-    mkdir -p "$newsock" 2>/dev/null
-    chmod 0700 "$newsock" 2>/dev/null
-    exec env TMUX_TMPDIR="$newsock" tmux new-session -s "$session"
+    # No live server owns it. Do not create a bare shell session: the workspace
+    # is not running, so a new empty tmux session would attach to nothing useful
+    # and would hide that fact from the user (R-099).
+    echo "ssh-attach: no live tmux server owns session '$session'. Start the workspace from the plugin first." >&2
+    exit 1
 }
 
 # ── Forced-command path ──────────────────────────────────────────────────────
 if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     session="$SSH_ORIGINAL_COMMAND"
-    if printf '%s' "$session" | grep -qE "$SESSION_PATTERN"; then
+    # [[ =~ ]] anchors on the whole value, so a multi-line command is refused (R-099).
+    if [[ $session =~ $SESSION_PATTERN ]]; then
         _attach_session "$session"
     else
         echo "ssh-attach: invalid session name: '$session'" >&2

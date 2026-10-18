@@ -55,13 +55,17 @@ class UtilityService {
     public static function spawnDetached(array $argv, string $log = '/dev/null', bool $truncate = false): int {
         $args = implode(' ', array_map('escapeshellarg', array_map('strval', $argv)));
         $helper = self::detachHelperPath();
+        // R-111: the child must not inherit the workspace id of the request that starts it.
+        // A daemon that carried AICLI_SESSION_ID was reaped (by its environment) when that
+        // workspace closed. A caller that needs the id sets it on the command itself.
+        $unset = 'env -u AICLI_SESSION_ID ';
         if (is_file($helper)) {
-            $line = 'bash ' . escapeshellarg($helper) . ' --log ' . escapeshellarg($log)
+            $line = $unset . 'bash ' . escapeshellarg($helper) . ' --log ' . escapeshellarg($log)
                 . ($truncate ? ' --truncate' : '') . ' -- ' . $args . ' 2>/dev/null';
         } else {
             // Degraded fallback (helper missing from a broken tree): still a new
             // session and no installer descriptors.
-            $line = 'setsid nohup ' . $args . ' </dev/null ' . ($truncate ? '>' : '>>') . escapeshellarg($log)
+            $line = $unset . 'setsid nohup ' . $args . ' </dev/null ' . ($truncate ? '>' : '>>') . escapeshellarg($log)
                 . ' 2>&1 3>&- 4>&- 9>&- & echo $!';
         }
         $out = []; $rc = 0;

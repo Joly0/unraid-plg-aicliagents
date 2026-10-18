@@ -24,6 +24,20 @@ class AutoLaunchService
     private const BOOT_CONSOLIDATE_MARKER = '/tmp/unraid-aicliagents/.boot_consolidate_done';
     private const BOOT_CONSOLIDATE_WORKER = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/boot-consolidate-relaunch.php';
 
+    /**
+     * Test seams (R-110). All null in production.
+     *   $launcher  callable(array $sids): array — replaces launchAllPending() in reconcileDeadWorkspaces()
+     *   $stateFileOverride, $lockFileOverride — redirect the back-off state file and the sweep lock
+     */
+    public static $launcher = null;
+    public static ?string $stateFileOverride = null;
+    public static ?string $lockFileOverride = null;
+
+    private static function stateFile(): string
+    {
+        return self::$stateFileOverride ?? self::RESTART_STATE_FILE;
+    }
+
     /** #129: is this trigger a genuine box-boot (homes idle)? */
     public static function isBootReason(string $reason): bool {
         return in_array($reason, self::BOOT_REASONS, true);
@@ -144,7 +158,7 @@ class AutoLaunchService
      * @param string  $reason        Free-form trigger label written to the
      *                               aicli_log so we can track which trigger
      *                               actually fired in production.
-     * @return array{launched:int, skipped:int, failed:int, sessions:array}
+     * @return array{launched:int, skipped:int, failed:int, sessions:array, busy?:bool}
      */
     public static function launchAllPending(?string $filterAgentId = null, string $reason = 'unknown', ?array $onlySessionIds = null): array
     {
@@ -157,16 +171,29 @@ class AutoLaunchService
         // silently. flock makes the second invocation wait for the first to
         // finish, after which its isRunning() check will see the live session
         // and skip cleanly.
-        $lockPath = '/var/run/aicli-autolaunch.lock';
+        $lockPath = self::$lockFileOverride ?? '/var/run/aicli-autolaunch.lock';
         $lockFh   = @fopen($lockPath, 'c');
         if ($lockFh !== false) {
-            // Block up to 30 s for the prior sweep to finish. Sweeps are fast
-            // (each workspace just kicks off a detached startTerminal) so 30 s
-            // is generous; non-blocking would risk silently skipping the
-            // sweep when triggers are too close together.
-            if (!@flock($lockFh, LOCK_EX)) {
+            // R-110: take the lock without blocking, in a poll loop with a deadline (a
+            // blocking flock had no deadline at all). Sweeps are fast (each workspace just
+            // kicks off a detached startTerminal), so 30 s is generous for a boot trigger.
+            // The supervisor's crash reconcile runs under `timeout 20` and retries on the
+            // next tick, so it does not wait: when a sweep is running it returns at once.
+            $waitSeconds = $reason === 'supervisor_crash_reconcile' ? 0.0 : 30.0;
+            $deadline = microtime(true) + $waitSeconds;
+            $got = false;
+            while (true) {
+                if (@flock($lockFh, LOCK_EX | LOCK_NB)) { $got = true; break; }
+                if (microtime(true) >= $deadline) break;
+                usleep(100000);
+            }
+            if (!$got) {
                 @fclose($lockFh);
                 $lockFh = false;
+                if ($reason === 'supervisor_crash_reconcile') {
+                    self::log("Crash reconcile skipped: another auto-launch sweep is running", AICLI_LOG_INFO);
+                    return ['launched' => 0, 'skipped' => 0, 'failed' => 0, 'sessions' => [], 'busy' => true];
+                }
             }
         }
 
@@ -378,8 +405,8 @@ class AutoLaunchService
     {
         $now = $now ?? time();
         $state = [];
-        if (is_file(self::RESTART_STATE_FILE)) {
-            $decoded = json_decode((string)@file_get_contents(self::RESTART_STATE_FILE), true);
+        if (is_file(self::stateFile())) {
+            $decoded = json_decode((string)@file_get_contents(self::stateFile()), true);
             if (is_array($decoded)) $state = $decoded;
         }
 
@@ -428,20 +455,33 @@ class AutoLaunchService
 
         $launched = 0;
         if ($eligible !== []) {
-            self::launchAllPending(null, 'supervisor_crash_reconcile', $eligible);
+            // R-110: write the back-off BEFORE the launch. The supervisor runs this under
+            // `timeout 20`, and a start can take 60 to 120 s: the process is then killed
+            // inside the launch, the state is never written, and the slow start is begun
+            // again at every tick. A success below removes the entry; a sweep that was
+            // busy and tried nothing puts the old entry back.
+            $before = [];
             foreach ($eligible as $sid) {
-                if (ProcessManager::isRunning($sid)) {
-                    unset($state[$sid]);
-                    $launched++;
-                    continue;
-                }
+                $before[$sid] = $state[$sid];
                 $failures = (int)($state[$sid]['failures'] ?? 0) + 1;
                 $state[$sid]['failures'] = $failures;
                 $state[$sid]['next_attempt_at'] = $now + self::restartDelaySeconds($failures);
             }
+            AtomicWriteService::writeJson(self::stateFile(), $state);
+            $res = is_callable(self::$launcher)
+                ? call_user_func(self::$launcher, $eligible)
+                : self::launchAllPending(null, 'supervisor_crash_reconcile', $eligible);
+            foreach ($eligible as $sid) {
+                if (ProcessManager::isRunning($sid)) {
+                    unset($state[$sid]);
+                    $launched++;
+                } elseif (!empty($res['busy'])) {
+                    $state[$sid] = $before[$sid];
+                }
+            }
         }
 
-        AtomicWriteService::writeJson(self::RESTART_STATE_FILE, $state);
+        AtomicWriteService::writeJson(self::stateFile(), $state);
         return ['armed' => $armed, 'attempted' => count($eligible), 'launched' => $launched];
     }
 

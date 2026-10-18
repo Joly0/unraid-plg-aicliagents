@@ -45,6 +45,9 @@ class TmuxService {
     public static $sessionResolver = null;
     public static $sleeper = null;
 
+    /** R-106: the longest one tmux client call may run, in seconds. A test lowers it. */
+    public static float $tmuxTimeoutSeconds = 20.0;
+
     /** Reset every test seam. Call in tearDown. */
     public static function resetSeams(): void {
         self::$tmuxRunner = null;
@@ -52,6 +55,7 @@ class TmuxService {
         self::$sleeper = null;
         self::$processProbe = null;
         self::$winchSender = null;
+        self::$tmuxTimeoutSeconds = 20.0;
     }
 
     /** usleep() that a test can replace, so the Enter ladder does not cost ten real seconds. */
@@ -453,12 +457,17 @@ class TmuxService {
         return ['status' => 'ok', 'key' => $key, 'value' => $value, 'live' => true];
     }
 
+    /** R-104: a tmux paste-buffer name that no other paste in flight shares. */
+    public static function newPasteBufferName(): string {
+        return 'aicli-paste-' . bin2hex(random_bytes(6));
+    }
+
     /**
      * Bracketed-paste arbitrary text into a live session (T-06).
      *
-     * Pipeline: $text → `tmux load-buffer -b aicli-paste -` (fed via
+     * Pipeline: $text → `tmux load-buffer -b aicli-paste-<random> -` (fed via
      * proc_open stdin, array argv, no shell) → `tmux paste-buffer -p -d -b
-     * aicli-paste -t <session>`. -p requests bracketed paste so TUI agents
+     * aicli-paste-<random> -t <session>`. -p requests bracketed paste so TUI agents
      * treat it as a paste, not keystrokes; -d deletes the named buffer
      * afterwards so clipboard content does not linger in `tmux list-buffers`.
      *
@@ -478,15 +487,18 @@ class TmuxService {
         if ($name === '') {
             return ['status' => 'error', 'message' => 'Session not found'];
         }
-        $load = self::runTmuxAt($sock, ['load-buffer', '-b', 'aicli-paste', '-'], $text);
+        // R-104: one buffer name per call. A shared name let two overlapping pastes into
+        // one tmux server load and paste each other's text.
+        $buf = self::newPasteBufferName();
+        $load = self::runTmuxAt($sock, ['load-buffer', '-b', $buf, '-'], $text);
         if ($load['rc'] !== 0) {
             LogService::log("tmux load-buffer failed for $name ($bytes bytes)", LogService::LOG_ERROR, "TmuxService");
             return ['status' => 'error', 'message' => 'tmux load-buffer failed'];
         }
-        $paste = self::runTmuxAt($sock, ['paste-buffer', '-p', '-d', '-b', 'aicli-paste', '-t', $name]);
+        $paste = self::runTmuxAt($sock, ['paste-buffer', '-p', '-d', '-b', $buf, '-t', $name]);
         if ($paste['rc'] !== 0) {
             // Best-effort buffer cleanup so the content doesn't strand in tmux.
-            self::runTmuxAt($sock, ['delete-buffer', '-b', 'aicli-paste']);
+            self::runTmuxAt($sock, ['delete-buffer', '-b', $buf]);
             LogService::log("tmux paste-buffer failed for $name ($bytes bytes)", LogService::LOG_ERROR, "TmuxService");
             return ['status' => 'error', 'message' => 'tmux paste-buffer failed'];
         }
@@ -957,6 +969,44 @@ class TmuxService {
      * is set aside. Liveness is still proved — see addressablePane().
      */
     private static function submitFixedRelayNotice(string $agentId, string $sessionId, string $notice, bool $force = false): array {
+        // R-105: one delivery at a time per session. A web request and the supervisor tick
+        // could both pass the "nothing typed yet" checks and type the notice twice. The
+        // lock is non-blocking: the loser defers, and the next drain tries again.
+        $lock = self::takeNoticeLock($agentId, $sessionId);
+        if ($lock === null) {
+            LogService::log("Relay notice for aicli-agent-$agentId-$sessionId deferred: another delivery is running", LogService::LOG_INFO, 'TmuxService');
+            return ['status'=>'deferred', 'reason'=>'delivery-in-progress'];
+        }
+        try {
+            return self::submitFixedRelayNoticeLocked($agentId, $sessionId, $notice, $force);
+        } finally {
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+        }
+    }
+
+    /**
+     * R-105: the per-session delivery lock (non-blocking flock). Returns the open handle,
+     * or null when another delivery holds it. When the lock file cannot be created at all,
+     * it returns a dummy handle: delivery then runs unlocked rather than never.
+     *
+     * @return resource|null
+     */
+    private static function takeNoticeLock(string $agentId, string $sessionId) {
+        $a = preg_replace('/[^A-Za-z0-9_-]/', '', $agentId);
+        $s = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
+        $dir = self::relayPendingDir();
+        @mkdir($dir, 0777, true);
+        $fh = @fopen($dir . "/{$a}__{$s}.deliver.lock", 'c');
+        if ($fh === false) return fopen('php://memory', 'r');   // cannot lock: do not stop delivering
+        if (!@flock($fh, LOCK_EX | LOCK_NB)) {
+            fclose($fh);
+            return null;
+        }
+        return $fh;
+    }
+
+    private static function submitFixedRelayNoticeLocked(string $agentId, string $sessionId, string $notice, bool $force = false): array {
         // RELAY_TOKEN_SAVINGS.md R10: one notice per unread batch. A notice went out lately
         // and the inbox was not read since, so type nothing; the item is saved already.
         if (!$force && !RelayNoticeLedger::shouldSend($sessionId)) {
@@ -1471,12 +1521,13 @@ class TmuxService {
         if ($box !== null) {
             $flat = self::squashSpace(implode(' ', $box['lines']));
             $m = self::squashSpace($marker);
-            return $m !== '' && strpos($flat, $m) === 0;
+            return $m !== '' && (strpos($flat, $m) === 0 || self::isPastePlaceholder($flat));
         }
         $ruled = self::ruledInputBox(preg_split('/\R/', self::plainPaneText($capture)) ?: []);
         if ($ruled !== null) {
             $m = self::squashSpace($marker);
-            return $m !== '' && strpos(self::squashSpace($ruled['text']), $m) === 0;
+            $flat = self::squashSpace($ruled['text']);
+            return $m !== '' && (strpos($flat, $m) === 0 || self::isPastePlaceholder($flat));
         }
         if (self::inputNeedsRuledBox($agentId)) return null;
         $last = null;
@@ -1484,7 +1535,18 @@ class TmuxService {
             if (preg_match('/^[^\S\r\n]*[❯➤▶»›][ \t\x{00A0}]*(.*)$/u', (string)$line, $m)) $last = $m[1];
         }
         if ($last === null) return null;
-        return $marker !== '' && strpos($last, $marker) === 0;
+        return $marker !== '' && (strpos($last, $marker) === 0 || self::isPastePlaceholder($last));
+    }
+
+    /**
+     * R-107: PURE. True when the input line holds only the placeholder an agent draws for
+     * a long paste, such as "[Pasted text #1 +25 lines]" (Claude Code) or
+     * "[Pasted Content 1234 chars]" (Codex). The pasted words are then NOT on the line,
+     * but the paste still waits there unsent. Without this the marker looked "gone" and a
+     * swallowed Enter was reported as a submit.
+     */
+    public static function isPastePlaceholder(string $inputText): bool {
+        return (bool)preg_match('/^\s*\[\s*Pasted\s+(?:text|content)\b[^\]]*\]/i', $inputText);
     }
 
     /**
@@ -2127,7 +2189,7 @@ class TmuxService {
             $line = (string)$lines[$i];
             if ($isRule($line)) break;
             foreach ($blockOthers as $re) {
-                if (\AICliAgents\Services\PaneInputRules::safeMatch((string)$re, $line)) return $state;
+                if (\AICliAgents\Services\PaneInputRules::safeBlockMatch((string)$re, $line)) return $state;
             }
         }
 
@@ -2293,9 +2355,9 @@ class TmuxService {
         foreach ($rules['block'] ?? [] as $reason => $re) {
             $at = -1;
             foreach ($tailLines as $i => $line) {
-                if (\AICliAgents\Services\PaneInputRules::safeMatch((string)$re, $line)) $at = max($at, $i);
+                if (\AICliAgents\Services\PaneInputRules::safeBlockMatch((string)$re, $line)) $at = max($at, $i);
             }
-            if ($at === -1 && \AICliAgents\Services\PaneInputRules::safeMatch((string)$re, $tail)) $at = PHP_INT_MAX;
+            if ($at === -1 && \AICliAgents\Services\PaneInputRules::safeBlockMatch((string)$re, $tail)) $at = PHP_INT_MAX;
             if ($at > $blockAt) { $blockAt = $at; $blockReason = (string)$reason; }
         }
         // Claude's footer task list while background agents run: a "↑/↓ to select" row, then "❯ ● main" and one row per agent
@@ -3227,7 +3289,9 @@ class TmuxService {
         [$name, $sock] = self::resolveSession($agentId, $sessionId);
         if ($name === '') return null;
         $lines = max(1, min(1000, $lines));
-        $cap = self::runTmuxAt($sock, ['capture-pane', '-p', '-e', '-t', $name, '-S', '-' . $lines]);
+        // R-113: -J joins the rows the terminal wrapped, so a token that crossed a row end is
+        // one string again and the secret mask in WorkspaceScreenService finds it.
+        $cap = self::runTmuxAt($sock, ['capture-pane', '-p', '-e', '-J', '-t', $name, '-S', '-' . $lines]);
         if ((int)($cap['rc'] ?? 1) !== 0) return null;
         return (string)($cap['out'] ?? '');
     }
@@ -3333,15 +3397,54 @@ class TmuxService {
         // nosemgrep: php.lang.security.exec-use.exec-use
         $proc = @proc_open($argv, $desc, $pipes);
         if (!is_resource($proc)) return ['rc' => -1, 'out' => '', 'err' => 'proc_open failed'];
-        if ($stdin !== null) {
-            fwrite($pipes[0], $stdin);
-            fclose($pipes[0]);
-            unset($pipes[0]);
+        // R-106: every read and write is bounded. A hung tmux server used to block this
+        // php-fpm worker for ever on stream_get_contents(); now the call gives up, kills
+        // the client and reports rc 124 (the timeout(1) convention).
+        foreach ($pipes as $p) stream_set_blocking($p, false);
+        $in = $stdin ?? '';
+        if (isset($pipes[0]) && $in === '') { fclose($pipes[0]); unset($pipes[0]); }
+        $stdout = '';
+        $stderr = '';
+        $timedOut = false;
+        $deadline = microtime(true) + self::$tmuxTimeoutSeconds;
+        while (isset($pipes[1]) || isset($pipes[2]) || isset($pipes[0])) {
+            $left = $deadline - microtime(true);
+            if ($left <= 0) { $timedOut = true; break; }
+            $r = [];
+            if (isset($pipes[1])) $r[] = $pipes[1];
+            if (isset($pipes[2])) $r[] = $pipes[2];
+            $w = isset($pipes[0]) ? [$pipes[0]] : [];
+            $x = null;
+            $slice = min($left, 0.5);
+            $sec = (int)floor($slice);
+            $n = @stream_select($r, $w, $x, $sec, (int)(($slice - $sec) * 1000000));
+            if ($n === false) break;
+            foreach ($r as $p) {
+                $chunk = fread($p, 65536);
+                $isOut = ($p === ($pipes[1] ?? null));
+                if ($chunk !== false && $chunk !== '') {
+                    if ($isOut) $stdout .= $chunk; else $stderr .= $chunk;
+                } elseif (feof($p)) {
+                    fclose($p);
+                    unset($pipes[$isOut ? 1 : 2]);
+                }
+            }
+            foreach ($w as $p) {
+                $put = @fwrite($p, substr($in, 0, 65536));
+                if ($put !== false && $put > 0) $in = (string)substr($in, $put);
+                if ($in === '') { fclose($p); unset($pipes[0]); }
+            }
         }
-        $stdout = stream_get_contents($pipes[1]) ?: '';
-        $stderr = stream_get_contents($pipes[2]) ?: '';
+        if ($timedOut) {
+            @proc_terminate($proc, 9);
+            foreach ($pipes as $p) { if (is_resource($p)) fclose($p); }
+            proc_close($proc);
+            return ['rc' => 124, 'out' => rtrim($stdout), 'err' => 'tmux timed out after ' . self::$tmuxTimeoutSeconds . 's'];
+        }
         foreach ($pipes as $p) { if (is_resource($p)) fclose($p); }
         $rc = proc_close($proc);
-        return ['rc' => $rc, 'out' => trim($stdout), 'err' => trim($stderr)];
+        // rtrim only: trim() also removed the leading blank rows of a pane capture, which
+        // moved every row of the screen up (R-106).
+        return ['rc' => $rc, 'out' => rtrim($stdout), 'err' => trim($stderr)];
     }
 }

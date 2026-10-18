@@ -676,7 +676,7 @@ class AgentHandler {
                 'hadResume'     => $wp !== '' && \AICliAgents\Services\ConfigService::getResumeId($wp, $agentId, (string)($s['id'] ?? '')) !== null,
             ];
         }
-        if (\AICliAgents\Services\UpgradeRelaunchService::writeManifest($agentId, $closedSet) === false) {
+        if (\AICliAgents\Services\UpgradeRelaunchService::writeManifest($agentId, $closedSet, true) === false) {
             aicli_log("Upgrade: failed to write relaunch manifest for $agentId — sessions will not auto-relaunch", AICLI_LOG_WARN);
         }
 

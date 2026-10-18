@@ -1734,6 +1734,7 @@
     .acp-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1 1 220px; min-width: 0; }
     .acp-row-name { font-size: 12px; overflow-wrap: anywhere; }
     .acp-row-meta { font-size: 11px; opacity: 0.8; }
+    .acp-row-refused { font-size: 11px; color: color-mix(in srgb, #dc2626 55%, var(--text-color, #1c1c1c)); overflow-wrap: anywhere; }
     .acp-row-re, .acp-bi-re, .acp-mono { font-family: monospace; font-size: 11px; overflow-wrap: anywhere; word-break: break-all; }
     .acp-row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .acp-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; }

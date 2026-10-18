@@ -56,6 +56,9 @@ aicli_detach() {
         esac
     done
     [ $# -gt 0 ] || { echo "aicli-detach: no command given" >&2; return 2; }
+    # R-102: resolve a relative --log or --pidfile BEFORE the subshell changes to --cwd.
+    case "$log" in /*) ;; *) log="$PWD/$log" ;; esac
+    case "$pidfile" in ""|/*) ;; *) pidfile="$PWD/$pidfile" ;; esac
     local setsid_bin=""
     command -v setsid >/dev/null 2>&1 && setsid_bin="setsid"
     (

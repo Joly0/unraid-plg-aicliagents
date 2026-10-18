@@ -181,6 +181,32 @@ class PaneInputRules {
         }
     }
 
+    /** R-114: the catastrophic-backtracking probe of AutoContinueRules, shared with the pane rules. */
+    public static function backtracksTooMuch(string $re): bool {
+        if (!class_exists(__NAMESPACE__ . '\\AutoContinueRules') && is_file(__DIR__ . '/AutoContinueRules.php')) {
+            require_once __DIR__ . '/AutoContinueRules.php';
+        }
+        return class_exists(__NAMESPACE__ . '\\AutoContinueRules') && AutoContinueRules::catastrophic($re);
+    }
+
+    /**
+     * R-114: match a BLOCK rule. Same budget as safeMatch(), but a limit hit (or any other
+     * regex error) counts as a MATCH: a block rule means "do not type here", so when the
+     * engine cannot decide, the pane stays blocked. safeMatch() fails open, which is right
+     * for the idle and quota rules but let a slow user block rule stop protecting the pane.
+     */
+    public static function safeBlockMatch(string $re, string $subject): bool {
+        $prevB = ini_get('pcre.backtrack_limit'); $prevR = ini_get('pcre.recursion_limit');
+        ini_set('pcre.backtrack_limit', '20000'); ini_set('pcre.recursion_limit', '2000');
+        try {
+            $r = @preg_match($re, $subject);
+            return $r === 1 || $r === false;
+        } finally {
+            if ($prevB !== false) ini_set('pcre.backtrack_limit', (string)$prevB);
+            if ($prevR !== false) ini_set('pcre.recursion_limit', (string)$prevR);
+        }
+    }
+
     /**
      * The raw user layer, or [] when absent/corrupt (corruption is logged, never fatal).
      *
@@ -237,6 +263,9 @@ class PaneInputRules {
                 if ($id === '' || !preg_match('/^[a-z0-9][a-z0-9_-]{0,47}$/', $id)) $id = 'user-' . substr(md5((string)json_encode($p)), 0, 8);
                 if (++$count > self::MAX_USER_PATTERNS) { $errors[] = "$where: too many user patterns (max " . self::MAX_USER_PATTERNS . ")"; break; }
                 $err = self::patternError($re);
+                // R-114: a user pattern that backtracks without end on a long line is refused here,
+                // so it cannot be saved and then hit the backtrack limit at run time.
+                if ($err === null && self::backtracksTooMuch((string)$re)) $err = 'catastrophic backtracking: the expression is too slow on long input';
                 if ($err !== null) { $errors[] = "$where: pattern '$id' dropped — $err"; continue; }
                 $out['add'][] = ['id' => $id, 're' => (string)$re];
             }

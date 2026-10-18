@@ -22,6 +22,9 @@ final class TmuxSocketRecovery
 
     private const POLL_US = 50000;
 
+    /** R-108: how long to watch for a late SIGUSR1 after the timeout. */
+    public const LATE_GRACE_SECONDS = 2.0;
+
     /**
      * tmux 3.6a, on SIGUSR1: the server calls server_create_socket(), which
      * UNLINKS the file at its original bind path, binds a new socket there and
@@ -74,8 +77,10 @@ final class TmuxSocketRecovery
         $aside = $boundPath . '.live-' . $serverPid;
         $movedAside = false;
         $result = ['ok' => false, 'reason' => 'exception'];
+        // R-108: what the late-signal check needs (inode of the live socket, and a hard link to it).
+        $live = ['inode' => false, 'keep' => null];
         try {
-            $result = self::attempt($op, $boundPath, $aside, $serverPid, $recoveryPath, $timeout, $steps, $movedAside);
+            $result = self::attempt($op, $boundPath, $aside, $serverPid, $recoveryPath, $timeout, $steps, $movedAside, $live);
         } catch (\Throwable $e) {
             $steps[] = 'exception';
             $result = ['ok' => false, 'reason' => 'exception'];
@@ -89,6 +94,13 @@ final class TmuxSocketRecovery
                 ($op['rmdir'])($dir);
             }
         }
+        // R-108: after a timeout the slow server may still handle SIGUSR1. It then unlinks
+        // the live socket we just put back and binds its own there. Look again for a short
+        // time; if the inode at $boundPath changed, that new file is the recovered socket.
+        if (!$result['ok'] && ($result['reason'] ?? '') === 'no_socket' && $movedAside && $live['inode'] !== false) {
+            $result = self::settleLateSignal($op, $boundPath, $recoveryPath, $live, $steps) ?? $result;
+        }
+        if ($live['keep'] !== null) ($op['unlink'])($live['keep']);
         return $result + ['steps' => $steps];
     }
 
@@ -101,7 +113,7 @@ final class TmuxSocketRecovery
      * @return array{ok:bool,path?:string,reason?:string}
      */
     private static function attempt(array $op, string $boundPath, string $aside, int $serverPid,
-                                    string $recoveryPath, float $timeout, array &$steps, bool &$movedAside): array
+                                    string $recoveryPath, float $timeout, array &$steps, bool &$movedAside, array &$live): array
     {
         if (($op['exists'])($boundPath)) {
             if (($op['exists'])($aside) || !($op['rename'])($boundPath, $aside)) {
@@ -110,6 +122,10 @@ final class TmuxSocketRecovery
             }
             $movedAside = true;
             $steps[] = 'aside';
+            // R-108: remember which file is the live socket, and keep a second name for it.
+            $live['inode'] = ($op['inode'])($aside);
+            $keep = $aside . '.keep';
+            if ($live['inode'] !== false && ($op['link'])($aside, $keep)) $live['keep'] = $keep;
         }
 
         if (!($op['signal'])($serverPid, defined('SIGUSR1') ? SIGUSR1 : 10)) {
@@ -139,6 +155,40 @@ final class TmuxSocketRecovery
         return ['ok' => true, 'path' => $recoveryPath];
     }
 
+    /**
+     * R-108: grace period after a timeout. If the file at $boundPath is no longer the live
+     * socket (its inode changed), the slow server handled SIGUSR1 late and bound a new socket
+     * there. Move that socket to $recoveryPath and put the live socket back from its kept link.
+     *
+     * @param array<string,callable> $op
+     * @param array{inode:int|false,keep:?string} $live
+     * @param list<string> $steps
+     * @return array{ok:bool,path?:string,reason?:string}|null null when nothing changed
+     */
+    private static function settleLateSignal(array $op, string $boundPath, string $recoveryPath, array $live, array &$steps): ?array
+    {
+        $deadline = ($op['now'])() + self::LATE_GRACE_SECONDS;
+        while (true) {
+            $now = ($op['inode'])($boundPath);
+            if ($now !== false && $now !== $live['inode']) {
+                if ($live['keep'] === null || ($op['exists'])($recoveryPath)) {
+                    // Cannot give the live socket back safely: leave the path alone.
+                    $steps[] = 'late_unrestorable';
+                    return ['ok' => false, 'reason' => 'late_signal_unrestorable'];
+                }
+                if (!($op['rename'])($boundPath, $recoveryPath)) {
+                    $steps[] = 'late_move_failed';
+                    return ['ok' => false, 'reason' => 'move_recovery_failed'];
+                }
+                ($op['rename'])($live['keep'], $boundPath);
+                $steps[] = 'late_recovered';
+                return ['ok' => true, 'path' => $recoveryPath];
+            }
+            if (($op['now'])() >= $deadline) return null;
+            ($op['sleepUs'])(self::POLL_US);
+        }
+    }
+
     /** @param array<string,callable> $ops @return array<string,callable> */
     private static function ops(array $ops): array
     {
@@ -149,6 +199,9 @@ final class TmuxSocketRecovery
             'rmdir'   => static fn(string $p): bool => @rmdir($p),
             'rename'  => static fn(string $a, string $b): bool => @rename($a, $b),
             'signal'  => static fn(int $pid, int $sig): bool => function_exists('posix_kill') && @posix_kill($pid, $sig),
+            'inode'   => static function (string $p) { clearstatcache(true, $p); $i = @fileinode($p); return $i === false ? false : (int)$i; },
+            'link'    => static fn(string $a, string $b): bool => @link($a, $b),
+            'unlink'  => static fn(string $p): bool => @unlink($p),
             'sleepUs' => static function (int $us): void { usleep($us); },
             'now'     => static fn(): float => microtime(true),
         ];

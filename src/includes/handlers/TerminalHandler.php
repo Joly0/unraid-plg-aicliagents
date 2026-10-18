@@ -945,10 +945,32 @@ class TerminalHandler {
     public static function closeForMaintenance($id): array {
         self::$suppressOnClose = false;
         try {
-            return self::gracefulCloseSerialized($id);
+            return is_callable(self::$closeRunner)
+                ? call_user_func(self::$closeRunner, $id)
+                : self::gracefulCloseSerialized($id);
         } finally {
             self::$suppressOnClose = true;
         }
+    }
+
+    /**
+     * Test seams (F17, #606). Both null in production.
+     *   $closeRunner       fn($id): array — replaces the real close inside closeForMaintenance()
+     *   $suppressionWriter fn(string $safeId): void — replaces AutoLaunchSuppression::suppress()
+     */
+    public static $closeRunner = null;
+    public static $suppressionWriter = null;
+
+    /**
+     * Mark the workspace "closed on purpose" so auto-launch does not bring it straight back
+     * (Fix 2026-09-12). A maintenance close (closeForMaintenance) writes no marker (#606):
+     * the plugin relaunches that workspace itself, and crash recovery must still see it.
+     * gracefulClose() calls this at the end of its teardown.
+     */
+    public static function recordCloseOnPurpose(string $safeId): void {
+        if (!self::$suppressOnClose) return;
+        if (is_callable(self::$suppressionWriter)) { call_user_func(self::$suppressionWriter, $safeId); return; }
+        \AICliAgents\Services\AutoLaunchSuppression::suppress($safeId);
     }
 
     /** Test seam: fn(string $homePath): bool. Null = StorageMountService::isPathAvailable. */
@@ -1085,9 +1107,7 @@ class TerminalHandler {
         // drawer's Close button, a delete, or the CLI's graceful_close action).
         // Auto-launch must not bring it straight back on the next page load.
         // See docs/specs/2026-04-27-auto-launch-workspaces-design.md.
-        if (self::$suppressOnClose) {
-            \AICliAgents\Services\AutoLaunchSuppression::suppress($safeId);
-        }
+        self::recordCloseOnPurpose($safeId);
         @unlink("/tmp/unraid-aicliagents/close-$safeId.flag");
 
         $resumeStr = $capturedId ? "resume_id=$capturedId" : "resume_id=none";
@@ -1816,9 +1836,10 @@ class TerminalHandler {
         // A page's `start` that waited for this switch attaches at once, and the
         // Continue ladder below (up to 32 s) does not keep it waiting.
         \AICliAgents\Services\SessionLaunchLock::release($id);
-        if (!$sendContinue && ($result['status'] ?? '') !== 'ok') {
-            // No launch followed, so there is nothing to hold.
-            \AICliAgents\Services\ContinueHold::clear($id);
+        if (!$sendContinue) {
+            // R-101: stamp the hold again after a good restart (a slow restart can use most
+            // of the first stamp); a failed restart leaves nothing to hold, so clear it.
+            \AICliAgents\Services\ContinueHold::afterRestart($id, $result);
         }
 
         // 7. Nudge it back to work once it reaches idle. Mirrors DrawerPanel's

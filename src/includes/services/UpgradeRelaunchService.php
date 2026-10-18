@@ -38,15 +38,46 @@ class UpgradeRelaunchService
         return self::baseDir() . "/upgrade-relaunch-$safe.json";
     }
 
-    public static function writeManifest(string $agentId, array $closed): bool
+    /**
+     * Write the closed-set manifest of one agent, atomically (temp file, then rename), so a
+     * reader never sees half a file (R-112).
+     *
+     * $merge = true adds $closed to a manifest that is still pending (a second upgrade close
+     * of the same agent, before the first set was relaunched), keyed by session id: the new
+     * entry wins, and the sessions of the first close are not lost. The default replaces the
+     * manifest, which the retry write of relaunchClosedSet() needs (it keeps a subset).
+     */
+    public static function writeManifest(string $agentId, array $closed, bool $merge = false): bool
     {
         @mkdir(self::baseDir(), 0755, true);
+        $list = array_values($closed);
+        if ($merge) {
+            $old = self::readManifest($agentId)['closed'] ?? [];
+            if (is_array($old) && $old !== []) {
+                $byId = [];
+                foreach (array_merge($old, $list) as $e) {
+                    $key = is_array($e) ? (string)($e['sessionId'] ?? '') : (string)$e;
+                    $byId[$key !== '' ? $key : 'n' . count($byId)] = $e;
+                }
+                $list = array_values($byId);
+            }
+        }
         $payload = [
             'agentId'    => $agentId,
             'written_at' => time(),
-            'closed'     => array_values($closed),
+            'closed'     => $list,
         ];
-        return @file_put_contents(self::manifestPath($agentId), json_encode($payload)) !== false;
+        $final = self::manifestPath($agentId);
+        $tmp = $final . '.tmp-' . getmypid() . '-' . bin2hex(random_bytes(3));
+        if (@file_put_contents($tmp, json_encode($payload)) === false) {
+            @unlink($tmp);
+            return false;
+        }
+        if (!@rename($tmp, $final)) {
+            @unlink($tmp);
+            return false;
+        }
+        return true;
     }
 
     public static function readManifest(string $agentId): array
@@ -845,6 +876,12 @@ class UpgradeRelaunchService
         $m = self::readManifest($agentId);
         $closed = $m['closed'] ?? [];
         if (empty($closed)) {
+            // R-112: a manifest that exists but cannot be parsed (a read of a file that is
+            // being written) is NOT an empty set. Deleting it would lose the closed sessions.
+            $f = self::manifestPath($agentId);
+            if (is_file($f) && !is_array(json_decode((string)@file_get_contents($f), true))) {
+                return ['relaunched' => 0, 'skipped' => 0, 'failed' => 0];
+            }
             self::deleteManifest($agentId);
             return ['relaunched' => 0, 'skipped' => 0, 'failed' => 0];
         }

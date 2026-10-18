@@ -1712,7 +1712,7 @@ EOF
     tmux -u new-session -d -s "$SESSION" -c "${WORK_CWD:-$ROOT_DIR}" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
     _tmux_rc=$?
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-POST-TMUX] new-session rc=$_tmux_rc has-session-now=$(tmux has-session -t "$SESSION" 2>&1 && echo YES || echo NO)" >> "$DEBUG_LOG"
-    if [ $? -ne 0 ]; then
+    if [ "$_tmux_rc" -ne 0 ]; then
         log_aicli "ERROR" 1 "Failed to create tmux session $SESSION. Check $DEBUG_LOG"
     fi
     perf_log tmux.new.done
