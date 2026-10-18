@@ -305,7 +305,7 @@ _prepare_busy_snapshot_roll() {
     [ "$type" = "home" ] && [ -n "$id" ] && [ -n "$marker" ] || return 1
     [ "$(basename -- "$marker")" = ".bake_busy_snapshot_${type}_${id//[^a-zA-Z0-9_-]/_}" ] || return 1
 
-    exec {lock_fd}>"$(mount_op_lock_path "$type" "$id")" 2>/dev/null || return 1
+    { exec {lock_fd}>"$(mount_op_lock_path "$type" "$id")"; } 2>/dev/null || return 1
     if ! flock -w 30 "$lock_fd"; then
         exec {lock_fd}>&-
         return 1
@@ -342,7 +342,7 @@ _replace_busy_snapshot() {
     case "$current" in  "home_${id}_delta_"*.sqsh) : ;; *) return 1 ;; esac
     [ -f "$persist/$current" ] || return 1
 
-    exec {lock_fd}>"$(mount_op_lock_path "$type" "$id")" 2>/dev/null || return 1
+    { exec {lock_fd}>"$(mount_op_lock_path "$type" "$id")"; } 2>/dev/null || return 1
     if ! flock -w 30 "$lock_fd"; then
         exec {lock_fd}>&-
         return 1
@@ -493,6 +493,50 @@ _layer_fits_space() {
     _FIT_FREE_MB="${free:-unknown}"
     case "$free" in ''|*[!0-9]*) return 0 ;; esac
     [ "$free" -ge "$_FIT_NEED_MB" ]
+}
+
+# write_no_space_note <type> <id> <need_mb> <free_mb> — F14 (#599): the figures
+# of a save that was refused for lack of space. The supervisor reads this file
+# when it tells the person (Unraid notice and Activity tray entry; #388). Best
+# effort: a failed write only loses the figures.
+write_no_space_note() {
+    local type="${1:-}" id="${2:-}" need="${3:-0}" free="${4:-unknown}" dir
+    dir="${AICLI_NO_SPACE_NOTE_DIR:-/tmp/unraid-aicliagents}"
+    printf '%s %s\n' "$need" "$free" \
+        > "$dir/.bake_no_space_${type}_${id//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
+}
+
+# _layer_uncompressed_bytes <layer> -> the summed size of the regular files in a
+# layer, from `unsquashfs -lls`. Prints 0 when it cannot be listed (no tool, a
+# damaged file, the 60 s limit).
+_layer_uncompressed_bytes() {
+    local layer="${1:-}" n
+    [ -f "$layer" ] && command -v unsquashfs >/dev/null 2>&1 || { printf '0\n'; return 0; }
+    n="$(timeout 60 unsquashfs -lls "$layer" 2>/dev/null | awk '$1 ~ /^-/ {s += $3} END {printf "%d", s}')"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s\n' "$n"
+}
+
+# _layer_realistic_estimate <persist> <type> <id> <raw_bytes> -> the size a new
+# layer of <raw_bytes> of data will have, in bytes. F14 (#599): the first check of
+# a bake uses the worst case (no compression), which refuses a save the disk
+# could take while the data sits in RAM. The better figure is the compression
+# ratio of the entity's NEWEST layer (file size / the size of its files). With no
+# layer, or one that cannot be read, the worst case stays: it prints <raw_bytes>.
+# Home data compresses to 5 % at best in this estimate (a floor, never zero).
+_layer_realistic_estimate() {
+    local persist="${1:-}" type="${2:-}" id="${3:-}" raw="${4:-0}" newest csize usize pct
+    case "$raw" in ''|*[!0-9]*) raw=0 ;; esac
+    newest="$(_layer_stack_sorted "$persist" "$type" "$id" 2>/dev/null | head -1)"
+    [ -n "$newest" ] && [ -f "$newest" ] || { printf '%s\n' "$raw"; return 0; }
+    csize="$(stat -c '%s' "$newest" 2>/dev/null || echo 0)"
+    usize="$(_layer_uncompressed_bytes "$newest")"
+    case "$csize" in ''|*[!0-9]*) csize=0 ;; esac
+    if [ "$csize" -le 0 ] || [ "$usize" -le 0 ]; then printf '%s\n' "$raw"; return 0; fi
+    pct=$(( csize * 100 / usize ))
+    [ "$pct" -ge 5 ] || pct=5
+    [ "$pct" -le 100 ] || pct=100
+    printf '%s\n' "$(( raw / 100 * pct + (raw % 100) * pct / 100 ))"
 }
 
 # _layer_stack_sorted <persist> <type> <id> -> newest-first FULL PATHS of the
@@ -1466,12 +1510,22 @@ convert_copy_tree() {
     local -a args=(-aHX --delete)
     mkdir -p "$dst" || return 1
     [ -n "$ex" ] && args+=(--exclude-from="$ex")
+    local rc=0
     if [ -n "$prog" ]; then
         args+=(--info=progress2 --no-inc-recursive)
-        rsync "${args[@]}" "$src/" "$dst/" > "$prog"
+        rsync "${args[@]}" "$src/" "$dst/" > "$prog" || rc=$?
     else
-        rsync "${args[@]}" "$src/" "$dst/"
+        rsync "${args[@]}" "$src/" "$dst/" || rc=$?
     fi
+    # R-095: rsync exit 24 means "some source files vanished before they were
+    # copied". The source is a live view (a mounted home, the person may be
+    # writing), so a file that is gone is not a failed copy. The verify step
+    # that follows compares the trees; every other non-zero code is a failure.
+    if [ "$rc" -eq 24 ]; then
+        echo "convert_copy_tree: some source files vanished during the copy (rsync 24); treated as done" >&2
+        rc=0
+    fi
+    return "$rc"
 }
 
 # convert_verify_tree <src> <dst> [exclude_file] [samples] — 0 when <dst> holds
@@ -1743,12 +1797,24 @@ agent_convert_gen_name() {
 pt_dir_first_entry() {
     local dir="${1%/}" e name inner
     [ -d "$dir" ] || return 1
+    # R-095: a find that FAILS (unreadable folder, I/O error) is not an empty
+    # folder. Treat a folder that cannot be listed as occupied: the caller then
+    # refuses the conversion instead of copying over data it could not see.
+    if ! find "$dir" -mindepth 1 -maxdepth 1 -print -quit >/dev/null 2>&1; then
+        printf '%s' "(cannot list the folder)"; return 0
+    fi
     while IFS= read -r -d '' e; do
         name="${e##*/}"
         if [ "$name" = ".aicli" ] && [ -d "$e" ] && [ ! -L "$e" ]; then
             # Anything below .aicli that is not a direct zero-byte marker is data.
-            inner="$(find "$e" -mindepth 2 -print -quit 2>/dev/null)"
-            [ -n "$inner" ] || inner="$(find "$e" -mindepth 1 -maxdepth 1 ! \( -type f -size 0 -name '.*_done' \) -print -quit 2>/dev/null)"
+            if ! inner="$(find "$e" -mindepth 2 -print -quit 2>/dev/null)"; then
+                printf '%s' ".aicli (cannot list the folder)"; return 0
+            fi
+            if [ -z "$inner" ]; then
+                if ! inner="$(find "$e" -mindepth 1 -maxdepth 1 ! \( -type f -size 0 -name '.*_done' \) -print -quit 2>/dev/null)"; then
+                    printf '%s' ".aicli (cannot list the folder)"; return 0
+                fi
+            fi
             [ -n "$inner" ] || continue
             printf '%s' "${inner#"$dir"/}"; return 0
         fi

@@ -27,12 +27,12 @@ _safe_filter_pids() {
 graceful_kill() {
     local pattern="$1"
     local pids
-    pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
+    pids=$(pgrep -f "$pattern" 2>/dev/null | grep -vx "$$" || true)
     pids=$(_safe_filter_pids "$pids")
     if [ -n "$pids" ]; then
         echo "$pids" | xargs -r kill -15 > /dev/null 2>&1 || true
         sleep 2
-        pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
+        pids=$(pgrep -f "$pattern" 2>/dev/null | grep -vx "$$" || true)
         pids=$(_safe_filter_pids "$pids")
         if [ -n "$pids" ]; then
             echo "$pids" | xargs -r kill -9 > /dev/null 2>&1 || true
@@ -400,6 +400,9 @@ if [ "$UPGRADE_MODE" = "1" ]; then
     if ! declare -f atomic_write_layer >/dev/null 2>&1; then
         source "$EMHTTP_DEST_CLEANUP/src/scripts/storage/atomic_write_layer.sh" 2>/dev/null || true
     fi
+    if ! declare -f manifest_record_layer >/dev/null 2>&1; then
+        source "$EMHTTP_DEST_CLEANUP/src/scripts/storage/manifest_write.sh" 2>/dev/null || true
+    fi
     # #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"): bake
     # the upper each home's mount REALLY uses (zram first, then disk). Without
     # the new resolve_paths.sh (an older deployed copy): the zram folders.
@@ -424,6 +427,13 @@ if [ "$UPGRADE_MODE" = "1" ]; then
             log_status "      [ZRAM] Baking home delta for $user..."
             DELTA_NAME=$(atomic_write_layer "home" "$user" "$PERSIST_DIR" "$upper_dir" "delta" 2>/dev/null)
             if [ -n "$DELTA_NAME" ]; then
+                # R-081: record the delta in the manifest at once, as the stopping
+                # hook does. Without the entry the layer is untracked until a
+                # reconcile finds it.
+                if declare -f manifest_record_layer >/dev/null 2>&1; then
+                    manifest_record_layer "home" "$user" "$PERSIST_DIR" "$DELTA_NAME" \
+                        || log_status "      [!!] Manifest record failed for $DELTA_NAME (reconcile will recover)."
+                fi
                 log_status "      [OK] Saved $DELTA_NAME to Flash."
                 lifecycle_log "info" "installer_cleanup" "installer_zram_baked" "{\"user\":\"$user\",\"delta\":\"$DELTA_NAME\"}" 2>/dev/null || true
             else

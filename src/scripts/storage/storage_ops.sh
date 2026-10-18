@@ -688,7 +688,7 @@ fi
 # subshell exits, covering the umount+mount below. (mount_op_lock_path is from
 # common.sh, sourced above.)
 if [ "$_MOUNT_LOCK_HELD" != "1" ]; then
-    exec {_MOUNT_OP_LOCK_FD}>"$(mount_op_lock_path "$TYPE" "$ID")" 2>/dev/null || _MOUNT_OP_LOCK_FD=""
+    { exec {_MOUNT_OP_LOCK_FD}>"$(mount_op_lock_path "$TYPE" "$ID")"; } 2>/dev/null || _MOUNT_OP_LOCK_FD=""
     if [ -n "${_MOUNT_OP_LOCK_FD:-}" ]; then
         flock -w 30 "$_MOUNT_OP_LOCK_FD" || log "mount-op lock wait timed out after 30s — proceeding (possible wedged holder)"
     fi
@@ -836,7 +836,16 @@ fi
 # whether THIS bind triggered one, and record whether the arbiter actually
 # unmounted something (a remount that warns despite a real umount, with no
 # lazy detach anywhere, is the case still unexplained after the lazy-detach fix).
-_INUSE_BEFORE=$(dmesg 2>/dev/null | grep -c 'in-use as upperdir' || echo 0)
+# R-086: grep -c prints 0 AND exits 1 when nothing matches, so the old
+# "|| echo 0" gave "0 newline 0" and the numeric compare below failed. Take the
+# count from stdout only, and treat anything that is not a number as 0.
+_dmesg_inuse_count() {
+    local _n
+    _n="$(dmesg 2>/dev/null | grep -c 'in-use as upperdir')" || true
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    printf '%s' "$_n"
+}
+_INUSE_BEFORE=$(_dmesg_inuse_count)
 _WAS_MOUNTED=0; mountpoint -q "$_TEARDOWN_TARGET" 2>/dev/null && _WAS_MOUNTED=1
 if _mount_teardown_arbiter "$_TEARDOWN_TARGET"; then
     _TEARDOWN_RC=0
@@ -949,7 +958,7 @@ if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir=
     # whether the arbiter really unmounted a previous overlay, how many mounts
     # now sit at the path (a stacked pair = the previous one was never
     # unmounted), and who holds the upper right now.
-    _INUSE_AFTER=$(dmesg 2>/dev/null | grep -c 'in-use as upperdir' || echo 0)
+    _INUSE_AFTER=$(_dmesg_inuse_count)
     if [ "${_INUSE_AFTER:-0}" -gt "${_INUSE_BEFORE:-0}" ]; then
         _STACKED=$(awk -v m="$MNT_POINT" '$5==m{c++} END{print c+0}' /proc/self/mountinfo 2>/dev/null)
         _HOLDERS=""
@@ -1519,17 +1528,41 @@ _bake_lock_owner_field() {
     _rec="$(head -c 256 "$_BAKE_LOCK_OWNER" 2>/dev/null)" || return 0
     printf '%s\n' "$_rec" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1
 }
+# _proc_start_ticks <pid> — the start time of a process (field 22 of
+# /proc/<pid>/stat), or empty. A pid can be reused; the pid plus this value
+# cannot. R-080: the name of the process is in brackets and may hold spaces, so
+# cut everything up to the last ") " first.
+_proc_start_ticks() {
+    local _stat
+    _stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+    _stat="${_stat##*) }"
+    set -- $_stat
+    printf '%s' "${20:-}"
+}
 # _bake_lock_holder_is_bake — 0 when the owner record names a live normal bake.
 # A staged bake (op=bake_staged) reads the staging layer, not the live one, so
-# it does not save the live changes and does not count.
+# it does not save the live changes and does not count. R-080: a record of a
+# bake that ended can name a pid that a new process now uses. When the record
+# has a start time, it must match the process; a mismatch is a dead bake.
 _bake_lock_holder_is_bake() {
-    local _op _pid
+    local _op _pid _start
     _op="$(_bake_lock_owner_field op)"
     [ "$_op" = "bake" ] || return 1
     _pid="$(_bake_lock_owner_field pid)"
     case "$_pid" in ''|*[!0-9]*) return 1 ;; esac
     [ "$_pid" != "${BASHPID:-$$}" ] || return 1
-    kill -0 "$_pid" 2>/dev/null
+    kill -0 "$_pid" 2>/dev/null || return 1
+    _start="$(_bake_lock_owner_field start)"
+    if [ -n "$_start" ]; then
+        [ "$(_proc_start_ticks "$_pid")" = "$_start" ] || return 1
+    fi
+    return 0
+}
+# _bake_owner_release — remove the owner record when it is this process's own
+# (R-080). The kernel frees the lock on exit; the record must go with it.
+_bake_owner_release() {
+    [ "$(_bake_lock_owner_field pid)" = "${BASHPID:-$$}" ] || return 0
+    rm -f "$_BAKE_LOCK_OWNER" 2>/dev/null || true
 }
 # _bake_lock_holder_desc — "<op> (pid <pid>)" for the log, or "unknown".
 _bake_lock_holder_desc() {
@@ -1593,10 +1626,13 @@ fi
 # Record this bake as the lock holder, so a concurrent bake of the same layer
 # can skip and every other caller can see who holds the lock. Atomic (tmp + mv).
 if [ -n "$_UPPER_OVERRIDE" ]; then _bake_owner_op="bake_staged"; else _bake_owner_op="bake"; fi
-if ! { printf 'op=%s pid=%s since=%s\n' "$_bake_owner_op" "${BASHPID:-$$}" "$(date +%s)" > "${_BAKE_LOCK_OWNER}.$$" \
+if ! { printf 'op=%s pid=%s since=%s start=%s\n' "$_bake_owner_op" "${BASHPID:-$$}" "$(date +%s)" "$(_proc_start_ticks "${BASHPID:-$$}")" > "${_BAKE_LOCK_OWNER}.$$" \
         && mv -f "${_BAKE_LOCK_OWNER}.$$" "$_BAKE_LOCK_OWNER"; } 2>/dev/null; then
     rm -f "${_BAKE_LOCK_OWNER}.$$" 2>/dev/null || true
 fi
+# R-080: remove the record on every exit, so a later pid reuse cannot make the
+# record look like a live bake.
+if declare -f aicli_on_exit >/dev/null 2>&1; then aicli_on_exit _bake_owner_release; fi
 # Lock is held on fd 9 for the remainder of the script (bake + remount +
 # post-bake consolidate-threshold check).  The kernel releases it on exit
 # (clean or crash) so there is no risk of a stale-lock deadlock.
@@ -1944,8 +1980,20 @@ else
         # filled /boot for minutes and failed, and the automatic bake repeated it
         # at every cool-down. Defer with no_space instead, before anything is written.
         _EST_BYTES="$(_dir_bytes "$_BAKE_SRC")"
+        # F14 (#599): the worst case (no compression) is only the first test. When
+        # it fails, test again with the compression ratio of the newest layer, so a
+        # save is not refused for a layer that will fit while the data sits in RAM.
         if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
-            error "Not enough room on $PERSIST_PATH for the new $_BAKE_KIND layer of $ID: it needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — bake not started. The changes stay in the writable layer."
+            _EST_WORST="$_EST_BYTES"
+            _EST_BYTES="$(_layer_realistic_estimate "$PERSIST_PATH" "$TYPE" "$ID" "$_EST_WORST")"
+            if [ "$_EST_BYTES" -lt "$_EST_WORST" ] && _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+                log "The worst-case size of the new layer (${_EST_WORST} bytes) does not fit, but the compression of the last layer puts it at about ${_EST_BYTES} bytes; it fits. Baking."
+            fi
+        fi
+        if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+            error "Not enough boot disk space to save $ID: the new $_BAKE_KIND layer on $PERSIST_PATH needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — bake not started. The changes stay in the writable layer."
+            # The figures for the supervisor's notification and tray entry (#388).
+            write_no_space_note "$TYPE" "$ID" "${_FIT_NEED_MB:-0}" "${_FIT_FREE_MB:-unknown}"
             rm -f "$MARKER"
             _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_no_space" "no_space" \
                 "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"kind\":\"$_BAKE_KIND\",\"need_mb\":$_FIT_NEED_MB,\"free_mb\":\"$_FIT_FREE_MB\",\"estimate_bytes\":$_EST_BYTES}" "warn"
@@ -2891,9 +2939,16 @@ check_disk_space "$PERSIST_PATH/.diskcheck" 200 || {
 # R-021 (#599): the fixed 200 MB above is no estimate. The consolidated layer is
 # at most the old layers plus the writable layer (worst case: no overlap, no
 # compression of the upper). Defer with no_space before mksquashfs starts.
-_EST_BYTES=$(( $(_layer_total_bytes "${OLD_LAYERS[@]}") + $(_dir_bytes "$UPPER_DIR") ))
+_EST_UPPER_BYTES="$(_dir_bytes "$UPPER_DIR")"
+_EST_BYTES=$(( $(_layer_total_bytes "${OLD_LAYERS[@]}") + _EST_UPPER_BYTES ))
+# F14 (#599): when the worst case does not fit, count the writable layer at the
+# compression ratio of the newest layer (the old layers are already compressed).
 if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
-    error "Not enough room on $PERSIST_PATH for the consolidated layer of $ID: it needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — consolidate not started."
+    _EST_BYTES=$(( $(_layer_total_bytes "${OLD_LAYERS[@]}") + $(_layer_realistic_estimate "$PERSIST_PATH" "$TYPE" "$ID" "$_EST_UPPER_BYTES") ))
+fi
+if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+    error "Not enough boot disk space to merge the layers of $ID: the consolidated layer on $PERSIST_PATH needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — consolidate not started."
+    write_no_space_note "$TYPE" "$ID" "${_FIT_NEED_MB:-0}" "${_FIT_FREE_MB:-unknown}"
     update_task_status "Deferred" 0 "Not enough free space on Flash"
     rm -f "$CONSOLIDATE_MARKER"
     _op_defer "$TYPE" "$ID" "consolidate_layers" "bash_consolidate_no_space" "no_space" \
@@ -3289,7 +3344,7 @@ clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
 # to an empty _SWAPPED_UPPER, op_mount rebound the original 1.1 GB upper, and
 # consolidation nevertheless reported success.  Taking the lock first closes
 # the launch race; the second idle check below then makes a real unmount safe.
-exec {_CONSOLIDATE_MOUNT_LOCK_FD}>"$(mount_op_lock_path "$TYPE" "$ID")" 2>/dev/null || _CONSOLIDATE_MOUNT_LOCK_FD=""
+{ exec {_CONSOLIDATE_MOUNT_LOCK_FD}>"$(mount_op_lock_path "$TYPE" "$ID")"; } 2>/dev/null || _CONSOLIDATE_MOUNT_LOCK_FD=""
 if [ -z "$_CONSOLIDATE_MOUNT_LOCK_FD" ] || ! flock -w 30 "$_CONSOLIDATE_MOUNT_LOCK_FD"; then
     log "Consolidation is durable, but the mount-operation lock could not be acquired — preserving the writable upper for a later reclaim."
     rm -f "$CONSOLIDATE_MARKER"
@@ -3757,6 +3812,14 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         _GR_COPY="$_GR_WORK/copy/${TYPE}_${_GR_LOCK_ID}"
         _GR_RETIRE="$_GR_WORK/retired/${TYPE}_${_GR_LOCK_ID}"
         log "Staged mode: work folder $_GR_WORK."
+    fi
+    # R-095: a second conversion inside the retention window finds the folder of
+    # the first one. mv would then move the writable layer INTO its "upper"
+    # (upper/upper) and mix the layers of two conversions. Take a new folder name;
+    # the intent records the path, so a roll back and the supervisor use this one.
+    if [ -e "$_GR_RETIRE" ]; then
+        _GR_RETIRE="${_GR_RETIRE}.$(date -u +%Y%m%dT%H%M%SZ)"
+        log "The retire folder of an earlier conversion still exists; using $_GR_RETIRE."
     fi
 
     # R14: the tray reads the copy progress and the measured total from these.

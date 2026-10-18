@@ -874,6 +874,22 @@ aicli_agent_mounted_generations_for_gc() {
     done
 }
 
+# aicli_gen_upper_unbaked_count <upper_dir> <agent_id> <persist_path> — R-094:
+# how many regular files of the writable layer are newer than the newest baked
+# layer of the agent (all of them when the agent has no layer). Prints a number.
+aicli_gen_upper_unbaked_count() {
+    local upper="${1:-}" agent_id="${2:-}" persist="${3:-}" newest n
+    [ -d "$upper" ] || { printf '0'; return 0; }
+    newest="$(ls -t "$persist"/agent_"${agent_id}"_*.sqsh 2>/dev/null | head -1)"
+    if [ -n "$newest" ]; then
+        n="$(find "$upper" -type f -newer "$newest" 2>/dev/null | wc -l)"
+    else
+        n="$(find "$upper" -type f 2>/dev/null | wc -l)"
+    fi
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$((n + 0))"
+}
+
 # aicli_reap_agent_generation <agent_id> <generation_id> <persist_path>
 # Unmount one generation and remove its directory, its upper and its work dir.
 # Refuses outright if the generation is the active one. Returns 0 only when the
@@ -941,6 +957,22 @@ aicli_reap_agent_generation() {
                 fi
                 ;;
         esac
+        # R-094: say it when real files go that no baked layer holds. Nothing
+        # durable lives in a generation's writable layer by design (the install
+        # output is baked by the staged install), so the layer is still removed;
+        # the log line makes a loss visible instead of silent.
+        if [ "$label" = "writable layer" ]; then
+            local _unbaked
+            _unbaked="$(aicli_gen_upper_unbaked_count "$path" "$agent_id" "$persist")"
+            if [ "${_unbaked:-0}" -gt 0 ]; then
+                printf 'reap_agent_generation(%s/%s): removing a writable layer with %s file(s) newer than the newest baked layer\n' \
+                    "$agent_id" "$gen" "$_unbaked" >&2
+                if declare -f lifecycle_log >/dev/null 2>&1; then
+                    lifecycle_log "warn" "generation" "agent_generation_upper_reaped_unbaked" \
+                        "{\"agent\":\"$agent_id\",\"generation\":\"$gen\",\"files\":$_unbaked}" 2>/dev/null || true
+                fi
+            fi
+        fi
         rm -rf "${path:?}" 2>/dev/null || true
     }
     _reap_layer "$upper" "writable layer"

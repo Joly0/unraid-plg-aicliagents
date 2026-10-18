@@ -1106,6 +1106,28 @@ _manifest_heal_missing_homes() {
     done <<< "$ids"
 }
 
+# _retention_persist_dirs — R-090: one persist folder per line, no repeats: the
+# agent folder, the root home folder and the folder of EVERY home in the
+# manifest. The retention reaping (orphan tmp files, .graduated copies) walks
+# these. It used to walk only the agent and root folders, so the retired copies
+# of any other user's home were never reaped.
+_retention_persist_dirs() {
+    local _seen=$'\n' _d _hid
+    for _d in "$(agent_persist_path 2>/dev/null || true)" "$(home_persist_path root 2>/dev/null || true)"; do
+        [ -n "$_d" ] || continue
+        case "$_seen" in *$'\n'"$_d"$'\n'*) continue ;; esac
+        _seen="${_seen}${_d}"$'\n'; printf '%s\n' "$_d"
+    done
+    while IFS= read -r _hid; do
+        [ -n "$_hid" ] || continue
+        _d="$(home_persist_path "$_hid" 2>/dev/null || true)"
+        [ -n "$_d" ] || continue
+        case "$_seen" in *$'\n'"$_d"$'\n'*) continue ;; esac
+        _seen="${_seen}${_d}"$'\n'; printf '%s\n' "$_d"
+    done < <(_manifest_home_ids 2>/dev/null)
+    return 0
+}
+
 _op_reconcile() {
     local mpath
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
@@ -1527,12 +1549,11 @@ _op_reconcile() {
     # Release the last entity's per-entity storage lock (fd 8 was reassigned
     # per iteration; close it so the final entity's lock isn't held until the
     # next reconcile tick).
-    exec 8>&- 2>/dev/null || true
+    { exec 8>&-; } 2>/dev/null || true
 
     # Cleanup: orphaned .tmp.* tempfiles in any persist path (older than 1 hour)
     local persist_dirs=()
-    persist_dirs+=("$(agent_persist_path 2>/dev/null || true)")
-    persist_dirs+=("$(home_persist_path root 2>/dev/null || true)")
+    mapfile -t persist_dirs < <(_retention_persist_dirs)
 
     local now_epoch
     now_epoch=$(date +%s)
@@ -1819,9 +1840,9 @@ _bake_no_space_tray() {
             \AICliAgents\Services\EventActor::$override = ["type" => "system"];
             $op = "bake_no_space_" . $argv[3];
             if ($argv[2] === "open") {
-                \AICliAgents\Services\ActivityService::register($op, "storage", "Saving the home is blocked: not enough space",
+                \AICliAgents\Services\ActivityService::register($op, "storage", "Not enough boot disk space to save the home",
                     ["meta" => ["entity" => "home/" . $argv[3], "need_mb" => $argv[4], "free_mb" => $argv[5]]]);
-                \AICliAgents\Services\ActivityService::wait($op, "Waiting for free space");
+                \AICliAgents\Services\ActivityService::wait($op, "Your changes are in RAM and not saved. Free some space on the boot disk, then save again");
             } else {
                 \AICliAgents\Services\ActivityService::finish($op);
             }' -- "$AICLI_MANAGER_PHP" "$1" "$safe_id" "${3:-0}" "${4:-unknown}" >/dev/null 2>&1
@@ -1837,8 +1858,8 @@ _bake_no_space_alert() {
     safe_id="${id//[^a-zA-Z0-9_-]/_}"
     f="/tmp/unraid-aicliagents/.bake_no_space_${type}_${safe_id}"
     [ -f "$f" ] && read -r need free < "$f" 2>/dev/null
-    _supervisor_notify "warning" "AICliAgents: saving the home is blocked: not enough space" \
-        "Saving '$id' needs about ${need} MB of free space and only ${free} MB is free. Nothing was saved; the changes stay in RAM. Free some space on the storage device." \
+    _supervisor_notify "warning" "AICliAgents: not enough boot disk space to save the home" \
+        "Saving '$id' needs about ${need} MB of free space on the boot disk and only ${free} MB is free. Nothing was saved; your changes stay in RAM and are lost if the server restarts. Free some space (Home Storage, Boot disk space, shows what uses it), then save again." \
         "bake_no_space_${id}" 21600
     mkdir -p "$_NOTIFIED_DIR" 2>/dev/null || true
     if [ ! -f "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" ]; then
@@ -3043,8 +3064,8 @@ _job_finalize() {
 }
 
 # _check_job_retries — re-enqueue parked deferred jobs whose retry_at passed.
-# Crash-safe: the .retry file is removed BEFORE the enqueue; a crash between
-# the two loses one retry tick, never duplicates a job.
+# Crash-safe (R-089): the job is queued BEFORE the .retry file is removed. A
+# crash between the two can queue the job twice, never loses it.
 _check_job_retries() {
     [ -d "$JOB_RETRY_DIR" ] || return 0
     local f now
@@ -3064,9 +3085,19 @@ _check_job_retries() {
         r_trace="$(queue_read_field "$f" trace 2>/dev/null)"
         r_prio="$(queue_read_field "$f" priority 2>/dev/null)"
         case "$r_prio" in ''|*[!0-9]*) r_prio=5 ;; esac
+        # R-089: a file with no usable fields can never be queued; drop it.
+        if ! { [ -n "$r_type" ] && [ -n "$r_id" ] && [ -n "$r_op" ]; }; then
+            rm -f "$f" 2>/dev/null || true
+            continue
+        fi
+        # R-089: queue first, then remove the file. A failed enqueue keeps the
+        # file, so the next tick tries again. A crash between the two steps can
+        # queue the job twice, never lose it.
+        if ! queue_enqueue "$r_prio" "$r_type" "$r_id" "$r_op" "$r_reason" "$r_trace" "$r_job" 2>/dev/null; then
+            log_warn "Job retry for $r_type/$r_id (job=$r_job) could not be queued — kept for the next tick"
+            continue
+        fi
         rm -f "$f" 2>/dev/null || true
-        [ -n "$r_type" ] && [ -n "$r_id" ] && [ -n "$r_op" ] || continue
-        queue_enqueue "$r_prio" "$r_type" "$r_id" "$r_op" "$r_reason" "$r_trace" "$r_job" 2>/dev/null || true
         log_info "Job retry matured: re-enqueued $r_op for $r_type/$r_id (job=$r_job)"
     done
 }
@@ -3281,6 +3312,56 @@ _reap_orphan_running_jobs() {
         n=$((n + 1))
         log_warn "Job $jid ($ent, op=$op) was running when the supervisor stopped — marked failed (supervisor_restart)"
         lifecycle_log "warn" "supervisor" "job_orphan_failed" \
+            "{\"job_id\":\"$jid\",\"entity\":\"$ent\",\"op\":\"$op\"}" 2>/dev/null || true
+    done
+    [ "$n" -gt 0 ] && _publish_storage_status
+    echo "$n"
+}
+
+# _reap_orphan_queued_jobs [grace_s] — R-025 (#603), the "queued" half. A ledger
+# entry in state "queued" is served by a request file in the queue folder (its
+# JSON carries "job":"<id>") or, after a defer, by a retry file in the retry
+# pen. An entry with neither can never run: the request was lost (the queue
+# folder was emptied, or the supervisor stopped between the pop and the ledger
+# update). Nothing else ends it, so the Home card keeps waiting for ever. Mark
+# it failed (reason queue_entry_lost). An entry that changed less than <grace_s>
+# seconds ago is left alone: a request is written just before its ledger entry.
+# Prints how many entries it ended.
+_reap_orphan_queued_jobs() {
+    local grace="${1:-60}" f jid state now updated age n=0 served r
+    local ent op type id attempt queued_at trace epoch
+    [ -d "$JOBS_DIR" ] || { echo 0; return 0; }
+    declare -f job_ledger_write >/dev/null 2>&1 || { echo 0; return 0; }
+    now=$(date +%s)
+    for f in "$JOBS_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        state="$(queue_read_field "$f" state 2>/dev/null)"
+        [ "$state" = "queued" ] || continue
+        jid="$(basename "$f" .json)"
+        [ "$jid" = "${_RUNNING_JOB_ID:-}" ] && continue
+        updated="$(queue_read_field "$f" updated_at 2>/dev/null)"
+        case "$updated" in ''|*[!0-9]*) updated="$(stat -c '%Y' "$f" 2>/dev/null || echo "$now")" ;; esac
+        age=$(( now - updated ))
+        [ "$age" -ge "$grace" ] || continue
+        [ -f "${JOB_RETRY_DIR:-/nonexistent}/${jid}.retry" ] && continue
+        served=0
+        for r in "$QUEUE_DIR"/*.req; do
+            [ -f "$r" ] || continue
+            if grep -qF "\"job\":\"$jid\"" "$r" 2>/dev/null; then served=1; break; fi
+        done
+        [ "$served" -eq 0 ] || continue
+        ent="$(queue_read_field "$f" entity 2>/dev/null)"
+        op="$(queue_read_field "$f" op 2>/dev/null)"
+        type="${ent%%/*}"; id="${ent#*/}"
+        attempt="$(queue_read_field "$f" attempt 2>/dev/null)"
+        queued_at="$(queue_read_field "$f" queued_at 2>/dev/null)"
+        trace="$(queue_read_field "$f" trace 2>/dev/null)"
+        epoch="$(queue_read_field "$f" consolidate_epoch 2>/dev/null)"
+        job_ledger_write "$jid" "$op" "$type" "$id" "failed" "1" "" \
+            "$attempt" "$queued_at" "" "$now" "queue_entry_lost" "$trace" "$epoch" || continue
+        n=$((n + 1))
+        log_warn "Job $jid ($ent, op=$op) was queued but no request or retry file serves it — marked failed (queue_entry_lost)"
+        lifecycle_log "warn" "supervisor" "job_orphan_queued_failed" \
             "{\"job_id\":\"$jid\",\"entity\":\"$ent\",\"op\":\"$op\"}" 2>/dev/null || true
     done
     [ "$n" -gt 0 ] && _publish_storage_status
@@ -3634,14 +3715,16 @@ _check_schedule_trigger() {
     [ "$(command -v php)" ] || return 0
 
     local entity_data
-    entity_data=$(php -d display_errors=0 -r "
-        \$m = json_decode(@file_get_contents('$mpath'), true);
-        if (!is_array(\$m)) exit;
-        foreach (\$m['entities'] ?? [] as \$k => \$v) {
-            \$lkg = \$v['last_known_good_at'] ?? '';
-            echo \$k . \"\t\" . \$lkg . PHP_EOL;
+    # R-088: the manifest path goes in through the environment, never into the
+    # php source (a single quote in the persist path was PHP injection).
+    entity_data=$(AICLI_MANIFEST_FILE="$mpath" php -d display_errors=0 -r '
+        $m = json_decode(@file_get_contents(getenv("AICLI_MANIFEST_FILE")), true);
+        if (!is_array($m)) exit;
+        foreach ($m["entities"] ?? [] as $k => $v) {
+            $lkg = $v["last_known_good_at"] ?? "";
+            echo $k . "\t" . $lkg . PHP_EOL;
         }
-    " 2>/dev/null || true)
+    ' 2>/dev/null || true)
 
     [ -n "$entity_data" ] || return 0
 
@@ -3710,13 +3793,13 @@ _check_consolidate_policy() {
     [ "$(command -v php)" ] || return 0
 
     local home_ids
-    home_ids=$(php -d display_errors=0 -r "
-        \$m = json_decode(@file_get_contents('$mpath'), true);
-        if (!is_array(\$m)) exit;
-        foreach (\$m['entities'] ?? [] as \$k => \$v) {
-            if (strpos(\$k, 'home/') === 0) echo substr(\$k, 5) . PHP_EOL;
+    home_ids=$(AICLI_MANIFEST_FILE="$mpath" php -d display_errors=0 -r '
+        $m = json_decode(@file_get_contents(getenv("AICLI_MANIFEST_FILE")), true);
+        if (!is_array($m)) exit;
+        foreach ($m["entities"] ?? [] as $k => $v) {
+            if (strpos($k, "home/") === 0) echo substr($k, 5) . PHP_EOL;
         }
-    " 2>/dev/null || true)
+    ' 2>/dev/null || true)
     [ -n "$home_ids" ] || return 0
 
     local id persist json reason safe_id existing
@@ -3786,13 +3869,13 @@ _manifest_home_ids() {
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
     [ -f "$mpath" ] || return 0
     [ "$(command -v php)" ] || return 0
-    php -d display_errors=0 -r "
-        \$m = json_decode(@file_get_contents('$mpath'), true);
-        if (!is_array(\$m)) exit;
-        foreach (\$m['entities'] ?? [] as \$k => \$v) {
-            if (strpos(\$k, 'home/') === 0) echo substr(\$k, 5) . PHP_EOL;
+    AICLI_MANIFEST_FILE="$mpath" php -d display_errors=0 -r '
+        $m = json_decode(@file_get_contents(getenv("AICLI_MANIFEST_FILE")), true);
+        if (!is_array($m)) exit;
+        foreach ($m["entities"] ?? [] as $k => $v) {
+            if (strpos($k, "home/") === 0) echo substr($k, 5) . PHP_EOL;
         }
-    " 2>/dev/null || true
+    ' 2>/dev/null || true
 }
 
 # _home_reclaim_recommended <id> <persist> — return 0 if storagectl recommends
@@ -4615,6 +4698,7 @@ _work_tick() {
 
     # Step 3e: R-025 (#603) — end ledger entries a dead supervisor left "running".
     _reap_orphan_running_jobs 30 >/dev/null
+    _reap_orphan_queued_jobs 60 >/dev/null
 
     # Step 4: Pop and process one queue item
     local qdepth
@@ -4914,6 +4998,7 @@ _do_start() {
     # entry is a leftover of the predecessor. End it now (no grace) so the Home
     # card unlocks. A history runner that outlived the predecessor is kept.
     _reap_orphan_running_jobs 0 >/dev/null
+    _reap_orphan_queued_jobs 5 >/dev/null
 
     log_info "Supervisor starting (pid $$, version $DAEMON_VERSION)"
     lifecycle_log "info" "supervisor" "supervisor_started" "{\"pid\":$$,\"version\":\"$DAEMON_VERSION\"}" 2>/dev/null || true

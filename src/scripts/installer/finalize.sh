@@ -94,7 +94,7 @@ saveAICliConfig(['version' => '$VERSION']);
 # below PHP; without this redirection the daemon inherits the flock forever and
 # every subsequent plugin update reports "Another install is running".
 if ! "${AICLI_RUN_CLOSED[@]}" php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/supervisor-ready.php > /dev/null 2>&1; then
-    log_error "Storage supervisor did not become ready after installation."
+    log_fail "Storage supervisor did not become ready after installation."
     exit 1
 fi
 log_ok "Services initialized. Plugin updated to v$VERSION."

@@ -114,7 +114,8 @@ class TaskService {
                 return 'Operation refused: the projected layer size is approaching the FAT32 4 GiB per-file limit on the persistence target. Move persistence to a POSIX pool (see the Storage tab).';
             case 'no_space':
                 // #338: a bake or agent pack is not started when its result cannot fit.
-                return 'Not started: there is not enough free space on the storage device for the new layer. Free some space (the Storage tab lists what uses it); nothing was changed.';
+                // F14 (#599): say it is the boot disk, that nothing is saved yet, and what to do.
+                return 'Not saved: there is not enough free space on the boot disk (the storage device) for the new layer, so nothing was written. Your changes are still in RAM and are lost if the server restarts. Free some space (Home Storage, Boot disk space, shows what uses it), then save again.';
             case 'upper_not_empty':
                 // S-10 (#1354): graduate found unflushed writes after its flush+consolidate.
                 return 'Graduation deferred: new writes landed during the flush. The migration will retry automatically once the home is idle.';
@@ -221,7 +222,7 @@ class TaskService {
             case 'target_not_mounted':
                 return 'Waiting for the storage device to mount (is the Unassigned Device attached?) — it will retry automatically.';
             case 'no_space':
-                return 'Not started: the storage device does not have room for the new layer. Nothing was changed.';
+                return 'Not saved: there is not enough boot disk space (storage device) for the new layer. Your changes stay in RAM. Free some space on the boot disk, then save again.';
             case 'upper_not_empty':
                 return 'Flushing pending writes first — it will continue automatically once this home is idle.';
             case 'sqlite_backup_deferred':

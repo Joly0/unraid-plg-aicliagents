@@ -374,6 +374,24 @@ require_entity_args() {
         exit 64
     fi
     case "$TYPE" in home|agent) : ;; *) _sc_err "invalid --type: $TYPE"; emit_json 3 "failed" "invalid_type"; exit 3 ;; esac
+    # R-092: the id becomes a path segment (passthrough tree, layer names, lock
+    # names). `--id ..` reached _pt_wipe and rm -rf of the whole passthrough tree.
+    # PHP callers validate; this script does not trust them.
+    if ! _valid_entity_id "$ID"; then
+        _sc_err "invalid --id: $ID"
+        emit_json 3 "failed" "invalid_id"
+        exit 3
+    fi
+}
+
+# _valid_entity_id <id> — 0 for a plain name: letters, digits and . _ @ + -, not
+# starting with - or ., never "." or "..", never a slash or a control byte.
+_valid_entity_id() {
+    local id="${1-}"
+    case "$id" in
+        ''|.|..|-*|.*|*/*|*[!A-Za-z0-9._@+-]*) return 1 ;;
+    esac
+    return 0
 }
 
 # _mount_wait_entity_lock <lock_file> <wait_s>

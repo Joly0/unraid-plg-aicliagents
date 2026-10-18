@@ -105,6 +105,26 @@ done < <(awk '{print $2}' /proc/mounts 2>/dev/null \
 for loop in $(losetup -a 2>/dev/null | grep -E "unraid-aicliagents|$RUNTIME_DIR|$EMHTTP_DEST" | cut -d: -f1); do
     losetup -d "$loop" 2>/dev/null || true
 done
+# R-091: initialize_zram.sh sized a zram device (4 GB limit) for the home upper
+# folders. After the last unmount nothing uses it, but its RAM stays allocated
+# until a reboot. Reset the device that carries our label, and only that one
+# (zram0 may belong to another plugin). A device that is still mounted is kept.
+if command -v zramctl >/dev/null 2>&1; then
+    for _un_z in "${AICLI_SYS_BLOCK:-/sys/block}"/zram*; do
+        [ -d "$_un_z" ] || continue
+        _un_zn="$(basename "$_un_z")"
+        [ "$(blkid -s LABEL -o value "/dev/$_un_zn" 2>/dev/null)" = "AICLI_ZRAM" ] || continue
+        if grep -q "^/dev/$_un_zn " "${AICLI_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null; then
+            log_status "WARNING: /dev/$_un_zn is still mounted; its RAM stays allocated until a reboot."
+            continue
+        fi
+        if zramctl -r "/dev/$_un_zn" 2>/dev/null; then
+            log_status "Released the RAM of /dev/$_un_zn (zram)."
+        else
+            log_status "WARNING: could not reset /dev/$_un_zn; its RAM stays allocated until a reboot."
+        fi
+    done
+fi
 
 # Phase 4: remove every host integration installed outside the plugin tree.
 log_status "[4/5] Removing cron, shell, command, event, and nginx integrations..."

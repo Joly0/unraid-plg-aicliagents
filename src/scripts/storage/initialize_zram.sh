@@ -23,6 +23,51 @@ error() {
     echo "$msg" >> "$DEBUG_LOG"
 }
 
+# R-087: two first mounts must not race. Without a lock both can pass the "not
+# mounted" check, both allocate a zram device (hot_add) and one device leaks.
+# The lock is non-blocking with a deadline (never a blocking flock). It is held
+# on its own descriptor until this script exits.
+_zram_take_lock() {
+    local _lock="${AICLI_ZRAM_LOCK:-/var/run/aicli-zram-init.lock}"
+    local _wait="${AICLI_ZRAM_LOCK_WAIT_S:-60}" _deadline
+    case "$_wait" in ''|*[!0-9]*) _wait=60 ;; esac
+    command -v flock >/dev/null 2>&1 || return 0
+    { exec {ZRAM_LOCK_FD}>"$_lock"; } 2>/dev/null || return 0
+    _deadline=$((SECONDS + _wait))
+    until flock -n "$ZRAM_LOCK_FD"; do
+        if [ "$SECONDS" -ge "$_deadline" ]; then
+            error "Another ZRAM initialization still holds $_lock after ${_wait}s."
+            return 1
+        fi
+        sleep 0.2
+    done
+    return 0
+}
+
+# R-087: format the device. A failed mkfs is logged with its own message and
+# fails the script. The old code sent the message to /dev/null and exited
+# silently through set -e.
+_zram_format() {
+    local _out
+    modprobe ext4 2>/dev/null || true
+    if command -v mkfs.ext4 >/dev/null 2>&1 && grep -qw ext4 /proc/filesystems 2>/dev/null; then
+        log "Formatting ZRAM as ext4..."
+        _out="$(mkfs.ext4 -m 0 -L "$ZRAM_LABEL" "$ZRAM_DEV" 2>&1)" || {
+            error "mkfs.ext4 failed on $ZRAM_DEV: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-300)"
+            return 1
+        }
+    else
+        log "ext4 unavailable on this kernel — formatting ZRAM as xfs..."
+        _out="$(mkfs.xfs -f -L "$ZRAM_LABEL" "$ZRAM_DEV" 2>&1)" || {
+            error "mkfs.xfs failed on $ZRAM_DEV: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-300)"
+            return 1
+        }
+    fi
+    return 0
+}
+
+_zram_take_lock || exit 1
+
 # 1. Check if already initialized (our mount point is active)
 if grep -q "$ZRAM_MNT" /proc/mounts 2>/dev/null; then
     exit 0
@@ -95,14 +140,7 @@ if [ "$DISKSIZE" = "0" ]; then
     # (GitHub issue #5). XFS is always present on Unraid; the mount options in
     # step 6 (noatime,nodiratime,discard) are valid for both, and that mount has
     # no -t so a reused device's filesystem is auto-detected.
-    modprobe ext4 2>/dev/null || true
-    if command -v mkfs.ext4 >/dev/null 2>&1 && grep -qw ext4 /proc/filesystems 2>/dev/null; then
-        log "Formatting ZRAM as ext4..."
-        mkfs.ext4 -m 0 -L "$ZRAM_LABEL" "$ZRAM_DEV" > /dev/null 2>&1
-    else
-        log "ext4 unavailable on this kernel — formatting ZRAM as xfs..."
-        mkfs.xfs -f -L "$ZRAM_LABEL" "$ZRAM_DEV" > /dev/null 2>&1
-    fi
+    _zram_format || exit 1
 fi
 
 # 6. Mount

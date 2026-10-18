@@ -1080,15 +1080,33 @@ _restore_safety_snapshot() {
 # --stats parsing (unused here but harmless to leave set).
 # ---------------------------------------------------------------------------
 
-# _restore_rsync_copy <snapshot_tree> <home_mnt> <mode:replace|merge>
-# replace: --delete, the home ends up identical to the snapshot tree.
+# _restore_protect_file <snapshot_dir> — R-093: print the path of a temp file that
+# holds the exclude patterns the snapshot's backup used (backup.json "excludes").
+# A replace restore runs rsync --delete: a folder the backup left out is not in
+# the snapshot tree, so --delete would remove it from the home. Passing the same
+# patterns as --exclude protects those paths (an excluded path is neither copied
+# nor deleted). Prints nothing when the snapshot recorded no excludes.
+_restore_protect_file() {
+    local snap_dir="${1:-}" manifest f
+    manifest="${snap_dir%/}/backup.json"
+    [ -f "$manifest" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    f="$(mktemp "${TMPDIR:-/tmp}/aicli-restore-protect.XXXXXX" 2>/dev/null)" || return 0
+    jq -r '(.excludes // [])[] | strings | select(length > 0)' "$manifest" > "$f" 2>/dev/null || true
+    if [ -s "$f" ]; then printf '%s' "$f"; else rm -f "$f" 2>/dev/null || true; fi
+}
+
+# _restore_rsync_copy <snapshot_tree> <home_mnt> <mode:replace|merge> [protect_file]
+# replace: --delete, the home ends up identical to the snapshot tree, except the
+#          paths in <protect_file> (R-093), which stay as they are.
 # merge:   no --delete, nothing in the home is removed.
 _restore_rsync_copy() {
-    local src_tree="${1:-}" dst_home="${2:-}" mode="${3:-replace}"
-    local delete_arg=()
+    local src_tree="${1:-}" dst_home="${2:-}" mode="${3:-replace}" protect="${4:-}"
+    local delete_arg=() protect_arg=()
     [ "$mode" = "replace" ] && delete_arg=(--delete)
+    if [ "$mode" = "replace" ] && [ -n "$protect" ] && [ -s "$protect" ]; then protect_arg=(--exclude-from="$protect"); fi
     local out rc
-    out="$(ionice -c3 nice -n19 rsync -a --numeric-ids "${delete_arg[@]}" \
+    out="$(ionice -c3 nice -n19 rsync -a --numeric-ids "${delete_arg[@]}" "${protect_arg[@]}" \
         "${src_tree%/}/" "${dst_home%/}/" 2>&1)"
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -1105,11 +1123,12 @@ _restore_rsync_copy() {
 # — an extra file the snapshot never had is expected to remain untouched.
 # Returns 0 = verified, 1 = differs.
 _restore_verify() {
-    local src_tree="${1:-}" dst_home="${2:-}" mode="${3:-replace}"
-    local delete_arg=()
+    local src_tree="${1:-}" dst_home="${2:-}" mode="${3:-replace}" protect="${4:-}"
+    local delete_arg=() protect_arg=()
     [ "$mode" = "replace" ] && delete_arg=(--delete)
+    if [ "$mode" = "replace" ] && [ -n "$protect" ] && [ -s "$protect" ]; then protect_arg=(--exclude-from="$protect"); fi
     local diff
-    diff="$(rsync -a --dry-run --checksum --itemize-changes "${delete_arg[@]}" \
+    diff="$(rsync -a --dry-run --checksum --itemize-changes "${delete_arg[@]}" "${protect_arg[@]}" \
         "${src_tree%/}/" "${dst_home%/}/" 2>/dev/null | grep -v '^$')"
     if [ "$mode" = "merge" ]; then
         diff="$(printf '%s\n' "$diff" | grep '^>f' || true)"
@@ -1252,7 +1271,11 @@ _restore_home_execute() {
     fi
 
     job_ledger_set_phase "$job_id" "restoring" 2>/dev/null || true
-    if ! _restore_rsync_copy "$RS_SNAPSHOT/tree" "$home_mnt" "$RS_MODE"; then
+    # R-093: paths the backup left out stay in the home on a replace restore.
+    local protect_file=""
+    [ "$RS_MODE" = "replace" ] && protect_file="$(_restore_protect_file "$RS_SNAPSHOT")"
+    if ! _restore_rsync_copy "$RS_SNAPSHOT/tree" "$home_mnt" "$RS_MODE" "$protect_file"; then
+        [ -z "$protect_file" ] || rm -f "$protect_file" 2>/dev/null || true
         lifecycle_log "error" "supervisor" "restore_rsync_failed" "{\"entity\":\"$entity\"}" 2>/dev/null || true
         _restore_ledger "storage.restore.failed" "$user" "home restore of $user failed: copy failed" \
             "$(printf '{"cause":"rsync_failed","safety_snapshot_path":"%s"}' "$safety_path")"
@@ -1263,7 +1286,10 @@ _restore_home_execute() {
     fi
 
     job_ledger_set_phase "$job_id" "verifying" 2>/dev/null || true
-    if ! _restore_verify "$RS_SNAPSHOT/tree" "$home_mnt" "$RS_MODE"; then
+    local verify_rc=0
+    _restore_verify "$RS_SNAPSHOT/tree" "$home_mnt" "$RS_MODE" "$protect_file" || verify_rc=1
+    [ -z "$protect_file" ] || rm -f "$protect_file" 2>/dev/null || true
+    if [ "$verify_rc" -ne 0 ]; then
         lifecycle_log "error" "supervisor" "restore_verify_failed" "{\"entity\":\"$entity\"}" 2>/dev/null || true
         _restore_ledger "storage.restore.failed" "$user" "home restore of $user failed: verify found differences" \
             "$(printf '{"cause":"verify_failed","safety_snapshot_path":"%s"}' "$safety_path")"
