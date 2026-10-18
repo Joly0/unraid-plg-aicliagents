@@ -1004,6 +1004,8 @@ class UpgradeRelaunchService
             // #661: a zombie that the teardown could not remove still holds its socket. The start
             // below would stop at "already running", and the probe after it would read the zombie
             // as the new session. Keep the entry for the next sweep instead of counting a relaunch.
+            // phpstan cannot see that $stopper changes what $isRunning reports; the earlier checks look constant to it.
+            // @phpstan-ignore-next-line The stopper callable tears the zombie down, so this re-probe is not the same as the one above.
             if ($isRunning($sid) && !$isHealthy($sid)) {
                 LogService::log("relaunchOne: $sid is a zombie session that could not be removed; the entry stays for the next sweep", LogService::LOG_WARN, "UpgradeRelaunchService");
                 return 'failed';
@@ -1016,6 +1018,7 @@ class UpgradeRelaunchService
         // ready, array stopping, unknown agent). Count a start only when the session is up (#584).
         $sleeper = $sleeper ?? static function (int $seconds): void { sleep($seconds); };
         for ($i = 0; $i < self::START_PROBES; $i++) {
+            // @phpstan-ignore-next-line The starter callable brings the session up, so each probe can differ from the last.
             if ($isRunning($sid)) return 'relaunched';
             if ($i < self::START_PROBES - 1) $sleeper(1);
         }
