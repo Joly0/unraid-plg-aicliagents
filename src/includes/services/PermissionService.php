@@ -36,7 +36,7 @@ class PermissionService {
      * Enforces security on sensitive plugin assets.
      */
     public static function enforcePluginPermissions() {
-        $bootConfig = "/boot/config/plugins/unraid-aicliagents";
+        $bootConfig = SecretPaths::flashRoot();
         $secretsFile = "$bootConfig/secrets.cfg";
 
         if (file_exists($secretsFile)) {

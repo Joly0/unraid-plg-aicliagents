@@ -169,17 +169,15 @@ class TerminalHandler {
         return $agentId;
     }
 
-    /** tmpfs directory holding one per-session cooldown marker file. */
-    private const CONTINUE_COOLDOWN_DIR = '/tmp/unraid-aicliagents/continue';
-
     /** How long a delivered continue nudge blocks a second one for the SAME session. */
     private const CONTINUE_COOLDOWN_SECONDS = 30;
 
-    /** Test seam: overrides CONTINUE_COOLDOWN_DIR. Null uses the real path. */
+    /** Test seam: overrides the cooldown folder. Null uses the real path. */
     public static ?string $continueCooldownDir = null;
 
+    /** tmpfs directory holding one per-session cooldown marker file (the state root under test is the sandbox). */
     private static function continueCooldownDir(): string {
-        return self::$continueCooldownDir ?? self::CONTINUE_COOLDOWN_DIR;
+        return self::$continueCooldownDir ?? \AICliAgents\Services\SecretPaths::stateRoot() . '/continue';
     }
 
     private static function continueCooldownMarker(string $id): string {
@@ -538,7 +536,7 @@ class TerminalHandler {
 
     private static function start($id) {
         $config = getAICliConfig();
-        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $persistPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
         // Never default the agent: starting the WRONG agent in a user's
         // workspace is worse than refusing to start at all.
         $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
@@ -741,7 +739,7 @@ class TerminalHandler {
 
         // #614: the UI offers an Emergency Session only while home storage is down. Check it
         // here too, on the server: a direct call must not swap the home of a healthy box.
-        $persistPathEm = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $persistPathEm = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
         $homePathEm = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);   // R-046: the one resolver
         $homeUp = is_callable(self::$homeAvailableProbe)
             ? (bool)call_user_func(self::$homeAvailableProbe, (string)$homePathEm)
@@ -755,7 +753,7 @@ class TerminalHandler {
         // Clean up any previous emergency state (allow starting fresh)
         if (\AICliAgents\Services\StorageMountService::isEmergencyMode()) {
             aicli_log("Cleaning previous emergency state before new session.", AICLI_LOG_INFO, "TerminalHandler");
-            @unlink(\AICliAgents\Services\StorageMountService::EMERGENCY_FLAG);
+            @unlink(\AICliAgents\Services\StorageMountService::emergencyFlag());
         }
         // Also clean up a stale ttyd/tmux of THIS workspace from a failed earlier attempt.
         // #614: this used to pkill every aicli-run and ttyd on the box and delete every
@@ -773,7 +771,7 @@ class TerminalHandler {
         if ($user === '0' || empty($user)) $user = 'root';
 
         // Create temporary home directory structure
-        $emergencyHome = \AICliAgents\Services\StorageMountService::EMERGENCY_HOME;
+        $emergencyHome = \AICliAgents\Services\StorageMountService::emergencyHome();
         @mkdir("$emergencyHome/.aicli/envs", 0755, true);
 
         aicli_log("EMERGENCY MODE: Starting session with temp home at $emergencyHome", AICLI_LOG_WARN, "TerminalHandler");
@@ -817,7 +815,7 @@ class TerminalHandler {
 
         // Set emergency flag BEFORE starting terminal — ensureHomeMounted checks this flag
         // to recognize the symlink as a valid home mount
-        touch(\AICliAgents\Services\StorageMountService::EMERGENCY_FLAG);
+        touch(\AICliAgents\Services\StorageMountService::emergencyFlag());
 
         // Start terminal (home is now symlinked to emergency dir, ensureHomeMounted sees the flag)
         $started = startAICliTerminal($id, $path, null, $agentId, \AICliAgents\Services\SessionLaunchLock::WEB_START_WAIT_SECONDS);
@@ -978,7 +976,7 @@ class TerminalHandler {
      * path; AICLI_TMP_BASE redirects it for tests only (the same seam as TerminalService::markClosing).
      */
     public static function closeFlagPath(string $safeId): string {
-        $base = rtrim((string)(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents'), '/');
+        $base = rtrim((string)(getenv('AICLI_TMP_BASE') ?: \AICliAgents\Services\SecretPaths::stateRoot()), '/');
         return $base . '/close-' . $safeId . '.flag';
     }
 
@@ -1045,7 +1043,7 @@ class TerminalHandler {
                 $escSess = escapeshellarg($sessName);
                 aicli_log("gracefulClose: tmux session resolved as '$sessName' (sock=$tmuxSock) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
 
-                @mkdir('/tmp/unraid-aicliagents', 0755, true);
+                @mkdir(\AICliAgents\Services\SecretPaths::stateRoot(), 0755, true);
 
                 // Quiesce the agent and capture + persist its resume id. Extracted to
                 // captureResumeForClose() so the pre-upgrade bulk close
@@ -1231,8 +1229,8 @@ class TerminalHandler {
         // WP #275: drop an auto-reload sentinel BEFORE the Ctrl-C so aicli-shell.sh
         // skips its "Press ENTER to reload" prompt. The user explicitly asked for
         // an immediate restart; they shouldn't have to confirm with a keypress.
-        @mkdir('/tmp/unraid-aicliagents', 0755, true);
-        $flagFile = '/tmp/unraid-aicliagents/auto-reload-' . $safeId . '.flag';
+        @mkdir(\AICliAgents\Services\SecretPaths::stateRoot(), 0755, true);
+        $flagFile = \AICliAgents\Services\SecretPaths::stateRoot() . '/auto-reload-' . $safeId . '.flag';
         @touch($flagFile);
 
         $escSess = escapeshellarg($sessName);
@@ -2162,10 +2160,10 @@ class TerminalHandler {
 
     private static function resolveLogFile($type) {
         switch ($type) {
-            case 'install':   return "/boot/config/plugins/unraid-aicliagents/install.log";
-            case 'uninstall': return "/boot/config/plugins/unraid-aicliagents/uninstall.log";
-            case 'migration': return "/tmp/unraid-aicliagents/migration.log";
-            default:          return "/tmp/unraid-aicliagents/debug.log";
+            case 'install':   return \AICliAgents\Services\SecretPaths::flashRoot() . "/install.log";
+            case 'uninstall': return \AICliAgents\Services\SecretPaths::flashRoot() . "/uninstall.log";
+            case 'migration': return \AICliAgents\Services\SecretPaths::stateRoot() . "/migration.log";
+            default:          return \AICliAgents\Services\SecretPaths::stateRoot() . "/debug.log";
         }
     }
 }

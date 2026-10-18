@@ -19,7 +19,8 @@ namespace AICliAgents\Services;
 
 class ConvertOfferNotifyService
 {
-    public const MARKER_PATH   = '/boot/config/plugins/unraid-aicliagents/convert_offer_notified.json';
+    /** The marker that records the last announced set. Live default on flash (the flash root under test is the sandbox). */
+    public static function markerPath(): string { return SecretPaths::flashRoot() . '/convert_offer_notified.json'; }
     public const NOTIFY_SCRIPT = '/usr/local/emhttp/plugins/dynamix/scripts/notify';
     /** The Manager page (Menu="Utilities" lives under Settings), plus the deep link the Storage tab reads. */
     public const PAGE_LINK     = '/Settings/AICliAgentsManager';
@@ -97,9 +98,10 @@ class ConvertOfferNotifyService
      *                                  (null counts as 0; test seam)
      * @return array{sent:bool,homes:list<string>}
      */
-    public static function run(?array $homes = null, string $markerPath = self::MARKER_PATH,
+    public static function run(?array $homes = null, ?string $markerPath = null,
                                string $notifyScript = self::NOTIFY_SCRIPT, ?callable $exec = null): array
     {
+        $markerPath ??= self::markerPath();
         try {
             $homes = $homes ?? self::convertibleHomes();
             $plan = self::plan($homes, self::readMarker($markerPath));

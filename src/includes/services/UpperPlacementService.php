@@ -25,7 +25,8 @@ namespace AICliAgents\Services;
 final class UpperPlacementService
 {
     public const MODES = ['zram', 'disk'];
-    public const LOCK_FILE = '/tmp/unraid-aicliagents/.upper_placement.lock';
+    /** The lock file: under the state root (the sandbox under test). */
+    public static function lockFile(): string { return SecretPaths::stateRoot() . '/.upper_placement.lock'; }
     /** A home larger than this share of the zram device is refused as a zram target. */
     public const ZRAM_MAX_SHARE = 0.8;
 
@@ -185,7 +186,7 @@ final class UpperPlacementService
         $token = isset($seams['converge_reason'])
             ? (string)$seams['converge_reason']($id)
             : (static function (string $id): string {
-                $f = '/tmp/unraid-aicliagents/.upper_converge_reason_home_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
+                $f = SecretPaths::stateRoot() . '/.upper_converge_reason_home_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
                 $raw = is_file($f) ? @file_get_contents($f) : false;
                 return $raw === false ? '' : trim($raw);
             })($id);
@@ -207,8 +208,8 @@ final class UpperPlacementService
         if (($check['status'] ?? '') !== 'ok') return $check;
 
         $lock = $seams['lock'] ?? static function (): mixed {
-            @mkdir(dirname(self::LOCK_FILE), 0755, true);
-            $fp = @fopen(self::LOCK_FILE, 'c');
+            @mkdir(dirname(self::lockFile()), 0755, true);
+            $fp = @fopen(self::lockFile(), 'c');
             return ($fp && flock($fp, LOCK_EX | LOCK_NB)) ? $fp : false;
         };
         $fp = $lock();

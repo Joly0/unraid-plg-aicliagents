@@ -29,7 +29,8 @@ require_once __DIR__ . '/StorageMountService.php';
 
 class StorageTargetService {
 
-    const DEFAULT_FLASH_PATH = '/boot/config/plugins/unraid-aicliagents/persistence';
+    /** The default flash storage folder (the flash root under test is the sandbox). */
+    public static function defaultFlashPath(): string { return SecretPaths::flashRoot() . '/persistence'; }
     const MAX_CANDIDATES = 12;
 
     /**
@@ -50,7 +51,7 @@ class StorageTargetService {
             $config = \function_exists('getAICliConfig') ? getAICliConfig() : [];
         }
         $mnt     = rtrim(getenv('AICLI_MNT_ROOT') ?: '/mnt', '/');
-        $current = (string)($config[$kind . '_storage_path'] ?? self::DEFAULT_FLASH_PATH);
+        $current = (string)($config[$kind . '_storage_path'] ?? self::defaultFlashPath());
 
         $cands   = [];
         $pools   = self::poolNames();
@@ -95,7 +96,7 @@ class StorageTargetService {
                 $kind, $config, $current);
         }
         // 7. Flash — always present, always offered last among usable targets.
-        $flashPath = (strpos($current, '/boot') === 0) ? $current : self::DEFAULT_FLASH_PATH;
+        $flashPath = (strpos($current, '/boot') === 0) ? $current : self::defaultFlashPath();
         $flash = self::candidate($flashPath, '', 'flash', $kind, $config, $current);
         $flash['label'] = ($flash['mount_class'] === 'boot_internal')
             ? 'Internal boot (durable)'

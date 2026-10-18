@@ -50,14 +50,19 @@ class ValidationService {
         return $expected === '' || $received !== $expected ? 'Invalid CSRF Token' : null;
     }
 
-    /** Allowed base directories for filesystem operations. */
-    private static $ALLOWED_PATH_BASES = [
-        '/mnt',
-        '/home',
-        '/root',
-        '/boot/config/plugins/unraid-aicliagents',
-        '/tmp/unraid-aicliagents',
-    ];
+    /**
+     * Allowed base directories for filesystem operations. The plugin folders are the live roots in
+     * production, and the test sandbox roots under test (SecretPaths), so a test writes only into the sandbox.
+     */
+    private static function allowedPathBases(): array {
+        return [
+            '/mnt',
+            '/home',
+            '/root',
+            SecretPaths::flashRoot(),
+            SecretPaths::stateRoot(),
+        ];
+    }
 
     /**
      * True when a value holds a NUL byte (chr 0). PHP 8 makes realpath(), fopen(),
@@ -93,7 +98,7 @@ class ValidationService {
             $resolved = $parent . '/' . basename($path);
         }
 
-        $bases = $allowedBases ?? self::$ALLOWED_PATH_BASES;
+        $bases = $allowedBases ?? self::allowedPathBases();
         foreach ($bases as $base) {
             // Match exact path or path with trailing separator (prevents /mnt/users matching /mnt/user)
             if ($resolved === $base || strpos($resolved, $base . '/') === 0) {
@@ -192,7 +197,7 @@ class ValidationService {
             return false;
         }
         $intended = $baseReal . (empty($tail) ? '' : '/' . implode('/', array_reverse($tail)));
-        foreach (self::$ALLOWED_PATH_BASES as $base) {
+        foreach (self::allowedPathBases() as $base) {
             if ($intended === $base || strpos($intended, $base . '/') === 0) {
                 return $intended;
             }

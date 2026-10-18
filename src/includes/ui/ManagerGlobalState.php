@@ -17,8 +17,8 @@ let statsInterval = 5000;
 let statsTimer = null;
 let agentFilter = localStorage.getItem('aicli_agent_filter') || 'all';
 <?php
-    $agentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
-    $homePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+    $agentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+    $homePath = $config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
     $storageAvailable = \AICliAgents\Services\StorageMountService::isPathAvailable($agentPath)
                      && \AICliAgents\Services\StorageMountService::isPathAvailable($homePath);
 ?>

@@ -40,7 +40,7 @@ class AgentVersionCleanupService {
     private static function persistPath(): string {
         $cfg = ConfigService::getConfig();
         $p = (string)($cfg['agent_storage_path'] ?? '');
-        return $p !== '' ? rtrim($p, '/') : '/boot/config/plugins/unraid-aicliagents/persistence';
+        return $p !== '' ? rtrim($p, '/') : SecretPaths::flashRoot() . '/persistence';
     }
 
     /** True when $agentId is "all", empty, or a valid agent id. Cheap: it reads nothing. */

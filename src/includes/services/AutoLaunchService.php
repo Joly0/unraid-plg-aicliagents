@@ -12,7 +12,8 @@ namespace AICliAgents\Services;
 
 class AutoLaunchService
 {
-    private const RESTART_STATE_FILE = '/tmp/unraid-aicliagents/autolaunch-restart-state.json';
+    /** The restart state file: under the state root (the sandbox under test). */
+    private static function restartStateFile(): string { return SecretPaths::stateRoot() . '/autolaunch-restart-state.json'; }
     private const MISSING_GRACE_SECONDS = 10;
 
     // #129: trigger reasons that represent a fresh box-boot, where the home
@@ -21,7 +22,8 @@ class AutoLaunchService
     private const BOOT_REASONS = ['init_boot', 'array_started'];
     // tmpfs marker so the boot consolidation split runs at most once per boot,
     // no matter which boot trigger (disks_mounted / InitService) fires first.
-    private const BOOT_CONSOLIDATE_MARKER = '/tmp/unraid-aicliagents/.boot_consolidate_done';
+    /** The boot consolidate marker: under the state root (the sandbox under test). */
+    private static function bootConsolidateMarker(): string { return SecretPaths::stateRoot() . '/.boot_consolidate_done'; }
     private const BOOT_CONSOLIDATE_WORKER = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/boot-consolidate-relaunch.php';
 
     /**
@@ -38,7 +40,7 @@ class AutoLaunchService
 
     private static function stateFile(): string
     {
-        return self::$stateFileOverride ?? self::RESTART_STATE_FILE;
+        return self::$stateFileOverride ?? self::restartStateFile();
     }
 
     /** #129: is this trigger a genuine box-boot (homes idle)? */
@@ -137,7 +139,7 @@ class AutoLaunchService
 
         $job = ['users' => []];
         foreach (array_keys($recommended) as $user) $job['users'][$user] = $byUser[$user];
-        $jobFile = '/tmp/unraid-aicliagents/.boot_consolidate_job_' . bin2hex(random_bytes(4)) . '.json';
+        $jobFile = SecretPaths::stateRoot() . '/.boot_consolidate_job_' . bin2hex(random_bytes(4)) . '.json';
         if (@file_put_contents($jobFile, json_encode($job)) === false) return [];
         // #337: fully detached — this runs from the boot sweep and the install.
         UtilityService::spawnDetached(['/usr/bin/php', self::BOOT_CONSOLIDATE_WORKER, $jobFile]);
@@ -241,8 +243,8 @@ class AutoLaunchService
         // that consolidates then relaunches them; fine homes launch immediately.
         // Once-per-boot marker so whichever boot trigger fires first owns the split.
         $deferSet = [];
-        if (self::isBootReason($reason) && !file_exists(self::BOOT_CONSOLIDATE_MARKER)) {
-            @touch(self::BOOT_CONSOLIDATE_MARKER);
+        if (self::isBootReason($reason) && !file_exists(self::bootConsolidateMarker())) {
+            @touch(self::bootConsolidateMarker());
             try {
                 $deferSet = self::planBootConsolidation($sessions);
             } catch (\Throwable $e) {

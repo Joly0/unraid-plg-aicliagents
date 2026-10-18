@@ -1193,7 +1193,7 @@ function deleteHomeStorage(id) {
             }).join(', ');
             snapLines = '<div style="font-size:11px;opacity:.75;margin-top:6px;">' +
                 snapTotal + ' failure snapshot' + (snapTotal === 1 ? '' : 's') +
-                ' on Flash at <code>/boot/config/plugins/unraid-aicliagents/failures/</code>' +
+                ' on Flash at <code><?=htmlspecialchars(\AICliAgents\Services\SecretPaths::flashRoot(), ENT_QUOTES, 'UTF-8')?>/failures/</code>' +
                 (sample ? '. Most recent: ' + sample : '') + '.</div>';
         }
 

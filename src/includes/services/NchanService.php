@@ -30,8 +30,8 @@ require_once __DIR__ . '/EventBus.php';
 
 class NchanService {
 
-    /** Where publish() writes the failure counter (HealthService reads the same path). */
-    public const STATUS_PATH = '/tmp/unraid-aicliagents/push.status.json';
+    /** Where publish() writes the failure counter (HealthService reads the same path). Live default: the state root (the sandbox under test). */
+    private static function defaultStatusPath(): string { return SecretPaths::stateRoot() . '/push.status.json'; }
 
     /**
      * Per-channel Nchan buffer depth (docs/specs/EVENT_PUBLISH_OBSERVABILITY.md R4).
@@ -62,9 +62,9 @@ class NchanService {
         return (int) round(microtime(true) * 1000);
     }
 
-    /** Resolved failure-counter path (STATUS_PATH unless a test set $statusPath). */
+    /** Resolved failure-counter path (the live default unless a test set $statusPath). */
     public static function statusPath(): string {
-        return self::$statusPath ?? self::STATUS_PATH;
+        return self::$statusPath ?? self::defaultStatusPath();
     }
 
     /** Resolved Nchan unix socket path (the real socket unless a test set $socketPath). */

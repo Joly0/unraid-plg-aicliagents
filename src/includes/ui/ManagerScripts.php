@@ -136,8 +136,8 @@ function saveAICliAgentsManager(form, silent = false) {
     // D-405: Check if storage paths changed — if so, run preflight migration instead of normal save
     var newAgentPath = $(form).find('[name="agent_storage_path"]').val() || '';
     var newHomePath = $(form).find('[name="home_storage_path"]').val() || '';
-    var curAgentPath = '<?= addslashes($config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence') ?>';
-    var curHomePath = '<?= addslashes($config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence') ?>';
+    var curAgentPath = '<?= addslashes($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
+    var curHomePath = '<?= addslashes($config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
     var newStorageMode = $(form).find('[name="storage_backend_mode"]').val() || 'layering';
     var curStorageMode = '<?= addslashes($config['storage_backend_mode'] ?? 'layering') ?>';
     var newUpperMode = $(form).find('[name="storage_upper_mode"]').val() || 'zram';

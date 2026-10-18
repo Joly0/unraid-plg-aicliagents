@@ -14,7 +14,8 @@ use AICliAgents\Services\AgentRegistry;
 use AICliAgents\Services\LogService;
 
 class GithubReleaseSource implements AgentSource {
-    const DL_BASE = '/tmp/unraid-aicliagents/dl';
+    /** The download folder: under the state root (the sandbox under test). */
+    public static function dlBase(): string { return \AICliAgents\Services\SecretPaths::stateRoot() . '/dl'; }
     const API_BASE = 'https://api.github.com';
 
     public function fetch(string $agentId, array $agent, ?string $targetVersion, $progress): bool {
@@ -42,7 +43,7 @@ class GithubReleaseSource implements AgentSource {
             return false;
         }
 
-        $dlDir = self::DL_BASE . "/$agentId";
+        $dlDir = self::dlBase() . "/$agentId";
         if (!is_dir($dlDir)) @mkdir($dlDir, 0755, true);
         $dlPath = $dlDir . '/' . basename($asset['name']);
 

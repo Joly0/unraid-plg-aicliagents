@@ -342,7 +342,7 @@ class TerminalService {
         // A stale perf.log from an earlier root-as-user run is 0644 root-owned;
         // a non-root agent can't append. World-appendable is fine for a debug
         // perf trace (no secrets).
-        $perfLog = '/tmp/unraid-aicliagents/perf.log';
+        $perfLog = SecretPaths::stateRoot() . '/perf.log';
         if (file_exists($perfLog)) {
             @chmod($perfLog, 0666);
         }
@@ -520,7 +520,7 @@ class TerminalService {
         // Idempotent: if the session already exists this is a fast no-op.
         $ensureCmd = "runuser -u " . escapeshellarg($username) . " -- env $envStr /bin/bash " .
                      escapeshellarg($shell) . " --ensure-session";
-        $ensureLog = "/tmp/unraid-aicliagents/ensure-$id.log";
+        $ensureLog = SecretPaths::stateRoot() . "/ensure-$id.log";
         ActivityService::update($actId, ['step' => $startStep('Launching agent'), 'progress' => 60]);
         $ensureRc = 0;
         if ($origin === self::ORIGIN_BRIDGE_WARM) {
@@ -951,7 +951,7 @@ class TerminalService {
     public static function sessionsOnOtherAgentVersion(?string $procRoot = null, ?callable $activeResolver = null, ?callable $legacyResolver = null): array
     {
         $legacyResolver = $legacyResolver ?? static function (string $agent): ?string {
-            $g = trim((string)@file_get_contents('/tmp/unraid-aicliagents/passthrough-legacy-' . $agent));
+            $g = trim((string)@file_get_contents(SecretPaths::stateRoot() . '/passthrough-legacy-' . $agent));
             return preg_match('/^[A-Za-z0-9][A-Za-z0-9._@-]*$/', $g) ? $g : null;
         };
         $legacy = [];   // agentId => moved old-layout generation|null
@@ -1536,7 +1536,7 @@ class TerminalService {
 
     private static function closeIntentPath(string $sessionId): string
     {
-        $base = rtrim((string)(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents'), '/');
+        $base = rtrim((string)(getenv('AICLI_TMP_BASE') ?: SecretPaths::stateRoot()), '/');
         $safe = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
         return $base . '/closing-' . ($safe !== '' ? $safe : 'invalid');
     }
@@ -1771,7 +1771,7 @@ class TerminalService {
 
         [$sessName, $tmuxSock, $tmuxBin] = ProcessManager::findTmuxSessionForId($safeId);
         if ($sessName !== '') {
-            @mkdir('/tmp/unraid-aicliagents', 0755, true);
+            @mkdir(SecretPaths::stateRoot(), 0755, true);
             \AICliAgents\Handlers\TerminalHandler::captureResumeForClose(
                 $sessName, $tmuxSock, $tmuxBin, $agentId, $path, $ctx
             );

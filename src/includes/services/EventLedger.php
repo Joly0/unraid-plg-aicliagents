@@ -30,7 +30,8 @@ require_once __DIR__ . '/EventActor.php';
 final class EventLedger {
 
     /** Directory holding the seq counter, the boot marker, and every chunk. */
-    public const DIR = '/tmp/unraid-aicliagents/events';
+    /** The event folder in RAM: under the state root (the sandbox under test). */
+    public static function defaultDir(): string { return SecretPaths::stateRoot() . '/events'; }
 
     /** Events per chunk file. A new chunk starts every CHUNK_SIZE-th event. */
     public const CHUNK_SIZE = 1000;
@@ -62,7 +63,7 @@ final class EventLedger {
 
     /** Resolved ledger directory (DIR unless a test set $dir). */
     private static function dir(): string {
-        return self::$dir ?? self::DIR;
+        return self::$dir ?? self::defaultDir();
     }
 
     /** The live kernel boot id, trimmed. Empty string if it cannot be read. */

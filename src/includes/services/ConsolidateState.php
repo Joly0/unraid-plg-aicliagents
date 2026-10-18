@@ -35,7 +35,7 @@ class ConsolidateState {
     /** Marker base dir — AICLI_TMP_BASE redirects for tests (PHPUnit isolation). */
     private static function baseDir(): string {
         $env = getenv('AICLI_TMP_BASE');
-        return ($env !== false && $env !== '') ? $env : '/tmp/unraid-aicliagents';
+        return ($env !== false && $env !== '') ? $env : SecretPaths::stateRoot();
     }
 
     /** HOME-safe slug for the marker filename (same charset the consolidate id is validated against). */

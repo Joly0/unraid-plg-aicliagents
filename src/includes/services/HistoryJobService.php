@@ -32,7 +32,7 @@ class HistoryJobService
     public static function stateDir(): string
     {
         $env = getenv('AICLI_HISTORY_STATE_DIR');
-        return ($env !== false && $env !== '') ? rtrim($env, '/') : '/tmp/unraid-aicliagents/history';
+        return ($env !== false && $env !== '') ? rtrim($env, '/') : SecretPaths::stateRoot() . '/history';
     }
 
     private static function path(string $jobId, string $suffix): string

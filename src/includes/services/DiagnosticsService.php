@@ -31,8 +31,10 @@ class DiagnosticsService {
     public const KNOWN_ISSUES_URL    = 'https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/known-issues.json';
     public const FORUM_URL           = 'https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/';
 
-    private const SUPPORT_DIR        = '/tmp/unraid-aicliagents/support';
-    private const KNOWN_ISSUES_CACHE = '/tmp/unraid-aicliagents/known-issues.cache.json';
+    /** Live default: the support bundle folder (the sandbox state root under test). */
+    private static function defaultSupportDir(): string { return SecretPaths::stateRoot() . '/support'; }
+    /** Live default: the cached known-issues feed (the sandbox state root under test). */
+    private static function defaultKnownIssuesCache(): string { return SecretPaths::stateRoot() . '/known-issues.cache.json'; }
     private const KNOWN_ISSUES_TTL   = 86400; // 24h
     private const SUMMARY_MAX_BYTES  = 3072;  // ≤3KB share summary
     private const BUNDLES_KEPT       = 5;     // tmpfs growth bound
@@ -55,7 +57,7 @@ class DiagnosticsService {
 
     public static function supportDir(): string {
         $e = getenv('AICLI_SUPPORT_DIR');
-        return ($e !== false && $e !== '') ? $e : self::SUPPORT_DIR;
+        return ($e !== false && $e !== '') ? $e : self::defaultSupportDir();
     }
 
     // ==================================================================
@@ -278,7 +280,7 @@ class DiagnosticsService {
     private static function collectSupervisor(): array {
         $queue = [];
         $now = time();
-        foreach (glob(SupervisorService::QUEUE_DIR . '/*.req') ?: [] as $f) {
+        foreach (glob(SupervisorService::queueDir() . '/*.req') ?: [] as $f) {
             $j = json_decode((string)@file_get_contents($f), true);
             $queue[] = [
                 'op'       => is_array($j) ? ($j['op'] ?? null) : null,
@@ -483,7 +485,7 @@ class DiagnosticsService {
 
     /** @return array{issues:array,fetched_at:?string,from_cache:bool}|array{error:string} */
     private static function loadKnownIssuesFeed(bool $forceRefresh): array {
-        $cachePath = getenv('AICLI_KNOWN_ISSUES_CACHE') ?: self::KNOWN_ISSUES_CACHE;
+        $cachePath = getenv('AICLI_KNOWN_ISSUES_CACHE') ?: self::defaultKnownIssuesCache();
         if (!$forceRefresh && is_file($cachePath) && (time() - (int)(@filemtime($cachePath) ?: 0)) < self::KNOWN_ISSUES_TTL) {
             $cached = json_decode((string)@file_get_contents($cachePath), true);
             if (is_array($cached) && isset($cached['issues'])) {
@@ -523,7 +525,7 @@ class DiagnosticsService {
     // ------------------------------------------------------------------
 
     private static function debugLogPath(): string {
-        $dir = getenv('AICLI_DEBUG_LOG_DIR') ?: '/tmp/unraid-aicliagents';
+        $dir = getenv('AICLI_DEBUG_LOG_DIR') ?: SecretPaths::stateRoot();
         return rtrim($dir, '/') . '/debug.log';
     }
 

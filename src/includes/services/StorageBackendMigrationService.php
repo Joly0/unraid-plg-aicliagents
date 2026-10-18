@@ -49,7 +49,7 @@ final class StorageBackendMigrationService
     private static function lockPath(): string
     {
         $e = getenv('AICLI_BACKEND_MIGRATE_LOCK');
-        return ($e !== false && $e !== '') ? $e : '/tmp/unraid-aicliagents/.backend_migrate.lock';
+        return ($e !== false && $e !== '') ? $e : SecretPaths::stateRoot() . '/.backend_migrate.lock';
     }
 
     /**

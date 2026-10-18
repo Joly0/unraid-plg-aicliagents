@@ -21,7 +21,8 @@ namespace AICliAgents\Services;
 
 class InstallLock
 {
-    const LOCK_FILE = '/tmp/unraid-aicliagents/install-global.lock';
+    /** The global install lock: under the state root (the sandbox under test). */
+    public static function defaultLockFile(): string { return SecretPaths::stateRoot() . '/install-global.lock'; }
 
     /**
      * Acquire the global install lock (non-blocking poll). Keep the returned file
@@ -38,7 +39,7 @@ class InstallLock
      */
     public static function acquire(?callable $onWait = null, int $deadlineSec = 1500, ?string $lockFile = null, int $pollUs = 400000, int $repeatSec = 30): array
     {
-        $lockFile = $lockFile ?? self::LOCK_FILE;
+        $lockFile = $lockFile ?? self::defaultLockFile();
         @mkdir(dirname($lockFile), 0755, true);
         $fh = @fopen($lockFile, 'c');
         if (!$fh) return ['fh' => null, 'held' => false, 'queued' => false];

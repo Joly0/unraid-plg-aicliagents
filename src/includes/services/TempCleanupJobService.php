@@ -27,7 +27,7 @@ class TempCleanupJobService
     public static function stateDir(): string
     {
         $env = getenv('AICLI_TMP_CLEAN_STATE_DIR');
-        return ($env !== false && $env !== '') ? rtrim($env, '/') : '/tmp/unraid-aicliagents/tmp-clean';
+        return ($env !== false && $env !== '') ? rtrim($env, '/') : SecretPaths::stateRoot() . '/tmp-clean';
     }
 
     private static function path(string $jobId, string $suffix): string

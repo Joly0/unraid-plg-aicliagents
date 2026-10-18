@@ -135,7 +135,7 @@ class StorageMetricsService {
 
         // 4. Identify Migration Artifacts (Leftovers)
         // Check migrated_legacy_data/ (current migration output), plus old-style .img.migrated files
-        $searchPaths = [$agentPath, $homePath, "$agentPath/persistence", "/boot/config/plugins/unraid-aicliagents"];
+        $searchPaths = [$agentPath, $homePath, "$agentPath/persistence", SecretPaths::flashRoot()];
         $seenPaths = [];
         foreach ($searchPaths as $path) {
             if (!is_dir($path)) continue;
@@ -327,7 +327,7 @@ class StorageMetricsService {
         $total = 0;
         $done = 0;
 
-        $searchPaths = [$persistPath, "$persistPath/persistence", "/boot/config/plugins/unraid-aicliagents"];
+        $searchPaths = [$persistPath, "$persistPath/persistence", SecretPaths::flashRoot()];
         $images = [];
         
         foreach ($searchPaths as $path) {

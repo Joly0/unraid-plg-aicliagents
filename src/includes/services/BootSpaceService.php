@@ -44,7 +44,7 @@ class BootSpaceService
     public static function stateFile(): string
     {
         $e = getenv('AICLI_BOOT_SPACE_FILE');
-        return ($e !== false && $e !== '') ? $e : '/tmp/unraid-aicliagents/.boot_space.json';
+        return ($e !== false && $e !== '') ? $e : SecretPaths::stateRoot() . '/.boot_space.json';
     }
 
     private static function lockFile(): string
@@ -62,14 +62,14 @@ class BootSpaceService
     private static function retiredListPath(): string
     {
         $e = getenv('AICLI_RETIRED_LIST');
-        return ($e !== false && $e !== '') ? $e : '/boot/config/plugins/unraid-aicliagents/retired_dirs.list';
+        return ($e !== false && $e !== '') ? $e : SecretPaths::flashRoot() . '/retired_dirs.list';
     }
 
     /** The plugin's folder on the boot disk. */
     public static function pluginDir(): string
     {
         $e = getenv('AICLI_BOOT_SPACE_PLUGIN_DIR');
-        return ($e !== false && $e !== '') ? rtrim($e, '/') : '/boot/config/plugins/unraid-aicliagents';
+        return ($e !== false && $e !== '') ? rtrim($e, '/') : SecretPaths::flashRoot();
     }
 
     // ---- pure helpers -------------------------------------------------------------

@@ -14,7 +14,8 @@ require_once __DIR__ . '/LogService.php';
 require_once __DIR__ . '/TraceContext.php';
 
 class PerfTrace {
-    public const FILE = '/tmp/unraid-aicliagents/perf.log';
+    /** The trace file: /tmp/unraid-aicliagents/perf.log in production (the sandbox state root under test). */
+    public static function file(): string { return SecretPaths::stateRoot() . '/perf.log'; }
     /** Rotate perf.log to perf.log.1 above this size (tmpfs: bounded RAM). */
     public const MAX_BYTES = 1048576;
     public const STAGE_PATTERN = '/^[a-z0-9][a-z0-9._-]{0,47}$/';
@@ -104,10 +105,11 @@ class PerfTrace {
     private static function write(string $line): void {
         if (self::$sink !== null) { (self::$sink)($line); return; }
         if (defined('AICLI_TEST_TMP')) return;
-        $dir = dirname(self::FILE);
+        $file = self::file();
+        $dir = dirname($file);
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        $size = @filesize(self::FILE);
-        if ($size !== false && $size > self::MAX_BYTES) @rename(self::FILE, self::FILE . '.1');
-        @file_put_contents(self::FILE, $line . "\n", FILE_APPEND);
+        $size = @filesize($file);
+        if ($size !== false && $size > self::MAX_BYTES) @rename($file, $file . '.1');
+        @file_put_contents($file, $line . "\n", FILE_APPEND);
     }
 }

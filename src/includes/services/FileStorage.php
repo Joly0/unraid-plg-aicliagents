@@ -842,7 +842,8 @@ final class FileStorage
     // no drift to discover; an INTERRUPTED one is re-discovered by the classifier at
     // next boot (the marker is gone), exactly as before the marker existed.
 
-    private const MIGRATION_MARKER = '/tmp/unraid-aicliagents/.migration_inprogress.json';
+    /** The migration marker in RAM (the state root under test is the sandbox). */
+    private static function defaultMigrationMarker(): string { return SecretPaths::stateRoot() . '/.migration_inprogress.json'; }
 
     /**
      * Trigger 1 — persist/agent PATH change. The settings layer TELLS the
@@ -1099,7 +1100,7 @@ final class FileStorage
     private static function markerPath(): string
     {
         $env = getenv('AICLI_MIGRATION_MARKER');
-        return ($env !== false && $env !== '') ? $env : self::MIGRATION_MARKER;
+        return ($env !== false && $env !== '') ? $env : self::defaultMigrationMarker();
     }
 
     /** Is a migration currently in progress (crash-safe marker present)? */

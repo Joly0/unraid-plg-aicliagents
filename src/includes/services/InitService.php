@@ -233,8 +233,8 @@ class InitService {
      */
     private static function cleanupStaleState() {
         $runDir = self::runDir();
-        $emergencyFlag = (string)(self::$seams['emergencyFlag'] ?? StorageMountService::EMERGENCY_FLAG);
-        $emergencyHome = (string)(self::$seams['emergencyHome'] ?? StorageMountService::EMERGENCY_HOME);
+        $emergencyFlag = (string)(self::$seams['emergencyFlag'] ?? StorageMountService::emergencyFlag());
+        $emergencyHome = (string)(self::$seams['emergencyHome'] ?? StorageMountService::emergencyHome());
 
         // Clean stale session artifacts if process is not running
         foreach (glob("$runDir/unraid-aicliagents-*.pid") as $pidFile) {

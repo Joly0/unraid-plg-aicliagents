@@ -20,7 +20,6 @@
 namespace AICliAgents\Services;
 
 class RelayPeerStore {
-    const FLASH_FILE = '/boot/config/plugins/unraid-aicliagents/relay-peers.json';
     const MAX_PEERS = 8;
     const LABEL_MAX = 40;
     const VAULT_PREFIX = 'AICLI_RELAY_PEER_';
@@ -37,7 +36,7 @@ class RelayPeerStore {
 
     public static function file(): string {
         $e = getenv('AICLI_RELAY_PEERS_FILE');   // test seam; unset in production
-        return ($e !== false && $e !== '') ? $e : self::FLASH_FILE;
+        return ($e !== false && $e !== '') ? $e : SecretPaths::flashRoot() . '/relay-peers.json';
     }
 
     public static function read(): array {

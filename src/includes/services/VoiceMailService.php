@@ -44,14 +44,6 @@ final class VoiceMailService {
     public const MODE_MAIL  = 'mail';
     public const MODE_OFF   = 'off';
 
-    /** Live store on TMPFS — written on every message. */
-    public const REAL_RAM_PATH = '/tmp/unraid-aicliagents/voicemail.json';
-
-    /** Durable copy on Flash — written only by flush(). */
-    public const REAL_FLASH_PATH = '/boot/config/plugins/unraid-aicliagents/voicemail.json';
-
-    /** Coordination lock on TMPFS. */
-    public const REAL_LOCK_PATH = '/tmp/unraid-aicliagents/voicemail.lock';
 
     /** Marker meaning "RAM has changes Flash does not" — lives beside the RAM store. */
     private const DIRTY_SUFFIX = '.dirty';
@@ -72,7 +64,7 @@ final class VoiceMailService {
     private const LOCK_RETRIES = 10;
     private const LOCK_RETRY_DELAY_US = 20000;
 
-    /** Test seams. Null means the REAL_* constant. A test never writes to /boot. */
+    /** Test seams. Null means the live path below. A test never writes to /boot. */
     public static ?string $ramPath = null;
     public static ?string $flashPath = null;
     public static ?string $lockPath = null;
@@ -81,9 +73,12 @@ final class VoiceMailService {
     /** @var callable|null  (string $channel, array $payload) => void */
     public static $publisher = null;
 
-    public static function ramPath(): string   { return self::$ramPath ?? self::REAL_RAM_PATH; }
-    public static function flashPath(): string { return self::$flashPath ?? self::REAL_FLASH_PATH; }
-    public static function lockPath(): string  { return self::$lockPath ?? self::REAL_LOCK_PATH; }
+    /** Live store on TMPFS (the state root under test is the sandbox) — written on every message. */
+    public static function ramPath(): string   { return self::$ramPath ?? SecretPaths::stateRoot() . '/voicemail.json'; }
+    /** Durable copy on Flash (the flash root under test is the sandbox) — written only by flush(). */
+    public static function flashPath(): string { return self::$flashPath ?? SecretPaths::flashRoot() . '/voicemail.json'; }
+    /** Coordination lock on TMPFS. */
+    public static function lockPath(): string  { return self::$lockPath ?? SecretPaths::stateRoot() . '/voicemail.lock'; }
 
     private static function now(): int {
         return self::$clock !== null ? (int)(self::$clock)() : time();

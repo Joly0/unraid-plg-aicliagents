@@ -21,20 +21,21 @@ class SupervisorService {
     public const LOCKFILE   = '/var/run/aicli-supervisor.lock';
     public const TICKFILE   = '/var/run/aicli-supervisor.tick';
     public const WORKFILE   = '/var/run/aicli-supervisor.work.json';
-    public const STATUSFILE = '/tmp/unraid-aicliagents/supervisor.status.json';
+    /**
+     * The state files and folders below are live defaults under the state root. A test sandbox
+     * (AICLI_STATE_ROOT) redirects them, so they are functions, not constants.
+     */
+    public static function statusFile(): string { return SecretPaths::stateRoot() . '/supervisor.status.json'; }
 
     /** Fresh exact marker temporarily suppresses auto-start in health smoke A181. */
-    public const SUPPRESS_START_FILE = '/tmp/unraid-aicliagents/supervisor/.health-test-suppress-start';
+    public static function suppressStartFile(): string { return SecretPaths::stateRoot() . '/supervisor/.health-test-suppress-start'; }
     private const SUPPRESS_START_MAGIC = 'aicli-health-smoke-v1';
     private const SUPPRESS_START_MAX_AGE = 120;
 
     /** Supervisor runtime directories. */
-    public const SUPERVISOR_DIR      = '/tmp/unraid-aicliagents/supervisor';
-    public const HALTS_DIR           = '/tmp/unraid-aicliagents/supervisor/halts';
-    public const QUEUE_DIR           = '/tmp/unraid-aicliagents/supervisor/queue';
-    public const CONSOLIDATE_FAILS_DIR = '/tmp/unraid-aicliagents/supervisor/consolidate-fails';
-    /** S-08 (#1353): job ledger — one <job_id>.json per tracked supervisor job. */
-    public const JOBS_DIR            = '/tmp/unraid-aicliagents/supervisor/jobs';
+    public static function supervisorDir(): string { return SecretPaths::stateRoot() . '/supervisor'; }
+    public static function haltsDir(): string { return SecretPaths::stateRoot() . '/supervisor/halts'; }
+    public static function consolidateFailsDir(): string { return SecretPaths::stateRoot() . '/supervisor/consolidate-fails'; }
 
     /** Absolute path to the supervisor script on the deployed plugin tree. */
     private const SCRIPT_PATH =
@@ -399,7 +400,7 @@ class SupervisorService {
      * @return array<string, mixed>|null
      */
     public static function getStatus(): ?array {
-        return self::readJsonFile(self::STATUSFILE);
+        return self::readJsonFile(self::statusFile());
     }
 
     /**
@@ -882,7 +883,8 @@ class SupervisorService {
      * #496: the one-sentence reason a conversion (op graduate) wrote when it
      * stopped (/tmp/unraid-aicliagents/.convert_reason_<type>_<id>). '' when none.
      */
-    public static function convertFailureReason(string $op, string $entity, string $dir = '/tmp/unraid-aicliagents'): string {
+    public static function convertFailureReason(string $op, string $entity, ?string $dir = null): string {
+        $dir ??= SecretPaths::stateRoot();
         if ($op !== 'graduate') return '';
         if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#D', $entity, $m)) return '';
         $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $m[2]);
@@ -929,7 +931,8 @@ class SupervisorService {
      *
      * @return array{done:int,total:int,pct:int,rate:string,eta_s:int}|null
      */
-    private static function graduateCopyProgress(string $entity, string $dir = '/tmp/unraid-aicliagents'): ?array {
+    private static function graduateCopyProgress(string $entity, ?string $dir = null): ?array {
+        $dir ??= SecretPaths::stateRoot();
         if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#D', $entity, $m)) return null;
         $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $m[2]);
         $log = "$dir/.convert_progress_{$m[1]}_{$safe}.log";
@@ -957,7 +960,7 @@ class SupervisorService {
         if (strpos($entity, 'home/') !== 0) return null;
         $id = substr($entity, 5);
         if ($id === '' || preg_match('/^[A-Za-z0-9._-]+$/D', $id) !== 1) return null;
-        $raw = @file_get_contents("/tmp/unraid-aicliagents/task-status-$id");
+        $raw = @file_get_contents(SecretPaths::stateRoot() . "/task-status-$id");
         $d = is_string($raw) ? json_decode($raw, true) : null;
         if (!is_array($d) || strpos((string)($d['step'] ?? ''), 'Writing the new layer') !== 0) return null;
         if (time() - (int)($d['timestamp'] ?? 0) > 600) return null;
@@ -1061,7 +1064,7 @@ class SupervisorService {
         if ($user === '') {
             return '';
         }
-        $dir = getenv('AICLI_BACKUP_LAST_DIR') ?: '/boot/config/plugins/unraid-aicliagents';
+        $dir = getenv('AICLI_BACKUP_LAST_DIR') ?: SecretPaths::flashRoot();
         $path = rtrim($dir, '/') . "/backup-last-$user.json";
         if (!is_file($path)) {
             return '';
@@ -1106,7 +1109,7 @@ class SupervisorService {
      */
     public static function jobSyncLockPath(string $opId): string {
         $env = getenv('AICLI_ACTIVITY_DIR');
-        $dir = ($env !== false && $env !== '') ? $env : ActivityService::DIR;
+        $dir = ($env !== false && $env !== '') ? $env : ActivityService::defaultDir();
         return $dir . '/' . preg_replace('/[^A-Za-z0-9_.-]/', '_', $opId) . '.sync.lock';
     }
 
@@ -1409,7 +1412,7 @@ class SupervisorService {
         $parts = explode('/', $entity, 2);
         if (count($parts) !== 2) return '';
         $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $parts[1]);
-        $marker = '/tmp/unraid-aicliagents/.bake_noop_' . $parts[0] . '_' . $safe;
+        $marker = SecretPaths::stateRoot() . '/.bake_noop_' . $parts[0] . '_' . $safe;
         if (!is_file($marker)) return '';
         $mtime = (int)@filemtime($marker);
         @unlink($marker);
@@ -1447,10 +1450,13 @@ class SupervisorService {
         return (int)$out;
     }
 
-    /** Ledger dir — AICLI_JOBS_DIR redirects for tests (PHPUnit / smoke isolation). */
+    /**
+     * Ledger dir — AICLI_JOBS_DIR redirects for tests (PHPUnit / smoke isolation).
+     * S-08 (#1353): job ledger — one <job_id>.json per tracked supervisor job.
+     */
     public static function jobsDir(): string {
         $env = getenv('AICLI_JOBS_DIR');
-        return ($env !== false && $env !== '') ? $env : self::JOBS_DIR;
+        return ($env !== false && $env !== '') ? $env : SecretPaths::stateRoot() . '/supervisor/jobs';
     }
 
     /** Pidfile path — AICLI_SUPERVISOR_PIDFILE redirects for tests (a fake supervisor process). */
@@ -1462,7 +1468,7 @@ class SupervisorService {
     /** Queue dir — AICLI_QUEUE_DIR redirects for tests. */
     public static function queueDir(): string {
         $env = getenv('AICLI_QUEUE_DIR');
-        return ($env !== false && $env !== '') ? $env : self::QUEUE_DIR;
+        return ($env !== false && $env !== '') ? $env : SecretPaths::stateRoot() . '/supervisor/queue';
     }
 
     /** queue_helpers.sh path — AICLI_QUEUE_HELPERS redirects for tests (CI has no deployed tree). */
@@ -1544,12 +1550,12 @@ class SupervisorService {
      * Filename convention (queue_helpers.sh): <prio>_<epoch>_<type>_<id>_<op>.req
      */
     private static function isQueuedFor(string $type, string $id): bool {
-        if (!is_dir(self::QUEUE_DIR)) {
+        if (!is_dir(self::queueDir())) {
             return false;
         }
         $safeType = preg_replace('/[^a-z]/', '', $type);
         $safeId   = preg_replace('/[^A-Za-z0-9._\-]/', '_', $id);
-        $pattern  = self::QUEUE_DIR . '/*_*_' . $safeType . '_' . $safeId . '_*.req';
+        $pattern  = self::queueDir() . '/*_*_' . $safeType . '_' . $safeId . '_*.req';
         $matches  = @glob($pattern);
         return is_array($matches) && !empty($matches);
     }
@@ -1628,7 +1634,7 @@ class SupervisorService {
         $override = getenv('AICLI_SUPERVISOR_START_SUPPRESS_FILE');
         $path = ($override !== false && $override !== '')
             ? $override
-            : self::SUPPRESS_START_FILE;
+            : self::suppressStartFile();
         if (!is_file($path)) {
             return false;
         }
@@ -1651,7 +1657,7 @@ class SupervisorService {
      */
     private static function haltPath(string $entity, ?string $kind = null): string {
         $safeEntity = str_replace(['/', ' '], ['__', '__'], $entity);
-        $base = self::HALTS_DIR . '/' . $safeEntity;
+        $base = self::haltsDir() . '/' . $safeEntity;
         if ($kind !== null && $kind !== '') {
             return $base . ':' . $kind;
         }
@@ -1663,7 +1669,7 @@ class SupervisorService {
      */
     private static function consolidateFailPath(string $entity): string {
         $safeEntity = str_replace(['/', ' '], ['__', '__'], $entity);
-        return self::CONSOLIDATE_FAILS_DIR . '/' . $safeEntity;
+        return self::consolidateFailsDir() . '/' . $safeEntity;
     }
 
     /**

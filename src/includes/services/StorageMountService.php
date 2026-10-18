@@ -22,16 +22,19 @@ class StorageMountService {
     // duplicate AgentRegistry::AGENT_BASE's literal value under a different name.
     // Removed in favour of AgentRegistry::agentPath() at both call sites below —
     // one fewer place that would have needed updating for a version-aware path.
-    const MIGRATION_LOCK = "/tmp/unraid-aicliagents/migration.lock";
-    const EMERGENCY_FLAG = "/tmp/unraid-aicliagents/.emergency_mode";
-    const EMERGENCY_HOME = "/tmp/unraid-aicliagents/emergency_home";
+    /** The migration lock file in RAM (the state root under test is the sandbox). */
+    public static function migrationLock(): string { return SecretPaths::stateRoot() . "/migration.lock"; }
+    /** The emergency-mode flag in RAM (the state root under test is the sandbox). */
+    public static function emergencyFlag(): string { return SecretPaths::stateRoot() . "/.emergency_mode"; }
+    /** The emergency home folder in RAM (the state root under test is the sandbox). */
+    public static function emergencyHome(): string { return SecretPaths::stateRoot() . "/emergency_home"; }
 
     public static function isMigrationInProgress() {
-        return file_exists(self::MIGRATION_LOCK);
+        return file_exists(self::migrationLock());
     }
 
     public static function isEmergencyMode() {
-        return file_exists(self::EMERGENCY_FLAG);
+        return file_exists(self::emergencyFlag());
     }
 
     /**
@@ -908,7 +911,7 @@ class StorageMountService {
     /** Stable per-home marker path; public for diagnostics and unit coverage. */
     public static function homeWriteFaultMarkerPath(string $user): string {
         $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
-        return "/tmp/unraid-aicliagents/home_write_fault_{$safeUser}.json";
+        return SecretPaths::stateRoot() . "/home_write_fault_{$safeUser}.json";
     }
 
     public static function hasHomeWriteFault(string $user): bool {
@@ -1366,7 +1369,8 @@ class StorageMountService {
     // kept as a public helper for the manual / Phase-6 "consolidate now" path.
     // -----------------------------------------------------------------------
 
-    private const PENDING_DIR = '/tmp/unraid-aicliagents';
+    /** The folder of the pending consolidate markers (the state root under test is the sandbox). */
+    private static function pendingDir(): string { return SecretPaths::stateRoot(); }
 
     /**
      * Returns true if any process holds an open fd on the mount.
@@ -1409,7 +1413,7 @@ class StorageMountService {
     {
         // Sanitise id so it can't escape the marker directory.
         $safeId = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $id) ?: 'unknown';
-        return self::PENDING_DIR . "/.consolidate_pending_{$type}_{$safeId}";
+        return self::pendingDir() . "/.consolidate_pending_{$type}_{$safeId}";
     }
 
 }

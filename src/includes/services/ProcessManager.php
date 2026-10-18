@@ -145,8 +145,8 @@ class ProcessManager {
     /** Plugin root holding the `src` symlink and the .active-generation marker. */
     public const PLUGIN_ROOT = '/usr/local/emhttp/plugins/unraid-aicliagents';
 
-    /** Root holding every tmux server socket the plugin owns. */
-    public const TMUX_ROOT = '/tmp/unraid-aicliagents/tmux';
+    /** Root holding every tmux server socket the plugin owns (the state root under test is the sandbox). */
+    public static function tmuxRoot(): string { return SecretPaths::stateRoot() . '/tmux'; }
 
     /**
      * Reset all test seams to their live-probe defaults. Call in tearDown.
@@ -531,7 +531,7 @@ class ProcessManager {
     public static function sessionTmuxTmpdir(string $sessionId): string {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $sessionId);
         if ($safeId === '') $safeId = 'unknown';
-        return self::TMUX_ROOT . '/s-' . $safeId;
+        return self::tmuxRoot() . '/s-' . $safeId;
     }
 
     /**
@@ -546,8 +546,9 @@ class ProcessManager {
      *        defaults to `tmux -S <socket> list-sessions` exiting 0.
      * @return bool true when the folder is gone (or never existed).
      */
-    public static function removeDeadSessionTmuxDir(string $sessionId, string $root = self::TMUX_ROOT, ?callable $serverAlive = null, int $waitMs = 1000): bool {
-        $dir = $root . substr(self::sessionTmuxTmpdir($sessionId), strlen(self::TMUX_ROOT));
+    public static function removeDeadSessionTmuxDir(string $sessionId, ?string $root = null, ?callable $serverAlive = null, int $waitMs = 1000): bool {
+        $root ??= self::tmuxRoot();
+        $dir = $root . substr(self::sessionTmuxTmpdir($sessionId), strlen(self::tmuxRoot()));
         if (!is_dir($dir) || is_link($dir)) return !file_exists($dir);
         $serverAlive ??= static function (string $sock): bool {
             $rc = 1; $out = [];
@@ -588,7 +589,8 @@ class ProcessManager {
      *
      * @return array<int,string>
      */
-    public static function tmuxSocketPaths(string $root = self::TMUX_ROOT): array {
+    public static function tmuxSocketPaths(?string $root = null): array {
+        $root ??= self::tmuxRoot();
         $socks = [];
         foreach (glob($root . '/s-*/tmux-*', GLOB_ONLYDIR) ?: [] as $dir) {
             if (file_exists($dir . '/default')) $socks[] = $dir . '/default';
@@ -1173,7 +1175,7 @@ class ProcessManager {
     /** True while the supervisor holds a "storage tidy-up is waiting" marker for any home. */
     public static function storageReclaimWaiting(?string $dir = null): bool
     {
-        $dir = $dir ?? (SupervisorService::SUPERVISOR_DIR . '/escalation');
+        $dir = $dir ?? (SupervisorService::supervisorDir() . '/escalation');
         return (glob($dir . '/home_*.json') ?: []) !== [];
     }
 
@@ -1328,7 +1330,8 @@ class ProcessManager {
      *
      * @return list<string>
      */
-    public static function sessionSocketCandidates(string $safeId, string $root = self::TMUX_ROOT): array {
+    public static function sessionSocketCandidates(string $safeId, ?string $root = null): array {
+        $root ??= self::tmuxRoot();
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $safeId);
         $all = self::tmuxSocketPaths($root);
         if ($safeId === '') return $all;

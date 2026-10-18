@@ -290,7 +290,7 @@ class StorageHandler {
 
         $safeId = str_replace(['/', ' '], '_', $user);
         $tmpBase = (string)getenv('AICLI_TMP_BASE');
-        if ($tmpBase === '') $tmpBase = '/tmp/unraid-aicliagents';
+        if ($tmpBase === '') $tmpBase = \AICliAgents\Services\SecretPaths::stateRoot();
         $path   = "$tmpBase/supervisor/escalation/home_{$safeId}.json";
 
         $none = array_merge(['status' => 'ok', 'state' => 'none', 'now' => time()], $extra);
@@ -325,7 +325,7 @@ class StorageHandler {
      * @return array{counts: array<string,int>, recent_snapshots: array<int,string>, total_snapshots: int}
      */
     private static function _readConsolidateFails(): array {
-        $countsDir = \AICliAgents\Services\SupervisorService::CONSOLIDATE_FAILS_DIR;
+        $countsDir = \AICliAgents\Services\SupervisorService::consolidateFailsDir();
         $counts = [];
         if (is_dir($countsDir)) {
             foreach (@scandir($countsDir) ?: [] as $entry) {
@@ -339,7 +339,7 @@ class StorageHandler {
             }
         }
 
-        $snapDir = '/boot/config/plugins/unraid-aicliagents/failures';
+        $snapDir = \AICliAgents\Services\SecretPaths::flashRoot() . '/failures';
         $recent  = [];
         $total   = 0;
         if (is_dir($snapDir)) {
@@ -371,7 +371,7 @@ class StorageHandler {
         $hardMb = max(1, (int)($config['dirty_threshold_hard_mb']     ?? 1024));
         $critMb = max(1, (int)($config['dirty_threshold_critical_mb'] ?? 2048));
 
-        $zramBase   = '/tmp/unraid-aicliagents/zram_upper';
+        $zramBase   = \AICliAgents\Services\SecretPaths::stateRoot() . '/zram_upper';
         $totalBytes = 0;
 
         foreach (['homes', 'agents'] as $subdir) {
@@ -456,7 +456,7 @@ class StorageHandler {
         $ok = \AICliAgents\Services\HaltService::clearHalt($type, $id, $reason);
 
         // Invalidate boot integrity cache so next fetch reflects cleared state
-        @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+        @unlink(\AICliAgents\Services\SecretPaths::stateRoot() . '/.boot_integrity_cache.json');
 
         return [
             'status'  => $ok ? 'ok' : 'error',
@@ -495,7 +495,7 @@ class StorageHandler {
         $result = \AICliAgents\Services\BootIntegrityService::restoreFromSibling($type, $id);
 
         // Invalidate the boot integrity cache so the next fetch reflects the restored state
-        @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+        @unlink(\AICliAgents\Services\SecretPaths::stateRoot() . '/.boot_integrity_cache.json');
 
         $status  = $result['ok'] ? 'ok' : 'error';
         $message = $result['ok']
@@ -535,7 +535,7 @@ class StorageHandler {
             require_once __DIR__ . '/../services/FileStorage.php';
             \AICliAgents\Services\FileStorage::dropManifestEntry("agent/$id");   // Epic #1310 facade intent
             \AICliAgents\Services\HaltService::clearHalt('agent', $id, 'auto_heal_stale_registry');
-            @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+            @unlink(\AICliAgents\Services\SecretPaths::stateRoot() . '/.boot_integrity_cache.json');
             return [
                 'status'  => 'ok',
                 'agent'   => $id,
@@ -554,7 +554,7 @@ class StorageHandler {
 
         if ($ok) {
             \AICliAgents\Services\HaltService::clearHalt('agent', $id, 'auto_heal_reinstalled');
-            @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+            @unlink(\AICliAgents\Services\SecretPaths::stateRoot() . '/.boot_integrity_cache.json');
             \AICliAgents\Services\LifecycleLogService::log(
                 \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
                 'storage_handler', 'agent_auto_healed',
@@ -973,7 +973,7 @@ class StorageHandler {
         // the run used a target override or the setting changed since.
         $lastRun = null;
         $safeUser = preg_replace('/[^A-Za-z0-9._-]/', '', $user);
-        $recordPath = "/boot/config/plugins/unraid-aicliagents/backup-last-$safeUser.json";
+        $recordPath = \AICliAgents\Services\SecretPaths::flashRoot() . "/backup-last-$safeUser.json";
         if ($safeUser !== '' && is_file($recordPath)) {
             $decoded = json_decode((string)@file_get_contents($recordPath), true);
             if (is_array($decoded)) {
@@ -1232,7 +1232,7 @@ class StorageHandler {
         if ($target !== '') return $target;
         $safeUser = preg_replace('/[^A-Za-z0-9._-]/', '', $user);
         if ($safeUser === '') return '';
-        $recordPath = "/boot/config/plugins/unraid-aicliagents/backup-last-$safeUser.json";
+        $recordPath = \AICliAgents\Services\SecretPaths::flashRoot() . "/backup-last-$safeUser.json";
         if (!is_file($recordPath)) return '';
         $decoded = json_decode((string)@file_get_contents($recordPath), true);
         return is_array($decoded) ? trim((string)($decoded['target'] ?? '')) : '';
@@ -1449,7 +1449,7 @@ class StorageHandler {
         require_once __DIR__ . '/../services/SupervisorService.php';
         $safeUser = preg_replace('/[^A-Za-z0-9._-]/', '', $user);
         $lastRestore = null;
-        $recordPath = "/boot/config/plugins/unraid-aicliagents/restore-last-$safeUser.json";
+        $recordPath = \AICliAgents\Services\SecretPaths::flashRoot() . "/restore-last-$safeUser.json";
         if ($safeUser !== '' && is_file($recordPath)) {
             $decoded = json_decode((string)@file_get_contents($recordPath), true);
             if (is_array($decoded)) {
@@ -1981,8 +1981,8 @@ class StorageHandler {
         }
 
         $config       = getAICliConfig();
-        $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
-        $oldHomePath  = $config['home_storage_path']  ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath  = $config['home_storage_path']  ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
 
         aicli_log("AJAX Request: Move $kind storage off USB flash drive to durable target '$target'", AICLI_LOG_INFO);
         \AICliAgents\Services\LifecycleLogService::log(
@@ -2168,8 +2168,8 @@ class StorageHandler {
         $config = getAICliConfig();
         $newAgentPath = $_GET['agent_storage_path'] ?? '';
         $newHomePath = $_GET['home_storage_path'] ?? '';
-        $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
-        $oldHomePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath = $config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
 
         // #341 → S-11 (#1355): validate any new path via the capability probe
         // (StorageTargetService::validateTarget → FileStorage::probeTarget).
@@ -2327,7 +2327,7 @@ class StorageHandler {
         require_once __DIR__ . '/../services/StoragePathMoveJobService.php';
         $config = getAICliConfig();
         foreach (['old_agent_path' => 'agent_storage_path', 'old_home_path' => 'home_storage_path'] as $param => $key) {
-            if (isset($_GET[$param]) && (string)$_GET[$param] !== (string)($config[$key] ?? '/boot/config/plugins/unraid-aicliagents/persistence')) {
+            if (isset($_GET[$param]) && (string)$_GET[$param] !== (string)($config[$key] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence')) {
                 aicli_log("Storage Migration: refusing — $param from the browser differs from the live settings", AICLI_LOG_WARN);
                 return ['status' => 'error', 'message' => 'The storage settings changed since this page was loaded. Reload the page and try again.'];
             }
@@ -2362,8 +2362,8 @@ class StorageHandler {
     public static function queuePathMove(array $config, string $newAgentPath, string $newHomePath, array $seams = []): array {
         // #652: the old paths are the live settings (the move saves the new paths only
         // after the copy). The browser's old_* values are never used, only compared.
-        $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
-        $oldHomePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath = $config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
 
         aicli_log("Storage Migration: Starting path migration...", AICLI_LOG_INFO);
 
@@ -2531,8 +2531,8 @@ class StorageHandler {
      */
     public static function runPathMove(string $newAgentPath, string $newHomePath): array {
         $config = getAICliConfig();
-        $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
-        $oldHomePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath = $config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
 
         // Follow-on #1: a settings path change is an EXPLICIT, crash-safe TOLD
         // migration. migratePath() marker-BRACKETS this proven copy flow (it does

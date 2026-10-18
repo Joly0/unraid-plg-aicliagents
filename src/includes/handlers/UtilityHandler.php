@@ -109,7 +109,7 @@ class UtilityHandler {
         $session = preg_replace('/[^a-zA-Z0-9_-]/', '', substr($session, 0, 32));
         $ms = (int)floor(microtime(true) * 1000);
         $line = "$ms $stage $agent $session\n";
-        @file_put_contents('/tmp/unraid-aicliagents/perf.log', $line, FILE_APPEND);
+        @file_put_contents(\AICliAgents\Services\SecretPaths::stateRoot() . '/perf.log', $line, FILE_APPEND);
         return ['status' => 'ok'];
     }
 
@@ -561,7 +561,9 @@ class UtilityHandler {
      * Roots the folder browser may create a folder under: the browser's own
      * roots (ValidationService) without the flash drive.
      */
-    public const PICKER_CREATE_BASES = ['/mnt', '/home', '/root', '/tmp/unraid-aicliagents'];
+    public static function pickerCreateBases(): array {
+        return ['/mnt', '/home', '/root', \AICliAgents\Services\SecretPaths::stateRoot()];
+    }
 
     /** Folders that only hold mount points: a folder made here would sit in RAM, not on a disk. */
     private const PICKER_MOUNT_HOLDERS = ['/mnt', '/mnt/disks', '/mnt/remotes', '/mnt/addons', '/mnt/rootshare', '/mnt/user', '/mnt/user0'];
@@ -591,12 +593,12 @@ class UtilityHandler {
     /**
      * HOME_BACKUP.md "2026-09-24 follow-up" — the "New folder" action of the
      * shared folder browser (openPathPicker). Makes ONE folder under a parent
-     * inside PICKER_CREATE_BASES. A /mnt/user share parent is created on its
+     * inside pickerCreateBases(). A /mnt/user share parent is created on its
      * pool path when the share lives only on a pool (the same rule list_dir and
      * the backup target use); any other /mnt/user or /mnt/user0 parent, and any
      * FUSE parent, is refused, so the browser never writes through the share.
      *
-     * @param array|null    $allowedBases test seam (null = PICKER_CREATE_BASES)
+     * @param array|null    $allowedBases test seam (null = pickerCreateBases())
      * @param callable|null $fstype       test seam: fn(string $path): string
      * @param callable|null $poolResolver test seam: fn(string $userPath): ?string
      * @return array{status:string,message?:string,path?:string,resolved?:string}
@@ -630,7 +632,7 @@ class UtilityHandler {
             $parent = rtrim($pool, '/');
         }
 
-        $bases = $allowedBases ?? self::PICKER_CREATE_BASES;
+        $bases = $allowedBases ?? self::pickerCreateBases();
         $realParent = ValidationService::validatePath($parent, $bases);
         if ($realParent === false || !is_dir($realParent)) {
             return ['status' => 'error', 'message' => 'A folder can only be made inside /mnt, /home or /root, in a folder that exists.'];
@@ -1072,7 +1074,7 @@ class UtilityHandler {
     public static ?string $uploadPartsIndexDir = null;
 
     private static function uploadPartsIndexDir(): string {
-        return self::$uploadPartsIndexDir ?? '/tmp/unraid-aicliagents/upload-parts';
+        return self::$uploadPartsIndexDir ?? \AICliAgents\Services\SecretPaths::stateRoot() . '/upload-parts';
     }
 
     private static function registerUploadPart(string $uploadId, string $part): void {

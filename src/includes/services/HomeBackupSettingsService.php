@@ -19,7 +19,7 @@ namespace AICliAgents\Services;
 
 class HomeBackupSettingsService {
     /** Flash, next to backup-last-<user>.json. AICLI_BACKUP_SETTINGS_DIR overrides it for tests. */
-    public const DEFAULT_DIR = '/boot/config/plugins/unraid-aicliagents/backup-settings';
+    public static function defaultDir(): string { return SecretPaths::flashRoot() . '/backup-settings'; }
 
     /** The six per-home keys, as the UI and the AJAX action name them. */
     public const KEYS = ['target', 'quiesce', 'keep', 'schedule', 'excludes', 'nudge_working'];
@@ -44,7 +44,7 @@ class HomeBackupSettingsService {
 
     public static function dir(): string {
         $env = getenv('AICLI_BACKUP_SETTINGS_DIR');
-        return ($env !== false && $env !== '') ? rtrim($env, '/') : self::DEFAULT_DIR;
+        return ($env !== false && $env !== '') ? rtrim($env, '/') : self::defaultDir();
     }
 
     public static function validUser(string $user): bool {

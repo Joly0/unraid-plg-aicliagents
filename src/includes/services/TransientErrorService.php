@@ -47,7 +47,8 @@ final class TransientErrorService
     private const WRAP_SLACK = 12;
     /** A row shorter than this never counts as wrapped (no error box is that narrow). */
     private const WRAP_MIN_WIDTH = 40;
-    private const STATE_PATH = '/tmp/unraid-aicliagents/transient-error-state.json';
+    /** The state file: under the state root (the sandbox under test). */
+    private static function defaultStatePath(): string { return SecretPaths::stateRoot() . '/transient-error-state.json'; }
 
     /**
      * Agents that are ON in the default 'recommended' mode. Each one has a
@@ -721,7 +722,7 @@ final class TransientErrorService
     private static function statePath(): string
     {
         $env = getenv('AICLI_TRANSIENT_ERROR_STATE');
-        return ($env !== false && $env !== '') ? $env : self::STATE_PATH;
+        return ($env !== false && $env !== '') ? $env : self::defaultStatePath();
     }
 
     /**

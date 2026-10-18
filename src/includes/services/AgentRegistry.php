@@ -13,8 +13,12 @@ namespace AICliAgents\Services;
 use AICliAgents\Services\Sources\SourceResolver;
 
 class AgentRegistry {
-    const MANIFEST_FILE = "/boot/config/plugins/unraid-aicliagents/agents.json";
-    const VERSIONS_FILE = "/boot/config/plugins/unraid-aicliagents/versions.json";
+    /** The agents manifest on flash (the flash root under test is the sandbox). */
+    public static function defaultManifestFile(): string { return SecretPaths::flashRoot() . "/agents.json"; }
+    /** The versions file on flash (the flash root under test is the sandbox). */
+    public static function defaultVersionsFile(): string { return SecretPaths::flashRoot() . "/versions.json"; }
+    /** Where op_mount keeps an agent's writable layer when the upper is in zram (the state root under test is the sandbox). */
+    public static function zramUpperBase(): string { return SecretPaths::stateRoot() . '/zram_upper'; }
     const AGENT_BASE    = "/usr/local/emhttp/plugins/unraid-aicliagents/agents";
 
     /**
@@ -30,7 +34,7 @@ class AgentRegistry {
 
     /** Resolve the override once per operation so tests and live writes share the same path. */
     private static function versionsPath(): string {
-        return getenv('AICLI_VERSIONS_FILE') ?: (SecretPaths::flashRoot() . '/versions.json'); // VERSIONS_FILE is the live default (#646, F19)
+        return getenv('AICLI_VERSIONS_FILE') ?: self::defaultVersionsFile(); // the live default (#646, F19)
     }
 
     /**
@@ -338,7 +342,7 @@ class AgentRegistry {
         $defaultRegistry = self::getDefaultAgents();
         $registry = $defaultRegistry;
 
-        $manifestFile = SecretPaths::flashRoot() . '/agents.json'; // MANIFEST_FILE is the live default (#646, F19)
+        $manifestFile = self::defaultManifestFile(); // the live default (#646, F19)
         if (file_exists($manifestFile)) {
             LogService::log("Merging custom agents from " . $manifestFile, LogService::LOG_DEBUG, "AgentRegistry");
             $custom = json_decode(@file_get_contents($manifestFile), true);
@@ -1278,8 +1282,6 @@ class AgentRegistry {
         return $binExists || $sqshExists || self::hasRealInstalledVersion($id);
     }
 
-    /** Where op_mount keeps an agent's writable layer when the upper is in zram. */
-    const ZRAM_UPPER_BASE = '/tmp/unraid-aicliagents/zram_upper';
 
     /**
      * Forgejo #303 (docs/specs/AGENT_VERSION_DRIFT_SELF_HEAL.md, 2026-09-23):

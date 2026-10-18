@@ -12,7 +12,7 @@ use AICliAgents\Services\ArgsService;
 use AICliAgents\Services\BootIntegrityService;
 use AICliAgents\Services\HaltService;
 
-$vaultFile = '/boot/config/plugins/unraid-aicliagents/secrets.cfg';
+$vaultFile = \AICliAgents\Services\SecretPaths::flashRoot() . '/secrets.cfg';
 $vault = file_exists($vaultFile) ? @parse_ini_file($vaultFile) : [];
 $versionCache = \AICliAgents\Services\VersionCheckService::getCachedResults();
 
@@ -20,7 +20,7 @@ $versionCache = \AICliAgents\Services\VersionCheckService::getCachedResults();
 // Resolve the persist path once; size each agent via glob+filesize inside the
 // foreach. Negligible cost (a few filesize() calls per page render) and avoids
 // a JS round-trip / render flicker.
-$agentPersistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+$agentPersistPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
 
 // WP #748 J / Phase B follow-ups: per-agent storage-health surfacing in the
 // card head + foot. Pull the cached boot-integrity sweep once and key it by

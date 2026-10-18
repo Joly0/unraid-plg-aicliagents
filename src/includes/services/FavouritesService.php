@@ -33,11 +33,11 @@ final class FavouritesService {
 
     public const SCHEMA_VERSION = 1;
 
-    /** Real path on Flash. self::$path overrides it for tests. */
-    public const REAL_PATH = '/boot/config/plugins/unraid-aicliagents/favourites.json';
+    /** Real path on Flash (the flash root under test is the sandbox). self::$path overrides it for tests. */
+    private static function realPath(): string { return SecretPaths::flashRoot() . '/favourites.json'; }
 
-    /** Real lock path on TMPFS. self::$lockPath overrides it for tests. */
-    public const REAL_LOCK_PATH = '/tmp/unraid-aicliagents/favourites.lock';
+    /** Real lock path on TMPFS (the state root under test is the sandbox). self::$lockPath overrides it for tests. */
+    private static function realLockPath(): string { return SecretPaths::stateRoot() . '/favourites.lock'; }
 
     /** Minted id shape: 'f' + this many [a-z0-9] characters. */
     private const ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -58,20 +58,20 @@ final class FavouritesService {
     /** Delay between lock retries, in microseconds (10 * 20ms = 200ms ceiling). */
     private const LOCK_RETRY_DELAY_US = 20000;
 
-    /** Test seam: overrides the favourites.json path. Null uses REAL_PATH. */
+    /** Test seam: overrides the favourites.json path. Null uses the real path. */
     public static ?string $path = null;
 
-    /** Test seam: overrides the coordination lock path. Null uses REAL_LOCK_PATH. */
+    /** Test seam: overrides the coordination lock path. Null uses the real lock path. */
     public static ?string $lockPath = null;
 
-    /** Resolved favourites.json path (REAL_PATH unless a test set $path). */
+    /** Resolved favourites.json path (the real path unless a test set $path). */
     public static function path(): string {
-        return self::$path ?? self::REAL_PATH;
+        return self::$path ?? self::realPath();
     }
 
-    /** Resolved lock path (REAL_LOCK_PATH unless a test set $lockPath). */
+    /** Resolved lock path (the real lock path unless a test set $lockPath). */
     public static function lockPath(): string {
-        return self::$lockPath ?? self::REAL_LOCK_PATH;
+        return self::$lockPath ?? self::realLockPath();
     }
 
     /**

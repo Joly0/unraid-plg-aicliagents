@@ -90,7 +90,7 @@ class StorageMigrationService {
         $flashOld = 0;
         foreach (self::entityLayerFiles($persistPath, $type, $id) as $f) $flashOld += (int)@filesize($f);
         
-        $upperDir = "/tmp/unraid-aicliagents/zram_upper/{$type}s/{$id}/upper";
+        $upperDir = SecretPaths::stateRoot() . "/zram_upper/{$type}s/{$id}/upper";
         $ramOld = 0;
         if (is_dir($upperDir)) {
             $io = shell_exec("du -sm " . escapeshellarg($upperDir) . " 2>/dev/null | cut -f1");
@@ -182,8 +182,8 @@ class StorageMigrationService {
     public static function purgeArtifacts() {
         LogService::log("PURGE: Starting 'Analyze & Rescue' for storage artifacts.", LogService::LOG_WARN, "StorageMigrationService");
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
-        $pluginBase = "/boot/config/plugins/unraid-aicliagents";
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $pluginBase = SecretPaths::flashRoot();
         $envPath = "$pluginBase/envs";
         if (!is_dir($envPath)) @mkdir($envPath, 0755, true);
 
@@ -208,7 +208,7 @@ class StorageMigrationService {
         }
 
         // 2. Analyze & Rescue misplaced SquashFS files (v44 artifacts)
-        $mnt = "/tmp/unraid-aicliagents/mnt/rescue";
+        $mnt = SecretPaths::stateRoot() . "/mnt/rescue";
         if (!is_dir($mnt)) @mkdir($mnt, 0755, true);
 
         foreach (glob("$persistPath/home_*.sqsh") as $file) {
@@ -312,7 +312,7 @@ class StorageMigrationService {
             LogService::log("Refusing agent migration: target storage is not mounted: $newPath", LogService::LOG_WARN, "StorageMigrationService");
             return false;
         }
-        $oldPath = $seams['old'] ?? (ConfigService::getConfig()['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents');
+        $oldPath = $seams['old'] ?? (ConfigService::getConfig()['agent_storage_path'] ?? SecretPaths::flashRoot());
         if ($newPath === $oldPath) return true;
 
         LogService::log("Migrating agent storage from $oldPath to $newPath...", LogService::LOG_INFO, "StorageMigrationService");

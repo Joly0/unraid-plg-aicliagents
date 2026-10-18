@@ -164,7 +164,7 @@ class HomeCacheService
      */
     public static function ramCaps(): array
     {
-        $base = getenv('AICLI_HOME_CACHE_BASE') ?: '/tmp/unraid-aicliagents/cache';
+        $base = getenv('AICLI_HOME_CACHE_BASE') ?: SecretPaths::stateRoot() . '/cache';
         $mb = (int)self::normaliseRamMb(ConfigService::getConfig()['home_cache_ram_mb'] ?? '');
         $caps = [];
         foreach (@glob($base . '/.state/*') ?: [] as $f) {

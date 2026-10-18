@@ -20,7 +20,8 @@ namespace AICliAgents\Services;
 class ActivityService {
 
     /** Registry directory (tmpfs — cleared on reboot, which is correct: no op survives one). */
-    const DIR = '/tmp/unraid-aicliagents/activity';
+    /** The activity folder: under the state root (the sandbox under test). */
+    public static function defaultDir(): string { return SecretPaths::stateRoot() . '/activity'; }
 
     /** Nchan channel suffix — NchanService::publish prefixes 'aicli_'. */
     const CHANNEL = 'activity';
@@ -79,7 +80,7 @@ class ActivityService {
     private static function dir(): string {
         // Test hook: PHPUnit isolates writes away from the live tmpfs tree.
         $env = getenv('AICLI_ACTIVITY_DIR');
-        return ($env !== false && $env !== '') ? $env : self::DIR;
+        return ($env !== false && $env !== '') ? $env : self::defaultDir();
     }
 
     /** opId is used as a filename — restrict to a safe charset. Returns null when invalid. */

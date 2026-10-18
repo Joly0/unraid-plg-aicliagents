@@ -135,7 +135,7 @@ class InstallerService {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
 
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
         $mnt = AgentRegistry::agentPath($agentId);
         
         $oldSize = 0;
@@ -543,7 +543,7 @@ class InstallerService {
         }
 
         $config = $seams['config'] ?? ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
         $mnt = $seams['agent_path'] ?? AgentRegistry::agentPath($agentId);
 
         $oldSize = 0;
@@ -822,7 +822,7 @@ class InstallerService {
     public static function estimateUpgradeBackup(string $agentId, string $destPath = ''): array {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
         $destPath = trim($destPath) !== '' ? trim($destPath) : $persistPath;
 
         $source = self::inspectUpgradeBackupSource($agentId, $persistPath);
@@ -865,7 +865,7 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Backup destination must be an absolute path'];
         }
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
 
         $source = self::inspectUpgradeBackupSource($agentId, $persistPath);
         $layers = $source['layers'];
@@ -952,7 +952,7 @@ class InstallerService {
     public static function listRetainedBackups(string $agentId): array {
         if (empty($agentId)) return [];
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
         $base = rtrim($persistPath, '/') . "/aicli-rollback/$agentId";
         if (!is_dir($base)) return [];
 
@@ -1102,7 +1102,7 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Not a retained backup for this agent'];
         }
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
 
         // Validate $backupDir is genuinely one of THIS agent's retained
         // backups — never restore from an arbitrary caller-supplied path.

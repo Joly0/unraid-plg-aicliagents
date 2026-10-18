@@ -28,7 +28,7 @@ class OldVersionsJobService
     public static function stateDir(): string
     {
         $env = getenv('AICLI_OLD_VERSIONS_STATE_DIR');
-        return ($env !== false && $env !== '') ? rtrim($env, '/') : '/tmp/unraid-aicliagents/old-versions';
+        return ($env !== false && $env !== '') ? rtrim($env, '/') : SecretPaths::stateRoot() . '/old-versions';
     }
 
     private static function path(string $jobId, string $suffix): string

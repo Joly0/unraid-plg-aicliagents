@@ -19,7 +19,8 @@ namespace AICliAgents\Services;
 
 class WorkspaceBundleService
 {
-    const BUNDLE_DIR       = '/tmp/unraid-aicliagents/bundles';
+    /** The bundle folder in RAM (the state root under test is the sandbox). */
+    public static function bundleDir(): string { return SecretPaths::stateRoot() . '/bundles'; }
     const BUNDLE_MAX_BYTES = 1048576;  // 1 MB
     const MEMBER_MAX_BYTES = 262144;   // 256 KB
     const MEMBER_MAX_COUNT = 32;       // a bundle holds a handful of known files
@@ -58,7 +59,7 @@ class WorkspaceBundleService
             $ts        = time();
             $sanitized = self::sanitizePathForFilename($workspacePath);
             $bundleName = "aicli-workspace-{$sanitized}-{$ts}.tar.gz";
-            $bundlePath = self::BUNDLE_DIR . '/' . $bundleName;
+            $bundlePath = self::bundleDir() . '/' . $bundleName;
 
             // Collect tier files that EXIST on disk.
             $staging    = [];
@@ -104,7 +105,7 @@ class WorkspaceBundleService
             // Only include if auto-launch is actually enabled (non-default)
             if (!empty($alData['autoLaunch'])) {
                 $alJson = json_encode($alData, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-                $alTmp  = self::BUNDLE_DIR . "/tmp_autolaunch_{$ts}.json";
+                $alTmp  = self::bundleDir() . "/tmp_autolaunch_{$ts}.json";
                 file_put_contents($alTmp, $alJson);
                 $staging['autolaunch.json'] = $alTmp;
                 $filesInBundle[] = 'autolaunch.json';
@@ -131,13 +132,13 @@ class WorkspaceBundleService
                 'files'            => $filesInBundle,
             ];
             $manifestJson = json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-            $manifestTmp  = self::BUNDLE_DIR . "/tmp_manifest_{$ts}.json";
+            $manifestTmp  = self::bundleDir() . "/tmp_manifest_{$ts}.json";
             file_put_contents($manifestTmp, $manifestJson);
             $staging['bundle.json'] = $manifestTmp;
 
             // Build the tar.gz using proc_open array form (no shell expansion).
             // We create a temp staging directory with symlink-free copies.
-            $stagingDir = self::BUNDLE_DIR . "/staging_{$ts}_" . getmypid();
+            $stagingDir = self::bundleDir() . "/staging_{$ts}_" . getmypid();
             if (!mkdir($stagingDir, 0700, true)) {
                 return ['status' => 'error', 'message' => 'Failed to create staging directory'];
             }
@@ -508,8 +509,8 @@ class WorkspaceBundleService
 
     private static function ensureBundleDir(): void
     {
-        if (!is_dir(self::BUNDLE_DIR)) {
-            @mkdir(self::BUNDLE_DIR, 0700, true);
+        if (!is_dir(self::bundleDir())) {
+            @mkdir(self::bundleDir(), 0700, true);
         }
     }
 

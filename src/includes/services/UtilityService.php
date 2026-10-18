@@ -181,7 +181,7 @@ class UtilityService {
 
     private static function npmCacheBase(): string {
         $env = getenv('AICLI_NPM_CACHE_BASE');
-        return rtrim(is_string($env) && $env !== '' ? $env : '/tmp/unraid-aicliagents/npm-cache', '/');
+        return rtrim(is_string($env) && $env !== '' ? $env : SecretPaths::stateRoot() . '/npm-cache', '/');
     }
 
     /**
@@ -394,7 +394,7 @@ class UtilityService {
      * Updates a generic task status file for maintenance progress.
      */
     public static function setTaskStatus($user, $message, $progress, $reason = '') {
-        $dir = "/tmp/unraid-aicliagents";
+        $dir = SecretPaths::stateRoot();
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
         $file = "$dir/task-status-$user";
         $status = [

@@ -17,7 +17,8 @@ final class QuotaDetectionService
 {
     public const POLL_INTERVAL_SECONDS = 30;
     public const CODEX_FALLBACK_SECONDS = 5 * 60 * 60;
-    private const STATE_PATH = '/tmp/unraid-aicliagents/quota-detection.json';
+    /** The state file: under the state root (the sandbox under test). */
+    private static function statePath(): string { return SecretPaths::stateRoot() . '/quota-detection.json'; }
 
     private const CODEX_QUOTA_MESSAGE = '~(?:you(?:\'|’)?ve\s+hit\s+your\s+usage\s+limit|usage\s+limit(?:\s+(?:reached|exceeded)\b|(?=\s*(?:[.!?]|$)))|quota\s+(?:reached|exceeded)\b)~iu';
     private const CODEX_CLOCK_RESET = '~(?:try\s+again|reset|resets)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s+\(([^)]+)\))?~iu';
@@ -579,8 +580,8 @@ final class QuotaDetectionService
     /** @return array{schema:int,last_poll_at:int,sessions:array<string,array<string,mixed>>} */
     private static function readState(): array
     {
-        if (!is_file(self::STATE_PATH)) return ['schema' => 1, 'last_poll_at' => 0, 'sessions' => []];
-        $data = json_decode((string)@file_get_contents(self::STATE_PATH), true);
+        if (!is_file(self::statePath())) return ['schema' => 1, 'last_poll_at' => 0, 'sessions' => []];
+        $data = json_decode((string)@file_get_contents(self::statePath()), true);
         if (!is_array($data)) return ['schema' => 1, 'last_poll_at' => 0, 'sessions' => []];
         $data['schema'] = 1;
         $data['last_poll_at'] = (int)($data['last_poll_at'] ?? 0);
@@ -590,7 +591,7 @@ final class QuotaDetectionService
 
     private static function writeState(array $state): void
     {
-        @mkdir(dirname(self::STATE_PATH), 0755, true);
-        AtomicWriteService::writeJson(self::STATE_PATH, $state);
+        @mkdir(dirname(self::statePath()), 0755, true);
+        AtomicWriteService::writeJson(self::statePath(), $state);
     }
 }

@@ -59,8 +59,6 @@ class GitHomeService {
     const SECRET_FILTER_CLEAN_ONLY = 'aicli-secrets-clean';
     /** Home-relative path of the canonical MCP store (guarded against raw secrets). */
     const HUB_MCP_REL = '.aicli/hub/mcp.json';
-    /** Plugin config dir on flash (overridable for tests via AICLI_PLUGIN_CFG_DIR). */
-    const PLUGIN_CFG_DIR = '/boot/config/plugins/unraid-aicliagents';
     /** Where the snapshotted plugin settings live inside the managed home (home-relative). */
     const PLUGIN_BACKUP_REL = '.aicli/plugin-backup';
     /**
@@ -629,9 +627,10 @@ class GitHomeService {
     // plugin-settings backup/restore (the small, secret-free config)
     // ------------------------------------------------------------------
 
+    /** Plugin config dir on flash (overridable for tests via AICLI_PLUGIN_CFG_DIR; the flash root under test is the sandbox). */
     private static function pluginCfgDir(): string {
         $env = getenv('AICLI_PLUGIN_CFG_DIR');
-        return ($env !== false && $env !== '') ? rtrim($env, '/') : self::PLUGIN_CFG_DIR;
+        return ($env !== false && $env !== '') ? rtrim($env, '/') : \AICliAgents\Services\SecretPaths::flashRoot();
     }
 
     /**

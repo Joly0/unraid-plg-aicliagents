@@ -646,7 +646,7 @@ class VoiceEngineSetupService
     private static function downloadMarkerPath(): string
     {
         if (self::$downloadMarker !== null) return self::$downloadMarker;
-        $base = getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents';
+        $base = getenv('AICLI_TMP_BASE') ?: SecretPaths::stateRoot();
         return rtrim($base, '/') . '/voice-stt-download.json';
     }
 

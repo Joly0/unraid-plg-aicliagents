@@ -33,7 +33,7 @@ class ContinueHold
     private static function dir(): string
     {
         $env = getenv('AICLI_TMP_BASE');
-        $base = ($env !== false && $env !== '') ? $env : '/tmp/unraid-aicliagents';
+        $base = ($env !== false && $env !== '') ? $env : SecretPaths::stateRoot();
         return $base . '/continue-hold';
     }
 

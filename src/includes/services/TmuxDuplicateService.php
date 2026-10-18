@@ -77,7 +77,7 @@ final class TmuxDuplicateService
 
     private static function tmuxRoot(): string
     {
-        return rtrim(self::$tmuxRoot ?? ProcessManager::TMUX_ROOT, '/');
+        return rtrim(self::$tmuxRoot ?? ProcessManager::tmuxRoot(), '/');
     }
 
     // ---- Detection ---------------------------------------------------------

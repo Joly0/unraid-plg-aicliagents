@@ -69,7 +69,7 @@ class LogService {
 
         $lines = explode("\n", $message);
         $timestamp = date("Y-m-d H:i:s");
-        $logDir = getenv('AICLI_DEBUG_LOG_DIR') ?: "/tmp/unraid-aicliagents";
+        $logDir = getenv('AICLI_DEBUG_LOG_DIR') ?: SecretPaths::stateRoot();
         if (!is_dir($logDir)) @mkdir($logDir, 0755, true);
         $logFile = "$logDir/debug.log";
 

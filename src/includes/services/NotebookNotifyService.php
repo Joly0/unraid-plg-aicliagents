@@ -144,7 +144,7 @@ class NotebookNotifyService
 
     private static function gateOpen(string $ws, string $id, string $event, int $gap): bool
     {
-        $dir = self::$markerDir ?? '/tmp/unraid-aicliagents/notebook-notify';
+        $dir = self::$markerDir ?? SecretPaths::stateRoot() . '/notebook-notify';
         if (!is_dir($dir)) @mkdir($dir, 0777, true);
         $file = $dir . '/' . preg_replace('/[^A-Za-z0-9_-]/', '_', "$ws-$id-$event");
         $now = self::$now ?? time();

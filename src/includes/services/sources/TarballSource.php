@@ -14,12 +14,13 @@ use AICliAgents\Services\AgentRegistry;
 use AICliAgents\Services\LogService;
 
 class TarballSource implements AgentSource {
-    const DL_BASE = '/tmp/unraid-aicliagents/dl';
+    /** The download folder: under the state root (the sandbox under test). */
+    public static function dlBase(): string { return \AICliAgents\Services\SecretPaths::stateRoot() . '/dl'; }
 
     /** Test seam: a callable(string $cmd): ?string that stands in for shell_exec in the download step. */
     public static $shellSeam = null;
 
-    /** Test seam: a download folder that replaces DL_BASE (null keeps DL_BASE). */
+    /** Test seam: a download folder that replaces dlBase() (null keeps dlBase()). */
     public static ?string $dlBaseOverride = null;
 
     public function fetch(string $agentId, array $agent, ?string $targetVersion, $progress): bool {
@@ -45,7 +46,7 @@ class TarballSource implements AgentSource {
         @mkdir("$agentDir/pkg", 0755, true);
 
         if (is_callable($progress)) $progress("Downloading {$version}...", 35);
-        $dlDir = (self::$dlBaseOverride ?? self::DL_BASE) . "/$agentId";
+        $dlDir = (self::$dlBaseOverride ?? self::dlBase()) . "/$agentId";
         @mkdir($dlDir, 0755, true);
         $dlPath = $dlDir . '/' . basename(parse_url($url, PHP_URL_PATH) ?: 'tarball.bin');
         // R-120 (#662): curl must end with exit code 0. A download cut short by the 300 s limit

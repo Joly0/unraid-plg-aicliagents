@@ -11,9 +11,6 @@
 namespace AICliAgents\Services;
 
 class StoragePathResolver {
-    public const PLUGIN_BASE = '/boot/config/plugins/unraid-aicliagents';
-    public const MOUNT_ROOT  = '/tmp/unraid-aicliagents';
-    public const ZRAM_BASE   = '/tmp/unraid-aicliagents/zram_upper';
 
     /**
      * Deny-list: mounts that must never be used as persist paths.
@@ -196,7 +193,7 @@ class StoragePathResolver {
         return SecretPaths::stateRoot();
     }
 
-    /** The RAM folder of the ZRAM upper layers. Production: ZRAM_BASE. */
+    /** The RAM folder of the ZRAM upper layers. Production: the state root plus /zram_upper. */
     public static function zramBase(): string {
         return self::mountRoot() . '/zram_upper';
     }
@@ -233,7 +230,7 @@ class StoragePathResolver {
         // Plugin-internal paths are always allowed
         // The live folders and, in a test run, their sandbox twins.
         $isInternal = false;
-        foreach (array_unique([self::PLUGIN_BASE, self::MOUNT_ROOT, self::pluginBase(), self::mountRoot()]) as $root) {
+        foreach (array_unique([SecretPaths::LIVE_FLASH_ROOT, SecretPaths::LIVE_STATE_ROOT, self::pluginBase(), self::mountRoot()]) as $root) {
             if (self::isUnder($path, $root)) { $isInternal = true; break; }
         }
         if ($isInternal) {

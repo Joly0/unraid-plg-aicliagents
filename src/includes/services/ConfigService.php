@@ -14,11 +14,10 @@ require_once __DIR__ . '/HomeCacheService.php';
 require_once __DIR__ . '/AgentTempService.php';
 
 class ConfigService {
-    const CONFIG_PATH = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
     private static ?string $lastWorkspaceSaveMessage = null;
 
     /**
-     * The plugin config file. Production: CONFIG_PATH. The env AICLI_FLASH_ROOT redirects the
+     * The plugin config file. Production: flash root plus unraid-aicliagents.cfg. The env AICLI_FLASH_ROOT redirects the
      * flash folder (SecretPaths::flashRoot); tests/bootstrap.php points it at a temp folder,
      * so a test never reads or writes the real file (#646, F19).
      */

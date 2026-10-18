@@ -21,7 +21,8 @@ namespace AICliAgents\Services;
 class ActorDownAlertService
 {
     public const OP_PREFIX = 'actor_down_';
-    public const DEFAULT_DIR = '/tmp/unraid-aicliagents/actor-down';
+    /** The alert folder: under the state root (the sandbox under test). */
+    public static function defaultDir(): string { return SecretPaths::stateRoot() . '/actor-down'; }
     /** The launcher calls an exit "immediate" when the agent ran for less than this many seconds. */
     public const IMMEDIATE_SECONDS = 3;
     /** Two immediate exits inside this window mean the actor is down. */
@@ -246,7 +247,7 @@ class ActorDownAlertService
     private static function newestForensics(string $id): ?string
     {
         $dir = getenv('AICLI_CRASH_DIR');
-        $dir = ($dir !== false && $dir !== '') ? $dir : '/tmp/unraid-aicliagents';
+        $dir = ($dir !== false && $dir !== '') ? $dir : SecretPaths::stateRoot();
         $best = null;
         $bestT = 0;
         foreach (glob($dir . '/crash-*-' . $id . '-*.log') ?: [] as $f) {
@@ -292,7 +293,7 @@ class ActorDownAlertService
     private static function dir(): string
     {
         $env = getenv('AICLI_ACTOR_DOWN_DIR');
-        return ($env !== false && $env !== '') ? $env : self::DEFAULT_DIR;
+        return ($env !== false && $env !== '') ? $env : self::defaultDir();
     }
 
     private static function statePath(string $id): string

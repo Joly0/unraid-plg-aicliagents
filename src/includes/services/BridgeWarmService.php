@@ -27,7 +27,8 @@ class BridgeWarmService
     public const OLD_BRIDGE_EXIT_WAIT_SECONDS = 3.0;
 
     /** Log of the detached respawn after a bridge refresh sweep. */
-    public const RESPAWN_LOG = '/tmp/unraid-aicliagents/bridge-warm.log';
+    /** The respawn log: under the state root (the sandbox under test). */
+    public static function respawnLog(): string { return SecretPaths::stateRoot() . '/bridge-warm.log'; }
 
     /** @var array<string, callable>|null test seams: workspace, bound, running, held, launch, generation, spawn. */
     public static ?array $probes = null;
@@ -105,7 +106,7 @@ class BridgeWarmService
         if ($spawn) return (int)$spawn($ids);
         $script = dirname(__DIR__, 2) . '/scripts/bridge-warm.php';
         if (!is_file($script)) return 0;
-        return UtilityService::spawnDetached(array_merge(['php', $script], $ids), self::RESPAWN_LOG);
+        return UtilityService::spawnDetached(array_merge(['php', $script], $ids), self::respawnLog());
     }
 
     /**

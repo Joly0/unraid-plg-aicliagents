@@ -37,7 +37,7 @@ class PaneInputRules {
     /** The user overlay on flash. Test seam via AICLI_PANE_INPUT_RULES. */
     public static function overlayPath(): string {
         $env = getenv('AICLI_PANE_INPUT_RULES');
-        return ($env !== false && $env !== '') ? $env : '/boot/config/plugins/unraid-aicliagents/pane-input-rules.json';
+        return ($env !== false && $env !== '') ? $env : SecretPaths::flashRoot() . '/pane-input-rules.json';
     }
 
     /**

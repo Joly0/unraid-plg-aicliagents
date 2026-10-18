@@ -118,7 +118,7 @@ class CurlInstallSource implements AgentSource {
         // download leaves the current install as it was.
         self::$lastError = '';
         if (is_callable($progress)) $progress("Fetching install script…", 25);
-        $scriptPath = "/tmp/unraid-aicliagents/dl/$agentId-install.sh";
+        $scriptPath = \AICliAgents\Services\SecretPaths::stateRoot() . "/dl/$agentId-install.sh";
         @mkdir(dirname($scriptPath), 0755, true);
         @unlink($scriptPath);
         $curlOut = trim((string)@shell_exec(self::downloadCommand($scriptUrl, $scriptPath)));

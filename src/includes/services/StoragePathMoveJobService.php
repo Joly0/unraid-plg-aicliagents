@@ -36,7 +36,7 @@ class StoragePathMoveJobService
     public static function stateDir(): string
     {
         $env = getenv('AICLI_PATH_MOVE_STATE_DIR');
-        return ($env !== false && $env !== '') ? rtrim($env, '/') : '/tmp/unraid-aicliagents/path-move';
+        return ($env !== false && $env !== '') ? rtrim($env, '/') : SecretPaths::stateRoot() . '/path-move';
     }
 
     private static function path(string $jobId, string $suffix): string

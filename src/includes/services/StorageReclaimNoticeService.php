@@ -40,7 +40,7 @@ class StorageReclaimNoticeService
     private static function dismissPath(string $user): string
     {
         $dir = getenv('AICLI_ACTIVITY_DIR');
-        $base = ($dir !== false && $dir !== '') ? $dir : '/tmp/unraid-aicliagents/activity';
+        $base = ($dir !== false && $dir !== '') ? $dir : SecretPaths::stateRoot() . '/activity';
         return rtrim($base, '/') . '/.' . self::opId($user) . '.dismissed';
     }
 

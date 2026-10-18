@@ -47,7 +47,7 @@ final class AutoContinueRules
     public static function overlayPath(): string
     {
         $env = getenv('AICLI_AUTO_CONTINUE_RULES');
-        return ($env !== false && $env !== '') ? $env : '/boot/config/plugins/unraid-aicliagents/auto-continue-rules.json';
+        return ($env !== false && $env !== '') ? $env : SecretPaths::flashRoot() . '/auto-continue-rules.json';
     }
 
     public static function resetCache(): void { self::$cache = null; }

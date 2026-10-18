@@ -294,7 +294,7 @@ class UpgradeRelaunchService
     {
         $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
         $retryDir = $retryDir ?? ((class_exists(SupervisorService::class)
-            ? SupervisorService::SUPERVISOR_DIR : '/tmp/unraid-aicliagents/supervisor') . '/jobs-retry');
+            ? SupervisorService::supervisorDir() : SecretPaths::stateRoot() . '/supervisor') . '/jobs-retry');
         return rtrim($retryDir, '/') . "/upgrade-agent-$safe.activation";
     }
 
@@ -462,7 +462,7 @@ class UpgradeRelaunchService
         if (!self::activationPending($agentId)) return false;
         $safe   = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
         $jobId  = "upgrade-agent-$safe";
-        $retryDir = $retryDir ?? (SupervisorService::SUPERVISOR_DIR . '/jobs-retry');
+        $retryDir = $retryDir ?? (SupervisorService::supervisorDir() . '/jobs-retry');
         $wake     = $wake ?? static fn(): bool => SupervisorService::wake();
         $schedule = $schedule ?? static fn(string $id): bool => self::schedulePendingActivation($id);
 
@@ -494,7 +494,7 @@ class UpgradeRelaunchService
                 @unlink($tmp);
             }
         }
-        $queued = glob(SupervisorService::QUEUE_DIR . "/*_agent_{$safe}_mount.req") ?: [];
+        $queued = glob(SupervisorService::queueDir() . "/*_agent_{$safe}_mount.req") ?: [];
         if ($queued !== []) { $wake(); return true; }   // already queued — just make the tick happen now
         $ok = (bool)$schedule($agentId);                // enqueues with the stable job id + wakes
         if ($ok && class_exists('\AICliAgents\Services\LifecycleLogService')) {
@@ -520,7 +520,7 @@ class UpgradeRelaunchService
         if ($layerLive === null) {
             $layerLive = static function (string $agentId): bool {
                 require_once __DIR__ . '/InstallerService.php';
-                $persistDir = '/boot/config/plugins/unraid-aicliagents/persistence';
+                $persistDir = SecretPaths::flashRoot() . '/persistence';
                 $newest = InstallerService::newestAgentLayer($agentId, $persistDir);
                 // No layer file: a plain-directory agent is live once its bind
                 // shows the promoted generation (2026-09-24); any other agent

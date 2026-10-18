@@ -73,9 +73,12 @@ class NotebookService {
     public const MAX_READ_BYTES    = 1048576;
     public const RATE_PER_MINUTE   = 60;
     public const LOCK_WAIT_SECONDS = 5;
-    public const GLOBAL_ROOT       = '/boot/config/plugins/unraid-aicliagents/notebook/global';
-    private const STATE_DIR        = '/tmp/unraid-aicliagents/notebook-state';
-    private const STATE_DIR_FLASH  = '/boot/config/plugins/unraid-aicliagents/notebook-state';
+    /** The global notebook folder on flash (the flash root under test is the sandbox). */
+    public static function globalRoot(): string { return SecretPaths::flashRoot() . '/notebook/global'; }
+    /** The notebook state folder in RAM (the state root under test is the sandbox). */
+    private static function stateDirDefault(): string { return SecretPaths::stateRoot() . '/notebook-state'; }
+    /** The durable mirror of the notebook state folder on flash. */
+    private static function stateDirFlash(): string { return SecretPaths::flashRoot() . '/notebook-state'; }
 
     /** Setting notebook_quiet_hours: HH:MM-HH:MM (may wrap midnight) or empty. */
     private const QUIET_RE = '/^(?:|([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d)$/';
@@ -97,7 +100,7 @@ class NotebookService {
 
     // ----- Workspace lookup cache (docs/specs/NOTEBOOK_HANG_OBSERVABILITY.md R3, R4) -----
     /** The cache file. Under PHPUnit (AICLI_TEST_TMP) it is OFF unless setWorkspaceCachePath() names a file. */
-    private const WS_CACHE_FILE = '/tmp/unraid-aicliagents/notebook-ws-cache.json';
+    private static function wsCacheFile(): string { return SecretPaths::stateRoot() . '/notebook-ws-cache.json'; }
     /** An entry older than this many seconds is not used. */
     private const WS_CACHE_TTL = 20;
     private const WS_CACHE_MAX_ENTRIES = 200;
@@ -134,7 +137,7 @@ class NotebookService {
             } elseif (defined('AICLI_TEST_TMP') && $scope === 'global') {
                 return ['error' => 'Test guard: the global notebook needs $rootOverride under test.'];
             } elseif ($scope === 'global') {
-                $root = self::GLOBAL_ROOT;
+                $root = self::globalRoot();
             } else {
                 $lookupT0 = PerfTrace::start();
                 $rec = self::findWorkspace($workspaceId);
@@ -2393,13 +2396,15 @@ class NotebookService {
         if (!defined('AICLI_TEST_TMP')) return false;
         // The live plugin state is forbidden by name, whether or not the folder exists yet.
         $norm = '/' . trim(preg_replace('#/+#', '/', $path), '/');
-        if ($norm === '/tmp/unraid-aicliagents' || strncmp($norm, '/tmp/unraid-aicliagents/', 24) === 0) return true;
+        // The live state root is named by the constant, not the sandbox root: a test may not use it.
+        $liveRoot = SecretPaths::LIVE_STATE_ROOT;
+        if ($norm === $liveRoot || strncmp($norm, $liveRoot . '/', strlen($liveRoot) + 1) === 0) return true;
         $probe = $path;
         while ($probe !== '' && $probe !== '/' && !file_exists($probe)) $probe = dirname($probe);
         $real = realpath($probe === '' ? '/' : $probe);
         if ($real === false) return true;
         $real = rtrim($real, '/') . '/';
-        $live = realpath('/tmp/unraid-aicliagents');
+        $live = realpath(SecretPaths::LIVE_STATE_ROOT);
         if ($live !== false && strncmp($real, rtrim($live, '/') . '/', strlen(rtrim($live, '/')) + 1) === 0) return true;
         foreach ([(string)AICLI_TEST_TMP, sys_get_temp_dir()] as $ok) {
             $okReal = realpath($ok);
@@ -2431,7 +2436,7 @@ class NotebookService {
     }
 
     private static function stateDir(): string {
-        return self::$stateDirOverride !== null ? rtrim(self::$stateDirOverride, '/') : self::STATE_DIR;
+        return self::$stateDirOverride !== null ? rtrim(self::$stateDirOverride, '/') : self::stateDirDefault();
     }
 
     /** Non-blocking flock, polled to a deadline. */
@@ -2469,7 +2474,7 @@ class NotebookService {
     private static function readState(array $ctx): array {
         $nb = preg_replace('/[^A-Za-z0-9_\-]/', '', (string)$ctx['notebookId']);
         $files = [self::stateDir() . "/$nb.json"];
-        if (self::$stateDirOverride === null) $files[] = self::STATE_DIR_FLASH . "/$nb.json";
+        if (self::$stateDirOverride === null) $files[] = self::stateDirFlash() . "/$nb.json";
         foreach ($files as $f) {
             if (!is_file($f)) continue;
             $d = json_decode((string)@file_get_contents($f), true);
@@ -2490,9 +2495,9 @@ class NotebookService {
             AtomicWriteService::writeJson("$dir/$nb.json", $state);
             if (self::$stateDirOverride === null) {
                 // Durable mirror on flash, at most every 5 minutes (flash wear).
-                $flash = self::STATE_DIR_FLASH . "/$nb.json";
+                $flash = self::stateDirFlash() . "/$nb.json";
                 if (!is_file($flash) || (time() - (int)@filemtime($flash)) > 300) {
-                    if (!is_dir(self::STATE_DIR_FLASH)) @mkdir(self::STATE_DIR_FLASH, 0755, true);
+                    if (!is_dir(self::stateDirFlash())) @mkdir(self::stateDirFlash(), 0755, true);
                     AtomicWriteService::writeJson($flash, $state);
                 }
             }
@@ -2763,7 +2768,7 @@ class NotebookService {
             return $p;
         }
         if (defined('AICLI_TEST_TMP')) return null;
-        return self::WS_CACHE_FILE;
+        return self::wsCacheFile();
     }
 
     /** @return array<string,mixed> the cache content: id => [name, path, at, rec]; empty on any problem */

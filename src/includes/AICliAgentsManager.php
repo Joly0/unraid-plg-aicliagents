@@ -12,7 +12,10 @@
 // send-keys, kill-session, ...) at a plugin-private socket directory instead of
 // the shared /tmp/tmux-<uid>, which other processes can leave with permissions
 // tmux rejects. Child processes the plugin spawns inherit this env var.
-putenv('TMUX_TMPDIR=/tmp/unraid-aicliagents/tmux');
+// SecretPaths has no side effects, so it loads first here: the tmux folder is under the state root,
+// which a test sandbox redirects (AICLI_STATE_ROOT).
+require_once __DIR__ . '/services/SecretPaths.php';
+putenv('TMUX_TMPDIR=' . \AICliAgents\Services\SecretPaths::stateRoot() . '/tmux');
 
 // Forgejo #367 (docs/specs/RUNNING_AGENT_SAFE_UPDATES.md, 2026-09-29): pin this
 // process to ONE plugin generation. PHP gives __DIR__ as the real generation

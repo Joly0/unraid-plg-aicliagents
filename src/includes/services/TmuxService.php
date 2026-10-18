@@ -180,7 +180,7 @@ class TmuxService {
      * needed — it is always written fresh at session start).
      */
     public static function getQuirkPath(string $agentId): string {
-        return "/tmp/unraid-aicliagents/tmux/quirks_{$agentId}.json";
+        return SecretPaths::stateRoot() . "/tmux/quirks_{$agentId}.json";
     }
 
     public static function getWorkspaceSettingsPath(string $path, string $agentId): string {
@@ -314,7 +314,7 @@ class TmuxService {
      */
     public static function writeQuirkFile(string $agentId): bool {
         $quirks = self::getAgentQuirks($agentId);
-        $dir = '/tmp/unraid-aicliagents/tmux';
+        $dir = SecretPaths::stateRoot() . '/tmux';
         if (!is_dir($dir)) {
             @mkdir($dir, 0777, true);
         }

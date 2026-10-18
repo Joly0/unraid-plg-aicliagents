@@ -153,7 +153,7 @@ class BundleHandler
             echo json_encode(['status' => 'error', 'message' => 'invalid bundle name']);
             return;
         }
-        $path = rtrim(WorkspaceBundleService::BUNDLE_DIR, '/') . '/' . $name;
+        $path = rtrim(WorkspaceBundleService::bundleDir(), '/') . '/' . $name;
         if (!is_file($path)) {
             header('Content-Type: application/json');
             echo json_encode(['status' => 'error', 'message' => 'bundle not found (create it first)']);

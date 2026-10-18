@@ -15,8 +15,6 @@ namespace AICliAgents\Services;
 
 class HaltService {
 
-    public const HALT_DIR = '/tmp/unraid-aicliagents/supervisor/halts';
-
     private const COMPONENT = 'HaltService';
 
     /**

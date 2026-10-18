@@ -70,7 +70,8 @@ namespace AICliAgents\Services;
 class VoiceService {
 
     /** Runtime dir (tmpfs). self::$dir overrides for tests. */
-    public const RUNTIME_DIR = '/tmp/unraid-aicliagents/voice';
+    /** The runtime folder: under the state root (the sandbox under test). */
+    public static function runtimeDir(): string { return SecretPaths::stateRoot() . '/voice'; }
 
     /**
      * Secrets-vault key for the engine API key (SecretService::getAgentSecrets()/
@@ -178,7 +179,7 @@ class VoiceService {
 
     /** Resolved runtime dir (RUNTIME_DIR unless a test set $dir). */
     public static function dir(): string {
-        return self::$dir ?? self::RUNTIME_DIR;
+        return self::$dir ?? self::runtimeDir();
     }
 
     /** Where HealthService's `voice` check (R11) reads the last synthesis result. */

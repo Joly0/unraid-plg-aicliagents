@@ -77,12 +77,14 @@ class AdminService {
      * via LogService::log()); the other three are named here for completeness
      * and so a future Tier-1 addition does not have to rediscover the paths.
      */
-    private const LOG_FILES = [
-        'install'   => '/boot/config/plugins/unraid-aicliagents/install.log',
-        'uninstall' => '/boot/config/plugins/unraid-aicliagents/uninstall.log',
-        'migration' => '/tmp/unraid-aicliagents/migration.log',
-        'debug'     => '/tmp/unraid-aicliagents/debug.log',
-    ];
+    private static function logFiles(): array {
+        return [
+            'install'   => SecretPaths::flashRoot() . '/install.log',
+            'uninstall' => SecretPaths::flashRoot() . '/uninstall.log',
+            'migration' => SecretPaths::stateRoot() . '/migration.log',
+            'debug'     => SecretPaths::stateRoot() . '/debug.log',
+        ];
+    }
 
     /**
      * Plugin version, active code generation, supervisor state, and headline
@@ -687,7 +689,7 @@ class AdminService {
     public static function getLogs(string $context = '', int $lines = 100): array {
         try {
             $lines = max(1, min(self::MAX_LOG_LINES, $lines ?: 100));
-            $logFile = self::LOG_FILES['debug'];
+            $logFile = self::logFiles()['debug'];
             if (!file_exists($logFile)) {
                 return ['records' => [], 'count' => 0];
             }
@@ -1936,7 +1938,7 @@ class AdminService {
 
     /** Resolved runtime dir for the S7 gap markers (tmpfs; $sendInputRateDir overrides for tests). */
     private static function sendInputRateDir(): string {
-        return self::$sendInputRateDir ?? '/tmp/unraid-aicliagents/send-input';
+        return self::$sendInputRateDir ?? SecretPaths::stateRoot() . '/send-input';
     }
 
     /** "Now", in epoch seconds — $sendInputNow overrides for tests. */

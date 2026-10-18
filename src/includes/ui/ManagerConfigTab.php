@@ -255,7 +255,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                the EXISTING preflight_migrate → swal → execute_migrate flow via
                                saveAICliAgentsManager. */ ?>
                             <div class="input-row">
-                                <input type="text" name="home_storage_path" id="home_storage_path" readonly value="<?=htmlspecialchars($config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current home storage location — use Change to move it">
+                                <input type="text" name="home_storage_path" id="home_storage_path" readonly value="<?=htmlspecialchars($config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current home storage location — use Change to move it">
                                 <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('home')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
                             </div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Where this user's persistent home directory data lives on disk. Use Change to move it to a different disk or pool.</div>
@@ -271,7 +271,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>Agent Storage</dt>
                         <dd>
                             <div class="input-row">
-                                <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars($config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
+                                <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
                                 <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('agent')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
                             </div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Where each agent's installed files and workspace data live on disk. Use Change to move it to a different disk or pool.</div>
@@ -554,7 +554,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                           recognises the prompt; otherwise it holds. An agent with no idle rules uses the block
                           rules only. Write each rule as a regular expression, in <code>/body/flags</code> form. You
                           (or your coding agent) can also edit
-                          <code>/boot/config/plugins/unraid-aicliagents/pane-input-rules.json</code> directly. A
+                          <code><?=htmlspecialchars(\AICliAgents\Services\SecretPaths::flashRoot(), ENT_QUOTES, 'UTF-8')?>/pane-input-rules.json</code> directly. A
                           pattern that does not compile is dropped, and the built-in rule stays in force, so this
                           check can never break.
                         </p>
