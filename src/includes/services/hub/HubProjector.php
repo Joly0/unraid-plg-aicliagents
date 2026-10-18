@@ -1427,13 +1427,12 @@ class HubProjector {
         return preg_replace('/([?&][A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|auth|sig)[A-Za-z0-9_.-]*=)(?!\{[A-Z][A-Z0-9_]{1,127}\}(?:[&#\s]|$))[^&#\s]+/i', '$1[masked]', $value);
     }
 
-    /** Server name behind a managed key (JSON vendors only; fence keys → null). */
+    /**
+     * Server name behind a managed key (JSON vendors only; fence keys → null). The root key
+     * belongs to the vendor: "mcpServers.<name>" for most, "mcp.<name>" for OpenCode and Kilo.
+     */
     private static function serverNameForKey(VendorProjector $projector, string $key): ?string {
-        if (strncmp($key, 'mcpServers.', 11) === 0) {
-            $name = substr($key, 11);
-            return preg_match(HubStore::NAME_RE, $name) ? $name : null;
-        }
-        return null;
+        return ($projector instanceof JsonMcpProjector) ? $projector->serverNameFromKey($key) : null;
     }
 
     /** Remove $agentId from a server's enabledFor (or from ALL servers when $name is null — fence release). */

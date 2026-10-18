@@ -3319,17 +3319,10 @@ class TmuxService {
     }
 
     /**
-     * Run tmux with an argv array (no shell). Eliminates shell-injection risk:
-     * arguments pass directly to execve() without word-splitting or globbing.
-     */
-    private static function runTmux(array $args): array {
-        return self::runTmuxAt('', $args);
-    }
-
-    /**
-     * Run tmux against a specific server socket (-S), optionally feeding
-     * stdin (used by `load-buffer -`). Same argv-array/no-shell guarantees
-     * as runTmux. Empty $sock = default socket (root's TMUX_TMPDIR server).
+     * Run tmux against a specific server socket (-S) with an argv array (no shell),
+     * optionally feeding stdin (used by `load-buffer -`). Arguments pass directly to
+     * execve() without word-splitting or globbing, so there is no shell-injection risk.
+     * Empty $sock = default socket (the TMUX_TMPDIR server of the user who runs PHP).
      */
     // nosemgrep: php.lang.security.exec-use.exec-use
     private static function runTmuxAt(string $sock, array $args, ?string $stdin = null): array {

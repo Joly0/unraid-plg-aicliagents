@@ -78,7 +78,7 @@ abstract class JsonMcpProjector extends VendorProjector {
     }
 
     /** 'mcpServers.<name>' → '<name>' (null if not a managed-key shape). */
-    protected function serverNameFromKey(string $key): ?string {
+    public function serverNameFromKey(string $key): ?string {
         $prefix = $this->topKey() . '.';
         if (strncmp($key, $prefix, strlen($prefix)) !== 0) return null;
         $name = substr($key, strlen($prefix));

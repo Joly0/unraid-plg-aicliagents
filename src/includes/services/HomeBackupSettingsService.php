@@ -106,9 +106,10 @@ class HomeBackupSettingsService {
 
     /**
      * Take the lock with LOCK_EX|LOCK_NB in a short poll with a deadline (never a blocking
-     * flock). Null when it could not be taken in time.
+     * flock). Null when it could not be taken in time; false when no lock file
+     * is possible (the save then goes ahead without the lock).
      *
-     * @return resource|null
+     * @return resource|false|null
      */
     private static function takeLock(string $user) {
         $path = self::lockPathFor($user);

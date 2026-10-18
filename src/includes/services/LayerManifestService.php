@@ -361,7 +361,12 @@ class LayerManifestService {
                 return false;
             }
             $count = 0;
-            foreach (($manifest['entities'] ?? []) as $entity => &$e) {
+            // By reference over the real array: a reference loop over a "?? []" copy
+            // counts the change and then loses it.
+            if (!isset($manifest['entities']) || !is_array($manifest['entities'])) {
+                return true;
+            }
+            foreach ($manifest['entities'] as $entity => &$e) {
                 if ($entityPrefix !== '' && strncmp((string)$entity, $entityPrefix, strlen($entityPrefix)) !== 0) {
                     continue;
                 }
