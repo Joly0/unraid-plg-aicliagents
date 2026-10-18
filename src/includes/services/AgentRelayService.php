@@ -2503,7 +2503,7 @@ class AgentRelayService {
             foreach ($mine as $r) {
                 // Open work for the actor always shows; a sent request shows only after it changed.
                 $open=$r['relay_role']==='actor' && in_array((string)($r['state'] ?? ''),['pending','acknowledged'],true);
-                $changed=$r['relay_role']==='sender' && self::isUnread((string)$r['id'],(string)($r['updated_at'] ?? $r['created_at'] ?? ''),$since,$seen);
+                $changed=$r['relay_role']==='sender' && self::isUnread((string)$r['id'],(string)($r['updated_at'] ?? $r['created_at'] ?? ''),$sinceRequests,$seen);
                 if ($open) $openRows[]=$r;
                 elseif ($changed) $changedRows[]=$r;
                 elseif ($r['relay_role']==='sender') $hidden++;
