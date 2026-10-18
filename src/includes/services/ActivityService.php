@@ -586,16 +586,28 @@ class ActivityService {
         }
 
         $killed = false;
-        // A waiting op has no live worker (its recorded pgid belongs to a process
-        // that already exited and may have been reused) — never signal it.
-        $pgid = ($entry['status'] ?? '') === self::STATUS_WAITING ? 0 : (int)($entry['pgid'] ?? 0);
+        // A waiting op usually has no live worker (its recorded pgid belongs to a process
+        // that already exited and may have been reused) — never signal it. F12 (#619): the
+        // exception is an install that waits in the install queue: its install-bg.php worker
+        // is alive and polls for the lock, so cancelling the row must stop that worker.
+        // workerAlive() proves the pid still runs install-bg.php in the recorded group.
+        $waiting = ($entry['status'] ?? '') === self::STATUS_WAITING;
+        $pgid = (!$waiting || self::waitingWorkerAlive($entry)) ? (int)($entry['pgid'] ?? 0) : 0;
         // Safety: never signal our own process group (an AJAX-registered op
         // carrying the PHP-FPM pool's pgid would take the web UI down).
         $ownPgid = function_exists('posix_getpgid') ? (int)@posix_getpgid(getmypid()) : 0;
-        if ($pgid > 1 && $pgid !== $ownPgid && function_exists('posix_kill')) {
-            $killed = @posix_kill(-$pgid, defined('SIGTERM') ? SIGTERM : 15);
+        if ($pgid > 1 && $pgid !== $ownPgid && (self::$killSeam !== null || function_exists('posix_kill'))) {
+            $kill = self::$killSeam ?? static fn(int $g, int $sig): bool => @posix_kill(-$g, $sig);
+            $killed = $kill($pgid, defined('SIGTERM') ? SIGTERM : 15);
             usleep(500000);
-            @posix_kill(-$pgid, defined('SIGKILL') ? SIGKILL : 9);
+            $kill($pgid, defined('SIGKILL') ? SIGKILL : 9);
+        }
+
+        // F12 (#619): a queued upgrade that is cancelled never touched the binary. The sessions that
+        // were closed for it come back, and the closed-set file stops acting as an install barrier.
+        if ($waiting && $pgid > 1 && preg_match('/^install_([A-Za-z0-9._-]+)$/', $opId, $m) === 1
+            && class_exists(UpgradeRelaunchService::class)) {
+            try { UpgradeRelaunchService::reopenAfterFailedInstall($m[1]); } catch (\Throwable $e) { /* the row is cancelled either way */ }
         }
 
         $entry = self::update($opId, [
@@ -605,6 +617,26 @@ class ActivityService {
             'recovery' => $entry['recovery'] ?? null,
         ]);
         return ['status' => 'ok', 'killed' => $killed, 'entry' => $entry];
+    }
+
+    /** Test seams: fn(int $pgid, int $signal): bool replaces posix_kill(-$pgid, ...). */
+    public static $killSeam = null;
+    /** Test seam: fn(array $entry): bool replaces the /proc check of waitingWorkerAlive(). */
+    public static $workerSeam = null;
+
+    /**
+     * F12 (#619): does a WAITING row still have its install worker? True only when the
+     * recorded pid still runs install-bg.php (or emergency-install-bg.php) and is still in the
+     * recorded process group. A pid that was reused by another program fails the check.
+     */
+    private static function waitingWorkerAlive(array $entry): bool {
+        if (self::$workerSeam !== null) return (bool)(self::$workerSeam)($entry);
+        $pid = (int)($entry['pid'] ?? 0);
+        $pgid = (int)($entry['pgid'] ?? 0);
+        if ($pid <= 1 || $pgid <= 1 || !function_exists('posix_getpgid')) return false;
+        $cmd = @file_get_contents('/proc/' . $pid . '/cmdline');
+        if (!is_string($cmd) || $cmd === '' || strpos($cmd, 'install-bg.php') === false) return false;
+        return (int)@posix_getpgid($pid) === $pgid;
     }
 
     // -------------------------------------------------------------------------

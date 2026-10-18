@@ -833,30 +833,49 @@ class BootIntegrityService {
     }
 
     /**
-     * Atomically restore sibling layer files into the active persist path
-     * for the given entity, then register each in the manifest.
+     * Restore sibling layer files into the active persist path for the given
+     * entity, then register each in the manifest.
      *
-     * Uses rename() (atomic on same filesystem — both are on Flash).
-     * Falls back to copy-verify-delete if rename() fails (cross-filesystem).
+     * R-116 (#662): a backup is COPIED, never moved. Each copy is verified
+     * against the sha256 of the source before it gets its final name, and the
+     * source stays where it is, so a second attempt still has the backup. Only
+     * the layers of ONE sibling folder (the folder of the newest layer) are
+     * restored, so two backup generations are never merged into one chain.
+     * `ok` is true only when at least one layer came back and no layer failed.
      * Never overwrites an existing target file (collision guard).
+     *
+     * The three optional arguments are test seams: the active folder, the
+     * candidate list (same shape as findSiblingLayers) and the manifest writer.
      *
      * Returns:
      *   ['ok' => bool, 'restored' => int, 'skipped' => int, 'errors' => string[]]
      *
+     * @param array<int, array<string, mixed>>|null $candidates
      * @return array{ok: bool, restored: int, skipped: int, errors: string[]}
      */
-    public static function restoreFromSibling(string $type, string $id): array {
+    public static function restoreFromSibling(string $type, string $id, ?string $activePath = null, ?array $candidates = null, ?callable $register = null): array {
         $entity      = $type . '/' . $id;
-        $activePath  = ($type === 'home')
-            ? StoragePathResolver::homePersistPath($id)
-            : StoragePathResolver::agentPersistPath();
+        if ($activePath === null) {
+            $activePath = ($type === 'home')
+                ? StoragePathResolver::homePersistPath($id)
+                : StoragePathResolver::agentPersistPath();
+        }
 
         // Ensure the destination directory exists
         if (!is_dir($activePath)) {
             @mkdir($activePath, 0755, true);
         }
 
-        $candidates = self::findSiblingLayers($type, $id);
+        $candidates = $candidates ?? self::findSiblingLayers($type, $id);
+        // The list is newest first: keep only the folder of the newest layer.
+        if ($candidates !== []) {
+            $firstDir   = $candidates[0]['sibling_dir'] ?? null;
+            $candidates = array_values(array_filter(
+                $candidates,
+                static fn($c) => ($c['sibling_dir'] ?? null) === $firstDir
+            ));
+        }
+        $register   = $register ?? static fn(string $e, array $l): bool => self::addRecoveredLayer($e, $l);
         $restored   = 0;
         $skipped    = 0;
         $errors     = [];
@@ -881,48 +900,34 @@ class BootIntegrityService {
             $srcSha256 = $candidate['sha256'];
             $bytes     = $candidate['bytes'];
 
-            // Attempt atomic rename (works when source and target are on the same filesystem)
-            $moved = @rename($src, $target);
-
-            if (!$moved) {
-                // Fallback: copy, sha256-verify, then remove source
-                $copied = @copy($src, $target);
-                if (!$copied) {
-                    $msg = "copy failed for $basename";
-                    $errors[] = $msg;
-                    LifecycleLogService::log(
-                        LifecycleLogService::LEVEL_ERROR,
-                        self::COMPONENT,
-                        'sibling_layer_restore_error',
-                        ['entity' => $entity, 'basename' => $basename, 'error' => $msg]
-                    );
-                    continue;
-                }
-
-                // Verify sha256 of the copy
-                $copySha256 = LayerManifestService::computeFileSha256($target);
-                if ($srcSha256 !== null && $copySha256 !== $srcSha256) {
-                    @unlink($target);
-                    $msg = "sha256 mismatch after copy for $basename";
-                    $errors[] = $msg;
-                    LifecycleLogService::log(
-                        LifecycleLogService::LEVEL_ERROR,
-                        self::COMPONENT,
-                        'sibling_layer_restore_error',
-                        ['entity' => $entity, 'basename' => $basename, 'error' => $msg]
-                    );
-                    continue;
-                }
-
-                // Remove source only after successful copy + verify
-                @unlink($src);
+            // Copy under a temporary name, verify, then give the final name.
+            // The source is never touched.
+            $tmp = $target . '.restore-' . getmypid();
+            $msg = null;
+            if (!@copy($src, $tmp)) {
+                $msg = "copy failed for $basename";
+            } elseif ($srcSha256 === null || LayerManifestService::computeFileSha256($tmp) !== $srcSha256) {
+                $msg = "sha256 mismatch after copy for $basename";
+            } elseif (!@rename($tmp, $target)) {
+                $msg = "could not place $basename in the persist folder";
+            }
+            if ($msg !== null) {
+                @unlink($tmp);
+                $errors[] = $msg;
+                LifecycleLogService::log(
+                    LifecycleLogService::LEVEL_ERROR,
+                    self::COMPONENT,
+                    'sibling_layer_restore_error',
+                    ['entity' => $entity, 'basename' => $basename, 'error' => $msg]
+                );
+                continue;
             }
 
             // Re-verify sha256 of the file now at its target location
             $finalSha256 = LayerManifestService::computeFileSha256($target);
             if ($finalSha256 === null) {
-                // Could not read the moved file — treat as error
-                $msg = "could not read target after move for $basename";
+                // Could not read the placed file — treat as error
+                $msg = "could not read target after copy for $basename";
                 $errors[] = $msg;
                 LifecycleLogService::log(
                     LifecycleLogService::LEVEL_ERROR,
@@ -942,7 +947,7 @@ class BootIntegrityService {
                 'created_at' => date('c'),
                 'persist_path' => $activePath,
             ];
-            self::addRecoveredLayer($entity, $layerEntry);
+            $register($entity, $layerEntry);
 
             LifecycleLogService::log(
                 LifecycleLogService::LEVEL_INFO,
@@ -960,11 +965,11 @@ class BootIntegrityService {
             $restored++;
         }
 
-        $ok = (count($errors) === 0 && $restored > 0) || ($restored > 0);
+        $ok = (count($errors) === 0 && $restored > 0);
 
-        if ($restored > 0) {
+        if ($restored > 0 || $errors !== []) {
             LifecycleLogService::log(
-                LifecycleLogService::LEVEL_INFO,
+                $errors === [] ? LifecycleLogService::LEVEL_INFO : LifecycleLogService::LEVEL_WARN,
                 self::COMPONENT,
                 'legacy_unmanaged_recovery_complete',
                 [

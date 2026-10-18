@@ -214,11 +214,14 @@ class StoragePathResolver {
             return ['ok' => false, 'reason' => 'Path must be absolute'];
         }
 
+        // R-127 (#662): a ".." or "." part can step out of the folder that the prefix checks
+        // below look at ("/boot/config/plugins/unraid-aicliagents/../../x").
+        if (preg_match('#(^|/)\.\.?(/|$)#', $path) === 1) {
+            return ['ok' => false, 'reason' => 'Path must not contain "." or ".." parts'];
+        }
+
         // Plugin-internal paths are always allowed
-        if (
-            strncmp($path, self::PLUGIN_BASE, strlen(self::PLUGIN_BASE)) === 0 ||
-            strncmp($path, self::MOUNT_ROOT, strlen(self::MOUNT_ROOT)) === 0
-        ) {
+        if (self::isUnder($path, self::PLUGIN_BASE) || self::isUnder($path, self::MOUNT_ROOT)) {
             return ['ok' => true, 'reason' => null];
         }
 
@@ -227,7 +230,7 @@ class StoragePathResolver {
         // AGENT storage behind the storage_allow_remote_agent config gate; always
         // refused for home.
         foreach (self::PERSIST_DENY_PREFIXES as $deny) {
-            if (strncmp($path, $deny, strlen($deny)) === 0) {
+            if (self::isUnder($path, $deny)) {
                 if ($deny === '/mnt/remotes' && $kind === 'agent') {
                     $config = ConfigService::getConfig();
                     if ((string)($config['storage_allow_remote_agent'] ?? '0') === '1') {
@@ -279,6 +282,11 @@ class StoragePathResolver {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /** R-127 (#662): $path is $prefix or lies below it (a "/" boundary, so "/mnt/remotes2" is not under "/mnt/remotes"). */
+    private static function isUnder(string $path, string $prefix): bool {
+        return $path === $prefix || strncmp($path, $prefix . '/', strlen($prefix) + 1) === 0;
+    }
 
     /**
      * Normalizes a path: trim trailing slash, collapse double slashes.

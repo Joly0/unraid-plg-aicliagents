@@ -40,6 +40,32 @@ class CurlInstallSource implements AgentSource {
         return $moved;
     }
 
+    /**
+     * F13 (#620): a crashed install leaves <agent>/bin.prev-<pid> and home.prev-<pid>. Put one
+     * back when bin/ (or home/) is missing, else delete it. A folder whose pid still runs belongs
+     * to a running install and stays. Runs at the start of the next install of the agent.
+     *
+     * @param callable|null $alive fn(int $pid): bool — test seam
+     * @return array{restored: string[], deleted: string[]}
+     */
+    public static function sweepAside(string $agentDir, ?callable $alive = null): array {
+        $alive = $alive ?? static fn(int $pid): bool => $pid > 0 && file_exists('/proc/' . $pid);
+        $out = ['restored' => [], 'deleted' => []];
+        foreach (['bin', 'home'] as $name) {
+            foreach (glob("$agentDir/$name.prev-*", GLOB_ONLYDIR) ?: [] as $prev) {
+                if (preg_match('/\.prev-(\d+)$/', $prev, $m) !== 1 || $alive((int)$m[1])) continue;
+                if (!is_dir("$agentDir/$name") && @rename($prev, "$agentDir/$name")) {
+                    $out['restored'][] = basename($prev);
+                    LogService::log("CurlInstallSource: restored $agentDir/$name from the leftover " . basename($prev) . " of a crashed install.", LogService::LOG_WARN, "CurlInstallSource");
+                } else {
+                    self::rrmdir($prev);
+                    $out['deleted'][] = basename($prev);
+                }
+            }
+        }
+        return $out;
+    }
+
     /** #620: drop what a failed run wrote and put the moved-aside directories back. */
     private static function restoreAside(string $agentDir, array $aside): void {
         foreach ($aside as $name => $prev) {
@@ -192,6 +218,7 @@ class CurlInstallSource implements AgentSource {
         // script fails, the install may be running in the LIVE tree (staging
         // unavailable), and a deleted bin/ would leave the recorded version
         // with no program. A failed run puts them back; a good run drops them.
+        self::sweepAside($agentDir);   // F13: leftovers of a crashed run, before this run adds its own
         $aside = self::moveAside($agentDir);
         @mkdir("$agentDir/home", 0755, true);
         @mkdir("$agentDir/bin", 0755, true);

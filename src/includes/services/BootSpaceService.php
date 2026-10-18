@@ -179,10 +179,29 @@ class BootSpaceService
     }
 
     /**
+     * R-117 (#662): ids that are real homes even when the name fits a smoke-test pattern: the
+     * configured user and every Unraid user (/etc/passwd, uid 1000 and up). Seam: unraid_users.
+     * @return string[]
+     */
+    public static function protectedHomeIds(string $configUser, array $seams = []): array
+    {
+        $ids = [$configUser];
+        if (isset($seams['unraid_users'])) {
+            foreach ($seams['unraid_users'] as $u) $ids[] = (string)$u;
+        } else {
+            foreach (preg_split('/\R/', (string)@file_get_contents('/etc/passwd')) ?: [] as $line) {
+                $f = explode(':', $line);
+                if (count($f) >= 3 && $f[0] !== '' && (int)$f[2] >= 1000 && (int)$f[2] < 60000) $ids[] = $f[0];
+            }
+        }
+        return array_values(array_unique($ids));
+    }
+
+    /**
      * Where the data sits: the homes, and the left-over items.
      * @return array{layered:string[],plain:string[],unused_layers:string[]}
      */
-    public static function discoverHomes(string $persist, string $configUser): array
+    public static function discoverHomes(string $persist, string $configUser, array $protected = []): array
     {
         $layered = [];
         foreach (glob($persist . '/home_*.sqsh') ?: [] as $f) {
@@ -193,7 +212,7 @@ class BootSpaceService
         $plain = [];
         foreach (glob($persist . '/passthrough/homes/*', GLOB_ONLYDIR | GLOB_NOSORT) ?: [] as $d) {
             $id = basename($d);
-            if (self::isTestId($id) || $id[0] === '.') continue;
+            if ((self::isTestId($id) && !in_array($id, array_merge($protected, [$configUser]), true)) || $id[0] === '.') continue;
             $plain[$id] = true;
         }
         // The home of the configured user is always in use.
@@ -241,7 +260,8 @@ class BootSpaceService
         }
         foreach (glob($persist . '/passthrough/homes/*', GLOB_ONLYDIR | GLOB_NOSORT) ?: [] as $d) {
             $id = basename($d);
-            if (!self::isTestId($id)) continue;
+            // A name that fits a test pattern but is a real home (listed in 'plain') is never offered.
+            if (!self::isTestId($id) || in_array($id, $homes['plain'], true)) continue;
             $items[] = ['key' => 'testhome:' . $id, 'label' => 'Test home ' . $id, 'bytes' => $du($d), 'path' => $d];
         }
         return $items;
@@ -296,7 +316,7 @@ class BootSpaceService
         if ($configUser === '') $configUser = 'root';
 
         $disk = $seams['disk'] ?? self::diskInfo($persist);
-        $homes = self::discoverHomes($persist, $configUser);
+        $homes = self::discoverHomes($persist, $configUser, self::protectedHomeIds($configUser, $seams));
         $parts = [];
         $insideTotal = 0;   // bytes of the parts that lie inside the plugin folder
         $history = [];      // user => agentId => figures (the Move old sessions dialog)
@@ -717,7 +737,7 @@ class BootSpaceService
         if ($configUser === '') $configUser = 'root';
 
         // Re-check right before removal: find the item again with the live rules.
-        $homes = self::discoverHomes($persist, $configUser);
+        $homes = self::discoverHomes($persist, $configUser, self::protectedHomeIds($configUser, $seams));
         $live = self::leftOverItems($persist, $homes, static function () { return 0; }, $seams['retired_list'] ?? null);   // no du: the callable returns 0
         $item = null;
         foreach ($live as $it) { if ($it['key'] === $key) { $item = $it; break; } }

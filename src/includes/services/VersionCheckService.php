@@ -111,7 +111,7 @@ class VersionCheckService {
                     // #447: a heartbeat per agent, so a slow registry never reads as "stalled".
                     try { ActivityService::update(self::TRAY_OP_ID, ['step' => self::trayAgentStep($agent, (string)$id, $agentNo, $agentTotal), 'progress' => (int)floor(100 * ($agentNo - 1) / max(1, $agentTotal))]); } catch (\Throwable $e) {}
                 }
-                $pkg = $agent['npm_package'] ?? '';
+                $pkg = self::npmPackageOf($agent);
                 if (empty($pkg) || $id === 'terminal') continue;
                 $checkable++; $checkIds[] = (string)$id;
 
@@ -195,7 +195,7 @@ class VersionCheckService {
             // agents above; this second pass picks up the rest.
             foreach ($registry as $id => $agent) {
                 if ($id === 'terminal') continue;
-                if (!empty($agent['npm_package'])) continue;  // npm already handled above
+                if (self::npmPackageOf($agent) !== '') continue;  // npm already handled above
 
                 $source = \AICliAgents\Services\Sources\SourceResolver::resolve($agent);
                 if ($source === null || !method_exists($source, 'populateCache')) continue;
@@ -425,6 +425,19 @@ class VersionCheckService {
     public const TRAY_TITLE_RUNNING = 'Checking for agent updates';
     public const TRAY_TITLE_DONE    = 'Agent updates checked';
     public const TRAY_TITLE_FAILED  = 'Some agents could not be checked';
+
+    /**
+     * R-119 (#662): the npm package an agent is installed from, or '' when it is not an npm agent.
+     * Reads the source descriptor (type=npm, package) and falls back to the old npm_package field.
+     * Pure.
+     */
+    public static function npmPackageOf($agent): string
+    {
+        if (!is_array($agent)) return '';
+        $d = \AICliAgents\Services\Sources\SourceResolver::descriptor($agent);
+        if (!is_array($d) || ($d['type'] ?? '') !== 'npm') return '';
+        return trim((string)($d['package'] ?? ''));
+    }
 
     /** The grey line while the check runs: "Claude Code (3 of 14)". Pure. */
     public static function trayAgentStep($agent, string $id, int $no, int $total): string

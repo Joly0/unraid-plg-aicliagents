@@ -79,10 +79,20 @@ if [ -f "$DISKS_INI" ]; then
     # disks.ini section headers are ["cache"] / ["storage"] etc. (Unraid quotes the
     # name inside the brackets) so the gsub strips ALL of [, ], and " — leaving
     # bare names that match $MNT_NAME from /mnt/<name>/...
+    # R-124 (#662): a section is a further member of a pool (cache2 of cache) only when the
+    # same name without its trailing digit(s) is also a Cache section; a pool named pool1 stays pool1.
     POOL_NAMES=$(awk -F'=' '
         /^\[/ { section=$0; gsub(/[\[\]"]/, "", section) }
-        /^type=/ && $2 == "\"Cache\"" {
-            name=section; gsub(/[0-9]+$/, "", name); print name
+        /^type=/ && $2 == "\"Cache\"" { secs[++n]=section; known[section]=1 }
+        END {
+            for (i = 1; i <= n; i++) {
+                s = secs[i]; member = 0; t = s
+                while (t ~ /[0-9]$/) {
+                    t = substr(t, 1, length(t) - 1)
+                    if (t != "" && (t in known)) { member = 1; break }
+                }
+                if (!member) print s
+            }
         }
     ' "$DISKS_INI" | sort -u)
 

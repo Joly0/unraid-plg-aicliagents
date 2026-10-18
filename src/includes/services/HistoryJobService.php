@@ -165,7 +165,8 @@ class HistoryJobService
                 }
             }
         } catch (\Throwable $e) {
-            $res = ['op' => (string)$o['op'], 'status' => 'error', 'message' => 'The job stopped: ' . $e->getMessage(), 'skipped' => []];
+            LogService::log('Job ' . $jobId . ' stopped: ' . $e->getMessage(), LogService::LOG_ERROR, 'HistoryJob');
+            $res = ['op' => (string)$o['op'], 'status' => 'error', 'message' => 'The job stopped with an error. Details are in the Debug Console.', 'skipped' => []];
         }
         self::writeResult($jobId, $res);
         return $res['status'] === 'ok' ? 0 : 1;

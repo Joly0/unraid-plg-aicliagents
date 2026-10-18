@@ -90,12 +90,25 @@ class StorageMountService {
         foreach (preg_split('/\r?\n/', $mounts) ?: [] as $line) {
             $fields = preg_split('/\s+/', trim($line));
             if (!isset($fields[1])) continue;
-            $mountedAt = str_replace(
-                ['\\040', '\\011', '\\012', '\\134'],
-                [' ', "\t", "\n", '\\'],
-                $fields[1]
-            );
-            if ($mountedAt === $target) return true;
+            if (self::decodeMountField($fields[1]) === $target) return true;
+        }
+        return false;
+    }
+
+    /**
+     * R-128 (#662): /proc/mounts writes a space, a tab, a newline and a backslash in a field
+     * as the octal escapes \040, \011, \012 and \134. Decode them. Pure.
+     */
+    public static function decodeMountField(string $field): string {
+        return str_replace(['\\040', '\\011', '\\012', '\\134'], [' ', "\t", "\n", '\\'], $field);
+    }
+
+    /** R-128 (#662): is an overlay mounted at exactly $mnt in a /proc/mounts-style table? Pure. */
+    public static function overlayMountedAt(string $mounts, string $mnt): bool {
+        foreach (preg_split('/\r?\n/', $mounts) ?: [] as $line) {
+            $fields = preg_split('/\s+/', trim($line));
+            if (!isset($fields[2]) || $fields[0] !== 'overlay' || $fields[2] !== 'overlay') continue;
+            if (self::decodeMountField($fields[1]) === $mnt) return true;
         }
         return false;
     }
@@ -118,13 +131,28 @@ class StorageMountService {
      * stop hook closed them, and the pool could not be exported for 80+ minutes.
      * True when var.ini says fsState="Stopping", or when the stop hook wrote its
      * flag (the hook can run before emhttpd writes var.ini).
-     * $varIni and $flag are test seams; production reads the live files.
+     * R-129 (#662): an aborted array stop leaves the flag, and nothing removes it until the
+     * next array start. The flag counts for at most 3 hours, and not at all when var.ini says
+     * the array is Started and the flag is older than 2 minutes (the hook can run before
+     * emhttpd writes var.ini, so a young flag is still trusted).
+     * $varIni, $flag and $now are test seams; production reads the live files.
      */
-    public static function isArrayStopping(?string $varIni = null, ?string $flag = null): bool {
-        if (file_exists($flag ?? self::ARRAY_STOPPING_FLAG)) return true;
+    public static function isArrayStopping(?string $varIni = null, ?string $flag = null, ?int $now = null): bool {
         $ini = $varIni ?? (string)@file_get_contents('/var/local/emhttp/var.ini');
-        return (bool)preg_match('/^fsState="Stopping"/m', $ini);
+        if (preg_match('/^fsState="Stopping"/m', $ini)) return true;
+        $f = $flag ?? self::ARRAY_STOPPING_FLAG;
+        clearstatcache(true, $f);
+        if (!file_exists($f)) return false;
+        $age = ($now ?? time()) - (int)@filemtime($f);
+        if ($age > self::ARRAY_STOPPING_FLAG_MAX_AGE) return false;
+        if ($age > self::ARRAY_STOPPING_FLAG_GRACE && preg_match('/^fsState="Started"/m', $ini)) return false;
+        return true;
     }
+
+    /** R-129 (#662): the stop flag is ignored when it is older than this (seconds). */
+    const ARRAY_STOPPING_FLAG_MAX_AGE = 10800;
+    /** R-129 (#662): a flag older than this is stale when var.ini says the array is Started (seconds). */
+    const ARRAY_STOPPING_FLAG_GRACE = 120;
 
     /**
      * Forgejo #558: must a start of a workspace in $path wait for the array?
@@ -778,11 +806,10 @@ class StorageMountService {
         foreach (preg_split('/\r?\n/', $mounts) ?: [] as $line) {
             $fields = preg_split('/\s+/', trim($line));
             if (!isset($fields[3]) || $fields[2] !== 'overlay') continue;
-            $mountedAt = str_replace(['\\040', '\\011', '\\012', '\\134'], [' ', "\t", "\n", '\\'], $fields[1]);
-            if ($mountedAt !== $target) continue;
+            if (self::decodeMountField($fields[1]) !== $target) continue;
             $value = null;
             foreach (explode(',', $fields[3]) as $opt) {
-                if (strpos($opt, $option . '=') === 0) $value = substr($opt, strlen($option) + 1);
+                if (strpos($opt, $option . '=') === 0) $value = self::decodeMountField(substr($opt, strlen($option) + 1));
             }
             $found = ($value !== null && $value !== '') ? $value : null;
         }
@@ -818,7 +845,7 @@ class StorageMountService {
     public static function isHomeMountHealthy(string $user): bool {
         $mnt = rtrim(UtilityService::getWorkDir($user) . "/home", '/');
         $mounts = file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '';
-        if (preg_match("#^overlay\s+" . preg_quote($mnt, '#') . "\s+overlay\b#m", $mounts)) {
+        if (self::overlayMountedAt($mounts, $mnt)) {
             return true;
         }
         // #506: a home in plain folders (passthrough, #496) is a bind mount of
@@ -927,8 +954,9 @@ class StorageMountService {
             $path = $resolved;
         }
         $mounts = file_exists('/proc/mounts') ? file_get_contents('/proc/mounts') : '';
-        // D-324: Exact path match to prevent matching /agents when checking /agents/gh-copilot
-        return (preg_match("#\s" . preg_quote($path) . "\s#", $mounts) === 1);
+        // D-324: Exact path match to prevent matching /agents when checking /agents/gh-copilot.
+        // R-128 (#662): the table's octal escapes (\040 for a space) are decoded first.
+        return self::mountTableHasTarget((string)$mounts, $path);
     }
 
     /**

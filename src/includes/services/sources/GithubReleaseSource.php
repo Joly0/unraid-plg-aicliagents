@@ -47,7 +47,7 @@ class GithubReleaseSource implements AgentSource {
         $dlPath = $dlDir . '/' . basename($asset['name']);
 
         if (is_callable($progress)) $progress("Downloading " . $asset['name'] . "…", 35);
-        if (!$this->download($asset['browser_download_url'], $dlPath)) return false;
+        if (!$this->download($asset['browser_download_url'], $dlPath, (int)($asset['size'] ?? 0))) return false;
 
         if (is_callable($progress)) $progress("Extracting…", 55);
         $agentDir = AgentRegistry::agentInstallPath($agentId);
@@ -239,17 +239,28 @@ class GithubReleaseSource implements AgentSource {
         return null;
     }
 
-    private function download(string $url, string $dest): bool {
+    /** Test seam: a callable(string $cmd): ?string that stands in for shell_exec in download(). */
+    public static $shellSeam = null;
+
+    /**
+     * R-120 (#662): a file cut short by the curl time limit is not accepted. curl must end
+     * with exit code 0, and the size must match the size in the release data when it is known.
+     * A partial file is deleted.
+     */
+    private function download(string $url, string $dest, int $expectedSize = 0): bool {
         // WP #1083: validate the asset URL — comes from GitHub API response,
         // which today returns https URLs, but a compromised release could
         // theoretically embed a non-HTTPS browser_download_url.
         if (!UrlValidator::requireHttps($url, 'GithubReleaseSource::download')) {
             return false;
         }
-        $cmd = 'curl -fL -m 300 -o ' . escapeshellarg($dest) . ' ' . escapeshellarg($url) . ' 2>&1';
-        $out = @shell_exec($cmd);
-        if (!file_exists($dest) || filesize($dest) === 0) {
-            LogService::log("GithubReleaseSource::download failed: $out", LogService::LOG_ERROR, "GithubReleaseSource");
+        $cmd = 'curl -fL -m 300 -o ' . escapeshellarg($dest) . ' ' . escapeshellarg($url) . ' 2>&1; echo __RC=$?';
+        $out = (string)(self::$shellSeam !== null ? (self::$shellSeam)($cmd) : @shell_exec($cmd));
+        $rcOk = preg_match('/__RC=(\d+)\s*$/', $out, $m) === 1 && (int)$m[1] === 0;
+        $size = file_exists($dest) ? (int)filesize($dest) : 0;
+        if (!$rcOk || $size === 0 || ($expectedSize > 0 && $size !== $expectedSize)) {
+            LogService::log("GithubReleaseSource::download failed (size $size of $expectedSize): $out", LogService::LOG_ERROR, "GithubReleaseSource");
+            @unlink($dest);
             return false;
         }
         return true;

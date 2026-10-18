@@ -13,7 +13,9 @@ register_shutdown_function(function() use ($argv) {
         $msg = "FATAL EMERGENCY INSTALL ERROR for $agentId: {$error['message']} in {$error['file']} on line {$error['line']}";
         require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php';
         aicli_log($msg, AICLI_LOG_ERROR, "EmergencyInstallBG");
-        setInstallStatus("Fatal Error: Check logs", 0, $agentId, $msg);
+        // R-118 (#662): the PHP message and path stay in the log (aicli_log above).
+        // The tray gets one sentence.
+        setInstallStatus("Fatal Error: Check logs", 0, $agentId, "The emergency install stopped with an error. Details are in the Debug Console");
     }
 });
 
@@ -36,5 +38,5 @@ try {
     }
 } catch (\Throwable $e) {
     aicli_log("Emergency Install Job EXCEPTION for $agentId: " . $e->getMessage(), AICLI_LOG_ERROR);
-    setInstallStatus("Fatal Error: " . $e->getMessage(), 0, $agentId, $e->getTraceAsString());
+    setInstallStatus("Fatal Error: Check logs", 0, $agentId, "The emergency install stopped with an error. Details are in the Debug Console");
 }

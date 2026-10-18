@@ -219,69 +219,116 @@ class StorageMigrationService {
             $denylist = ['envs', 'persistence', 'pkg-cache', 'test-fixtures', 'includes', 'scripts', 'assets'];
             if (in_array($user, $denylist)) {
                 LogService::log("Artifact found: $name. Attempting data rescue...", LogService::LOG_INFO, "StorageMigrationService");
-                exec("mount -o loop,ro " . escapeshellarg($file) . " " . escapeshellarg($mnt) . " 2>/dev/null", $out, $res);
-                if ($res === 0) {
-                    // Rescue any .json env files back to the raw envs/ directory
-                    $rescueCount = 0;
-                    foreach (glob("$mnt/*.json") as $json) {
-                        $dest = $envPath . "/" . basename($json);
-                        if (!file_exists($dest)) {
-                            copy($json, $dest);
-                            $rescueCount++;
-                        }
-                    }
-                    if ($rescueCount > 0) LogService::log("Rescued $rescueCount file(s) from $name to $envPath", LogService::LOG_INFO, "StorageMigrationService");
-                    // #512: a real unmount only; a busy image is kept, not purged.
-                    if (!StorageMountService::unmountReal($mnt)) continue;
-                }
+                if (!self::rescueArtifactLayer($file, $mnt, $envPath)) continue;
                 LogService::log("Purging artifact: $name", LogService::LOG_INFO, "StorageMigrationService");
                 @unlink($file);
             }
         }
-        
+
         LogService::log("Legacy artifact purge complete.", LogService::LOG_INFO, "StorageMigrationService");
         return true;
     }
 
     /**
-     * Migrates home persistence storage.
+     * R-126 (#662): mount an artifact layer read-only, copy its .json env files out, and unmount.
+     * Returns true only when the layer may be deleted. A layer that cannot be mounted (so its data
+     * could not be looked at) and a busy mount are kept: the data is never thrown away unseen.
+     *
+     * Seams (tests): $mount fn(file, mnt): int exit code; $unmount fn(mnt): bool.
      */
-    public static function migratePersistence($newPath) {
+    public static function rescueArtifactLayer(string $file, string $mnt, string $envPath, ?callable $mount = null, ?callable $unmount = null): bool
+    {
+        $name = basename($file);
+        if ($mount !== null) {
+            $res = $mount($file, $mnt);
+        } else {
+            $out = []; $res = 1;
+            exec("mount -o loop,ro " . escapeshellarg($file) . " " . escapeshellarg($mnt) . " 2>/dev/null", $out, $res);
+        }
+        if ($res !== 0) {
+            LogService::log("Keeping artifact $name: it could not be mounted, so its data was not checked.", LogService::LOG_WARN, "StorageMigrationService");
+            return false;
+        }
+        // Rescue any .json env files back to the raw envs/ directory
+        $rescueCount = 0;
+        foreach (glob("$mnt/*.json") ?: [] as $json) {
+            $dest = $envPath . "/" . basename($json);
+            if (!file_exists($dest)) {
+                copy($json, $dest);
+                $rescueCount++;
+            }
+        }
+        if ($rescueCount > 0) LogService::log("Rescued $rescueCount file(s) from $name to $envPath", LogService::LOG_INFO, "StorageMigrationService");
+        // #512: a real unmount only; a busy image is kept, not purged.
+        $unmounted = $unmount !== null ? $unmount($mnt) : StorageMountService::unmountReal($mnt);
+        return (bool)$unmounted;
+    }
+
+    /** Run a command; returns its exit code. $seams['exec'] (fn(cmd): int) stands in for tests. */
+    private static function runCmd(string $cmd, array $seams): int
+    {
+        if (isset($seams['exec'])) return (int)($seams['exec'])($cmd);
+        $out = []; $rc = 1;
+        exec($cmd . ' 2>&1', $out, $rc);
+        return $rc;
+    }
+
+    /**
+     * Migrates home persistence storage.
+     * R-125 (#662): the new path is saved only when the copy ended with exit code 0.
+     * $seams (tests): mounted (bool), old (string), exec, save (fn(array): bool).
+     */
+    public static function migratePersistence($newPath, array $seams = []) {
         if (empty($newPath)) return false;
-        if (!StorageMountService::isBackingMountAvailable((string)$newPath)) {
+        if (!($seams['mounted'] ?? StorageMountService::isBackingMountAvailable((string)$newPath))) {
             LogService::log("Refusing home migration: target storage is not mounted: $newPath", LogService::LOG_WARN, "StorageMigrationService");
             return false;
         }
-        $oldPath = StoragePathResolver::homePersistPath('');
+        $oldPath = $seams['old'] ?? StoragePathResolver::homePersistPath('');
         if ($newPath === $oldPath) return true;
 
         LogService::log("Migrating home persistence from $oldPath to $newPath...", LogService::LOG_INFO, "StorageMigrationService");
         if (!is_dir($newPath)) @mkdir($newPath, 0755, true);
-        if (is_dir($oldPath)) exec("rsync -a " . escapeshellarg($oldPath . "/") . " " . escapeshellarg($newPath . "/"));
-        return ConfigService::saveConfig(['home_storage_path' => $newPath]);
+        if (is_dir($oldPath)) {
+            $rc = self::runCmd("rsync -a " . escapeshellarg($oldPath . "/") . " " . escapeshellarg($newPath . "/"), $seams);
+            if ($rc !== 0) {
+                LogService::log("Home migration stopped: rsync ended with exit code $rc. The path was not changed.", LogService::LOG_ERROR, "StorageMigrationService");
+                return false;
+            }
+        }
+        $save = $seams['save'] ?? static fn(array $c): bool => (bool)ConfigService::saveConfig($c);
+        return $save(['home_storage_path' => $newPath]);
     }
 
     /**
      * Migrates agent binary storage path.
+     * R-125 (#662): the new path is saved only when every layer file was moved.
+     * $seams (tests): mounted (bool), old (string), exec, save (fn(array): bool).
      */
-    public static function migrateAgentStorage($newPath) {
+    public static function migrateAgentStorage($newPath, array $seams = []) {
         if (empty($newPath)) return false;
-        if (!StorageMountService::isBackingMountAvailable((string)$newPath)) {
+        if (!($seams['mounted'] ?? StorageMountService::isBackingMountAvailable((string)$newPath))) {
             LogService::log("Refusing agent migration: target storage is not mounted: $newPath", LogService::LOG_WARN, "StorageMigrationService");
             return false;
         }
-        $config = ConfigService::getConfig();
-        $oldPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $oldPath = $seams['old'] ?? (ConfigService::getConfig()['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents');
         if ($newPath === $oldPath) return true;
 
         LogService::log("Migrating agent storage from $oldPath to $newPath...", LogService::LOG_INFO, "StorageMigrationService");
         if (!is_dir($newPath)) @mkdir($newPath, 0755, true);
-        
+
         // Move all SquashFS files to the new location
         if (is_dir($oldPath)) {
-            exec("mv " . escapeshellarg($oldPath) . "/*.sqsh " . escapeshellarg($newPath) . "/ 2>/dev/null");
+            foreach (glob(rtrim($oldPath, '/') . '/*.sqsh') ?: [] as $file) {
+                $rc = self::runCmd("mv -- " . escapeshellarg($file) . " " . escapeshellarg(rtrim($newPath, '/') . '/'), $seams);
+                if ($rc !== 0) {
+                    LogService::log("Agent migration stopped: could not move " . basename($file) . " (exit code $rc). The path was not changed.", LogService::LOG_ERROR, "StorageMigrationService");
+                    return false;
+                }
+            }
         }
-        
-        return ConfigService::saveConfig(['agent_storage_path' => $newPath]);
+
+        $save = $seams['save'] ?? static fn(array $c): bool => (bool)ConfigService::saveConfig($c);
+        return $save(['agent_storage_path' => $newPath]);
     }
 }

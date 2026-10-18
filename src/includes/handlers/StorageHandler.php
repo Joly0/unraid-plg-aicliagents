@@ -491,7 +491,8 @@ class StorageHandler {
         $status  = $result['ok'] ? 'ok' : 'error';
         $message = $result['ok']
             ? 'Restored ' . $result['restored'] . ' layer(s) from sibling directory.'
-            : 'Restore completed with errors: ' . implode('; ', $result['errors']);
+            : 'Restore completed with errors (' . (int)$result['restored'] . ' layer(s) restored, backup kept): '
+                . ($result['errors'] !== [] ? implode('; ', $result['errors']) : 'no layer was found to restore');
 
         return array_merge(['status' => $status, 'message' => $message], $result);
     }

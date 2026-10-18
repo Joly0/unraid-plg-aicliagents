@@ -788,9 +788,17 @@ _mc_classify() {
                     fi
                 done < <(awk -F'=' '
                     /^\[/ { section=$0; gsub(/[\[\]"]/, "", section) }
-                    /^type=/ && $2 == "\"Cache\"" {
-                        name=section; gsub(/[0-9]+$/, "", name); print name
-                    }' "$dini" | sort -u)
+                    /^type=/ && $2 == "\"Cache\"" { secs[++n]=section; known[section]=1 }
+                    END {
+                        for (i = 1; i <= n; i++) {
+                            s = secs[i]; member = 0; t = s
+                            while (t ~ /[0-9]$/) {
+                                t = substr(t, 1, length(t) - 1)
+                                if (t != "" && (t in known)) { member = 1; break }
+                            }
+                            if (!member) print s
+                        }
+                    }' "$dini" | sort -u)   # R-124 (#662): same rule as classify-path.sh
             fi
             ;;
     esac

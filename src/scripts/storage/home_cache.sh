@@ -56,6 +56,9 @@ home_cache_pool_of() {
     local p="${1:-}" name
     case "$p" in /mnt/*) : ;; *) return 0 ;; esac
     case "$p" in *..*) return 0 ;; esac
+    # R-123 (#662): a "." segment or an empty segment ("/mnt/./user", "/mnt//user") hides the
+    # share name from the check below.
+    case "$p" in */./*|*/.|*//*) return 0 ;; esac
     name="${p#/mnt/}"; name="${name%%/*}"
     case "$name" in
         ''|user|user0|disks|remotes|rootshare|addons|disk[0-9]*) return 0 ;;

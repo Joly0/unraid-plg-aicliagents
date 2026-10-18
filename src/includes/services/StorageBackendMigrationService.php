@@ -45,40 +45,84 @@ final class StorageBackendMigrationService
         ];
     }
 
-    public static function migrate(string $target, bool $acknowledgeWear = false, ?array $config = null): array
+    /** Lock file of the all-entity engine migration. Tests may override it. */
+    private static function lockPath(): string
+    {
+        $e = getenv('AICLI_BACKEND_MIGRATE_LOCK');
+        return ($e !== false && $e !== '') ? $e : '/tmp/unraid-aicliagents/.backend_migrate.lock';
+    }
+
+    /**
+     * R-122 (#662): one engine migration at a time (a non-blocking lock), and an all-or-nothing
+     * result. When an entity fails, the entities that were already converted are converted back,
+     * and the global mode is NOT saved, so the state is never a mix of both engines. When the
+     * rollback of an entity fails too, the message names it.
+     *
+     * $seams (tests): preflight (array), entities (array), evict (callable),
+     * convert (callable(type,id,mode,forceDirect): array),
+     * wrap (callable(from,to,work): object with ->ok and ->error), save (callable(mode): bool).
+     */
+    public static function migrate(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
-        $check = self::preflight($target, $config);
+        $check = $seams['preflight'] ?? self::preflight($target, $config);
         if (($check['status'] ?? '') !== 'ok') return $check;
         $target = (string)$check['target'];
         if (!empty($check['requires_acknowledgement']) && !$acknowledgeWear) {
             return ['status' => 'error', 'message' => 'Plain-directory mode on removable/USB storage requires an explicit wear acknowledgement.'];
         }
+        $save = $seams['save'] ?? static fn(string $mode): bool => (bool)ConfigService::saveConfig(['storage_backend_mode' => $mode], false);
         $from = StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering');
-        $entities = self::entities($config);
+        $entities = $seams['entities'] ?? self::entities($config);
         if ($from === $target && $entities === []) {
-            ConfigService::saveConfig(['storage_backend_mode' => $target], false);
+            $save($target);
             return ['status' => 'ok', 'message' => 'Storage-engine policy saved; there was no entity data to migrate.', 'migrated' => []];
         }
 
+        $lockFile = self::lockPath();
+        @mkdir(dirname($lockFile), 0755, true);
+        $lock = @fopen($lockFile, 'c');
+        if ($lock === false || !@flock($lock, LOCK_EX | LOCK_NB)) {
+            if (is_resource($lock)) fclose($lock);
+            return ['status' => 'error', 'message' => 'A storage-engine migration is already running. Wait for it to finish, then try again.', 'migrated' => []];
+        }
+        try {
+            return self::migrateLocked($from, $target, $entities, $seams, $save);
+        } finally {
+            @flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /** @param array<int,array{type:string,id:string}> $entities */
+    private static function migrateLocked(string $from, string $target, array $entities, array $seams, callable $save): array
+    {
+        $convert = $seams['convert'] ?? static fn(string $type, string $id, string $mode, bool $direct): array => FileStorage::migrateBackend($type, $id, $mode, $direct);
+        $wrap = $seams['wrap'] ?? static fn(string $f, string $t, callable $work) => FileStorage::migrateBackendPolicy($f, $t, $work);
         $migrated = [];
         $failure = null;
-        $result = FileStorage::migrateBackendPolicy($from, $target, function () use ($entities, $target, &$migrated, &$failure): bool {
+        $rollbackFailed = [];
+        $result = $wrap($from, $target, function () use ($entities, $target, $from, $seams, $convert, &$migrated, &$failure, &$rollbackFailed): bool {
             // No workspace may keep writing while the authority of its storage
             // engine is changing. The shell operation still refuses a busy mount.
-            if (class_exists(TerminalService::class) && method_exists(TerminalService::class, 'captureResumeForShutdown')) {
-                TerminalService::captureResumeForShutdown(null, 60);
+            if (isset($seams['evict'])) {
+                ($seams['evict'])();
+            } else {
+                if (class_exists(TerminalService::class) && method_exists(TerminalService::class, 'captureResumeForShutdown')) {
+                    TerminalService::captureResumeForShutdown(null, 60);
+                }
+                ProcessManager::evictAll();
             }
-            ProcessManager::evictAll();
             foreach ($entities as $entity) {
-                $r = FileStorage::migrateBackend(
-                    $entity['type'],
-                    $entity['id'],
-                    $target,
-                    $target === StorageBackendPolicyService::PASSTHROUGH
-                );
+                $r = $convert($entity['type'], $entity['id'], $target, $target === StorageBackendPolicyService::PASSTHROUGH);
                 if ((int)($r['exit'] ?? 1) !== 0) {
                     $failure = $entity['type'] . '/' . $entity['id'] . ': ' . (($r['reason'] ?? '') ?: 'storage conversion failed');
+                    // Convert the entities that already moved back, newest first.
+                    foreach (array_reverse($migrated) as $done) {
+                        [$t, $i] = explode('/', $done, 2);
+                        $b = $convert($t, $i, $from, $from === StorageBackendPolicyService::PASSTHROUGH);
+                        if ((int)($b['exit'] ?? 1) !== 0) $rollbackFailed[] = $done;
+                    }
                     return false;
                 }
                 $migrated[] = $entity['type'] . '/' . $entity['id'];
@@ -86,9 +130,15 @@ final class StorageBackendMigrationService
             return true;
         });
         if (!$result->ok) {
-            return ['status' => 'error', 'message' => $failure ?: ($result->error ?: 'Storage-engine migration failed.'), 'migrated' => $migrated];
+            $message = $failure ?: ($result->error ?: 'Storage-engine migration failed.');
+            if ($failure !== null) {
+                $message .= $rollbackFailed === []
+                    ? ' The entities that were already converted were converted back; the storage engine is unchanged.'
+                    : ' These entities could not be converted back and are still in the new engine: ' . implode(', ', $rollbackFailed) . '.';
+            }
+            return ['status' => 'error', 'message' => $message, 'migrated' => $rollbackFailed];
         }
-        if (!ConfigService::saveConfig(['storage_backend_mode' => $target], false)) {
+        if (!$save($target)) {
             return ['status' => 'error', 'message' => 'Storage data migrated, but the global policy could not be saved. Re-open Settings and retry.', 'migrated' => $migrated];
         }
         return ['status' => 'ok', 'message' => 'Migrated ' . count($migrated) . ' storage entities to ' . StorageBackendPolicyService::label($target) . '.', 'migrated' => $migrated];

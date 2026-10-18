@@ -68,6 +68,7 @@ class HomeCacheService
         if ($v === ''
             || preg_match('#^/mnt/[A-Za-z0-9._-]+(/[A-Za-z0-9._ +-]+)*$#', $v) !== 1
             || strpos($v, '..') !== false
+            || preg_match('#(^|/)\.(/|$)#', $v) === 1   // R-123 (#662): a "." segment hides "user" from the next check
             || preg_match('#^/mnt/(user|user0|disks|remotes|rootshare|addons|disk[0-9]+)(/|$)#', $v) === 1) {
             return $stored;
         }

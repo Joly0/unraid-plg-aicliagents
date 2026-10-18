@@ -42,9 +42,13 @@ class TarballSource implements AgentSource {
         $dlDir = self::DL_BASE . "/$agentId";
         @mkdir($dlDir, 0755, true);
         $dlPath = $dlDir . '/' . basename(parse_url($url, PHP_URL_PATH) ?: 'tarball.bin');
-        $dl = 'curl -fL -m 300 -o ' . escapeshellarg($dlPath) . ' ' . escapeshellarg($url) . ' 2>&1';
-        @shell_exec($dl);
-        if (!file_exists($dlPath) || filesize($dlPath) === 0) {
+        // R-120 (#662): curl must end with exit code 0. A download cut short by the 300 s limit
+        // leaves a partial file and exit code 28 (or 18); it is deleted, never extracted.
+        $dl = 'curl -fL -m 300 -o ' . escapeshellarg($dlPath) . ' ' . escapeshellarg($url) . ' 2>&1; echo __RC=$?';
+        $dlOut = (string)@shell_exec($dl);
+        $dlOk = preg_match('/__RC=(\d+)\s*$/', $dlOut, $dm) === 1 && (int)$dm[1] === 0;
+        if (!$dlOk || !file_exists($dlPath) || filesize($dlPath) === 0) {
+            @unlink($dlPath);
             LogService::log("TarballSource: download failed for $agentId from $url", LogService::LOG_ERROR, "TarballSource");
             return false;
         }

@@ -145,6 +145,8 @@ if ($backupDest !== '') {
         \AICliAgents\Services\LifecycleLogService::log(
             \AICliAgents\Services\LifecycleLogService::LEVEL_ERROR, 'installer',
             'agent_install_aborted_backup_failed', ['agent' => $agentId, 'error' => $bmsg]);
+        // R-121 (#662): the current version is intact; reopen the sessions that were closed.
+        \AICliAgents\Services\UpgradeRelaunchService::reopenAfterFailedInstall($agentId);
         exit(1);
     }
     aicli_log("Pre-upgrade backup OK for $agentId → " . ($backup['dir'] ?? '?'), AICLI_LOG_INFO);
@@ -158,6 +160,8 @@ try {
     if (isset($result['status']) && $result['status'] === 'error') {
         aicli_log("Background Install Job FAILED for $agentId: " . ($result['message'] ?? $result['error'] ?? 'Unknown Error'), AICLI_LOG_ERROR);
         \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_ERROR, 'installer', 'agent_install_failed', ['agent' => $agentId, 'version' => $targetVersion ?? 'latest', 'error' => $result['message'] ?? $result['error'] ?? 'Unknown Error']);
+        // R-121 (#662): sessions closed for this upgrade must not stay closed.
+        \AICliAgents\Services\UpgradeRelaunchService::reopenAfterFailedInstall($agentId);
     } else {
         aicli_log("Background Install Job Complete for: $agentId", AICLI_LOG_INFO);
         \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer', 'agent_installed', ['agent' => $agentId, 'version' => $targetVersion ?? 'latest']);
@@ -309,6 +313,8 @@ try {
     // The tray gets one sentence and no trace, no class name and no path.
     \AICliAgents\Services\LogService::log("Install of $agentId stopped with an exception: " . $e->getTraceAsString(), \AICliAgents\Services\LogService::LOG_ERROR, "InstallBG");
     setInstallStatus("Fatal Error: " . $e->getMessage(), 0, $agentId, "The installer stopped with an error. Details are in the Debug Console");
+    // R-121 (#662): sessions closed for this upgrade must not stay closed.
+    try { \AICliAgents\Services\UpgradeRelaunchService::reopenAfterFailedInstall($agentId); } catch (\Throwable $e2) { /* the tray already shows the failure */ }
 }
 
 // #150: release the global install lock so any queued install can start promptly

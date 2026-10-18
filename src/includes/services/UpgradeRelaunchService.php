@@ -846,6 +846,28 @@ class UpgradeRelaunchService
     }
 
     /**
+     * R-121 (#662): the install failed after the sessions were closed for it. Reopen exactly those
+     * sessions (the old version is still installed) and remove the closed-set manifest, so the
+     * person does not have to open each workspace by hand and the manifest stops acting as an
+     * install barrier. No manifest means no sessions were closed: nothing to do.
+     *
+     * @param callable|null $relaunch fn(string $agentId): array — test seam; defaults to relaunchClosedSet
+     * @return array{had_manifest: bool, relaunched: int, skipped: int, failed: int}
+     */
+    public static function reopenAfterFailedInstall(string $agentId, ?callable $relaunch = null): array
+    {
+        if (empty(self::readManifest($agentId)['closed'] ?? [])) {
+            self::deleteManifest($agentId);
+            return ['had_manifest' => false, 'relaunched' => 0, 'skipped' => 0, 'failed' => 0];
+        }
+        $r = $relaunch !== null ? $relaunch($agentId) : self::relaunchClosedSet($agentId);
+        LogService::log("Install of $agentId failed: reopened the closed sessions (relaunched=" . (int)($r['relaunched'] ?? 0)
+            . " skipped=" . (int)($r['skipped'] ?? 0) . " failed=" . (int)($r['failed'] ?? 0) . ")", LogService::LOG_WARN, "UpgradeRelaunchService");
+        return ['had_manifest' => true, 'relaunched' => (int)($r['relaunched'] ?? 0),
+                'skipped' => (int)($r['skipped'] ?? 0), 'failed' => (int)($r['failed'] ?? 0)];
+    }
+
+    /**
      * Relaunch exactly the sessions closed for $agentId's upgrade, guaranteeing
      * each closed entry ends as a LIVE session.
      *

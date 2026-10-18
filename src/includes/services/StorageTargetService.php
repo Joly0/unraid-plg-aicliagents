@@ -661,25 +661,48 @@ class StorageTargetService {
     /**
      * Pool names from disks.ini — the PHP port of the proven classify-path.sh /
      * detect_backend.sh awk: sections are ["cache"] / ["cache2"], a pool member
-     * has type="Cache", and the pool name is the section with trailing digits
-     * stripped. AICLI_DISKS_INI overrides the path (same hook as the bash side).
+     * has type="Cache", and a further member (cache2) joins the pool of the section
+     * it extends (R-124, #662: only the disk-number suffix is stripped, so a pool
+     * called pool1 stays pool1). AICLI_DISKS_INI overrides the path (same hook as the bash side).
      * @return array<int,string> sorted unique pool names
      */
     public static function poolNames(): array {
         $ini = getenv('AICLI_DISKS_INI') ?: '/var/local/emhttp/disks.ini';
         if (!is_file($ini)) return [];
-        $pools = []; $section = '';
+        $cacheSections = []; $section = '';
         foreach ((array)@file($ini, FILE_IGNORE_NEW_LINES) as $line) {
             if ($line !== '' && $line[0] === '[') {
                 $section = str_replace(['[', ']', '"'], '', $line);
                 continue;
             }
             if (strpos($line, 'type=') === 0 && trim(substr($line, 5)) === '"Cache"') {
-                $name = preg_replace('/[0-9]+$/', '', $section);
-                if ($name !== '') $pools[$name] = true;
+                if ($section !== '') $cacheSections[] = $section;
             }
         }
-        $names = array_keys($pools);
+        return self::poolNamesFromSections($cacheSections);
+    }
+
+    /**
+     * R-124 (#662): the pool names of a list of type="Cache" section names. A section is a
+     * further member of a pool (cache2 of cache) only when the same name without its trailing
+     * digit(s) is also a Cache section. A pool whose own name ends in a digit (pool1) stays a pool.
+     * The same rule is in classify-path.sh and detect_backend.sh. Pure.
+     * @param array<int,string> $cacheSections
+     * @return array<int,string> sorted unique pool names
+     */
+    public static function poolNamesFromSections(array $cacheSections): array {
+        $known = array_flip($cacheSections);
+        $pools = [];
+        foreach ($cacheSections as $s) {
+            $member = false;
+            $t = $s;
+            while ($t !== '' && ctype_digit(substr($t, -1))) {
+                $t = substr($t, 0, -1);
+                if ($t !== '' && isset($known[$t])) { $member = true; break; }
+            }
+            if (!$member) $pools[$s] = true;
+        }
+        $names = array_map('strval', array_keys($pools));
         sort($names);
         return $names;
     }

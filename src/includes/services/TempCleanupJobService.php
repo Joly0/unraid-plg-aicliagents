@@ -109,7 +109,8 @@ class TempCleanupJobService
             ]);
             return 0;
         } catch (\Throwable $e) {
-            self::writeResult($jobId, ['status' => 'error', 'message' => 'The job stopped: ' . $e->getMessage()]);
+            LogService::log('Job ' . $jobId . ' stopped: ' . $e->getMessage(), LogService::LOG_ERROR, 'TempCleanupJob');
+            self::writeResult($jobId, ['status' => 'error', 'message' => 'The job stopped with an error. Details are in the Debug Console.']);
             return 1;
         }
     }
