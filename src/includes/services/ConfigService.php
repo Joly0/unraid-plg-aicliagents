@@ -891,6 +891,21 @@ class ConfigService {
         return self::mergeRelayManagedWorkspaces($workspaces);
     }
 
+    /** True only when the server still lists this workspace as an active row. */
+    public static function hasWorkspace(string $sessionId): bool {
+        if ($sessionId === '') return false;
+        try {
+            $sessions = self::getWorkspaces()['sessions'] ?? [];
+            if (!is_array($sessions)) return false;
+            foreach ($sessions as $session) {
+                if (is_array($session) && (string)($session['id'] ?? '') === $sessionId) return true;
+            }
+        } catch (\Throwable $e) {
+            // A broken registry must fail closed: a browser-held id is not authority.
+        }
+        return false;
+    }
+
     /**
      * Relay topic actors are server-managed workspaces.  The browser drawer is
      * a view of the registry, not its authority: an actor must remain available
