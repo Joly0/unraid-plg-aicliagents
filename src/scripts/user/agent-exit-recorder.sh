@@ -16,10 +16,12 @@ aicli_dynamic_record_agent_exit() {
     perf_log run.exit "rc=$_rc"
     if [ "$_rc" -ne 0 ]; then _aicli_capture_crash "$_attempt" "$_rc"; fi
     # WORKSPACE_LIFECYCLE_EVENTS.md: tell every open tab the agent process
-    # inside this session just ended. $BRIDGE_SCRIPT and $ID are set by the
-    # sourcing wrapper (aicli-shell.sh) before this function is ever called.
+    # inside this session just ended. The run script exports $BRIDGE_SCRIPT and $ID (#583).
+    # The fallbacks use $PLUGIN_SRC and $AICLI_SESSION_ID, which it always exports,
+    # so an older run script of a running workspace still works.
     # Best-effort: a missing bridge (e.g. mid-uninstall) must never break the
     # relaunch loop this function runs inside.
+    local BRIDGE_SCRIPT="${BRIDGE_SCRIPT:-${PLUGIN_SRC:-}/scripts/log-bridge.php}" ID="${ID:-${AICLI_SESSION_ID:-}}"
     if [ -n "${BRIDGE_SCRIPT:-}" ] && [ -n "${ID:-}" ] && [ -f "$BRIDGE_SCRIPT" ]; then
         php "$BRIDGE_SCRIPT" workspace_exited "$ID" "$_rc" 2>/dev/null || true
         # HARD_STOP_RESILIENCE.md R4: separate call, so the exit event line above is unchanged.

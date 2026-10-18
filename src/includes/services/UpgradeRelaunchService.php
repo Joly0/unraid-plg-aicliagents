@@ -646,7 +646,7 @@ class UpgradeRelaunchService
         $closed = $m['closed'] ?? [];
         if (empty($closed) || !is_array($closed)) {
             self::deleteConvertManifest($agentId);
-            return ['relaunched' => 0, 'skipped' => 0, 'nudged' => 0];
+            return ['relaunched' => 0, 'skipped' => 0, 'nudged' => 0, 'failed' => 0];
         }
         if ($starter === null) {
             require_once __DIR__ . '/TerminalService.php';
@@ -674,12 +674,12 @@ class UpgradeRelaunchService
         if ($sleeper === null) {
             $sleeper = static function (int $seconds): void { sleep($seconds); };
         }
-        $relaunched = 0; $skipped = 0; $nudged = 0;
+        $relaunched = 0; $skipped = 0; $nudged = 0; $failed = [];
         foreach ($closed as $s) {
             $entry = is_array($s) ? $s : [];
             $entry['agentId'] = $agentId;
-            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper, $origin);
-            if ($r === 'relaunched') $relaunched++; else $skipped++;
+            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper, $origin, $sleeper);
+            if ($r === 'relaunched') $relaunched++; elseif ($r === 'failed') $failed[] = self::keepForRetry($entry); else $skipped++;
             if ($r === 'relaunched' && $nudger !== null && !empty($entry['working'])) {
                 $sid = (string)($entry['sessionId'] ?? '');
                 if ($sid !== '' && self::waitPaneReady($agentId, $sid, $paneReady, $sleeper)) {
@@ -688,8 +688,13 @@ class UpgradeRelaunchService
                 }
             }
         }
-        self::deleteConvertManifest($agentId);
-        return ['relaunched' => $relaunched, 'skipped' => $skipped, 'nudged' => $nudged];
+        $keep = self::withinRetryBudget($failed);
+        if ($keep === []) {
+            self::deleteConvertManifest($agentId);
+        } else {
+            self::writeConvertManifest($agentId, $keep);
+        }
+        return ['relaunched' => $relaunched, 'skipped' => $skipped, 'nudged' => $nudged, 'failed' => count($failed)];
     }
 
     // --- Per-USER home manifest (approach B) -----------------------------
@@ -834,13 +839,14 @@ class UpgradeRelaunchService
         ?callable $starter = null,
         ?callable $isRunning = null,
         ?callable $isHealthy = null,
-        ?callable $stopper = null
+        ?callable $stopper = null,
+        ?callable $sleeper = null
     ): array {
         $m = self::readManifest($agentId);
         $closed = $m['closed'] ?? [];
         if (empty($closed)) {
             self::deleteManifest($agentId);
-            return ['relaunched' => 0, 'skipped' => 0];
+            return ['relaunched' => 0, 'skipped' => 0, 'failed' => 0];
         }
 
         if ($starter === null) {
@@ -871,15 +877,22 @@ class UpgradeRelaunchService
 
         $relaunched = 0;
         $skipped    = 0;
+        $failed     = [];
         foreach ($closed as $s) {
             // Per-agent upgrade manifest: every entry uses the manifest-level agentId.
             $entry = is_array($s) ? $s : [];
             $entry['agentId'] = $agentId;
-            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper);
-            if ($r === 'relaunched') $relaunched++; else $skipped++;
+            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper, 'upgrade_relaunch', $sleeper);
+            if ($r === 'relaunched') $relaunched++; elseif ($r === 'failed') $failed[] = self::keepForRetry($entry); else $skipped++;
         }
-        self::deleteManifest($agentId);
-        return ['relaunched' => $relaunched, 'skipped' => $skipped];
+        // A refused start keeps its entry (#584): the manifest stays, so the next sweep retries it.
+        $keep = self::withinRetryBudget($failed);
+        if ($keep === []) {
+            self::deleteManifest($agentId);
+        } else {
+            self::writeManifest($agentId, $keep);
+        }
+        return ['relaunched' => $relaunched, 'skipped' => $skipped, 'failed' => count($failed)];
     }
 
     /**
@@ -903,7 +916,8 @@ class UpgradeRelaunchService
         callable $isRunning,
         callable $isHealthy,
         callable $stopper,
-        string $origin = 'upgrade_relaunch'
+        string $origin = 'upgrade_relaunch',
+        ?callable $sleeper = null
     ): string {
         $sid  = (string)($entry['sessionId']     ?? '');
         $path = (string)($entry['workspacePath'] ?? '');
@@ -924,7 +938,32 @@ class UpgradeRelaunchService
         $agentId = (string)($entry['agentId'] ?? '');
         $chatId  = !empty($entry['hadResume']) ? 'auto' : '';
         $starter($sid, $path, $chatId, $agentId, $origin);
-        return 'relaunched';
+        // startTerminal returns nothing and refuses silently (launch lock timeout, path not
+        // ready, array stopping, unknown agent). Count a start only when the session is up (#584).
+        $sleeper = $sleeper ?? static function (int $seconds): void { sleep($seconds); };
+        for ($i = 0; $i < self::START_PROBES; $i++) {
+            if ($isRunning($sid)) return 'relaunched';
+            if ($i < self::START_PROBES - 1) $sleeper(1);
+        }
+        return 'failed';
+    }
+
+    /** Probes of isRunning after a start, one second apart, before the start counts as refused. */
+    private const START_PROBES = 4;
+    /** After this many refused starts an entry is dropped, so a permanent refusal cannot block an upgrade for ever. */
+    private const MAX_START_ATTEMPTS = 5;
+
+    /** The entry to write back after a refused start, with its attempt count. */
+    private static function keepForRetry(array $entry): array
+    {
+        $entry['attempts'] = (int)($entry['attempts'] ?? 0) + 1;
+        return $entry;
+    }
+
+    /** The refused entries that still have retries left. */
+    private static function withinRetryBudget(array $failed): array
+    {
+        return array_values(array_filter($failed, static fn(array $e): bool => (int)($e['attempts'] ?? 0) < self::MAX_START_ATTEMPTS));
     }
 
     /**
@@ -967,7 +1006,7 @@ class UpgradeRelaunchService
         $closed = $m['closed'] ?? [];
         if (empty($closed)) {
             self::deleteHomeManifest($user);
-            return ['relaunched' => 0, 'skipped' => 0, 'nudged' => 0];
+            return ['relaunched' => 0, 'skipped' => 0, 'nudged' => 0, 'failed' => 0];
         }
 
         if ($starter === null) {
@@ -1002,10 +1041,11 @@ class UpgradeRelaunchService
         $relaunched = 0;
         $skipped    = 0;
         $nudged     = 0;
+        $failed     = [];
         foreach ($closed as $s) {
             $entry = is_array($s) ? $s : [];
-            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper, $origin);
-            if ($r === 'relaunched') $relaunched++; else $skipped++;
+            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper, $origin, $sleeper);
+            if ($r === 'relaunched') $relaunched++; elseif ($r === 'failed') $failed[] = self::keepForRetry($entry); else $skipped++;
 
             if ($r === 'relaunched' && $nudger !== null && !empty($entry['working'])) {
                 $agentId = (string)($entry['agentId']   ?? '');
@@ -1016,8 +1056,13 @@ class UpgradeRelaunchService
                 }
             }
         }
-        self::deleteHomeManifest($user);
-        return ['relaunched' => $relaunched, 'skipped' => $skipped, 'nudged' => $nudged];
+        $keep = self::withinRetryBudget($failed);
+        if ($keep === []) {
+            self::deleteHomeManifest($user);
+        } else {
+            self::writeHomeManifest($user, $keep);
+        }
+        return ['relaunched' => $relaunched, 'skipped' => $skipped, 'nudged' => $nudged, 'failed' => count($failed)];
     }
 
     /**

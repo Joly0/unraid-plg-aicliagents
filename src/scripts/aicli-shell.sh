@@ -530,6 +530,10 @@ PRIOEOF
     # AGENT_TMP end
 
     printf 'export AICLI_SESSION_ID=%q\n' "$ID" >> "$RUN_SCRIPT"
+    # R-005 (#583): the exit recorder reads BRIDGE_SCRIPT and ID. The run script starts under a
+    # fresh tmux server, so plain variables of this wrapper do not reach it. Export them.
+    printf 'export BRIDGE_SCRIPT=%q\n' "$BRIDGE_SCRIPT" >> "$RUN_SCRIPT"
+    printf 'export ID=%q\n' "$ID" >> "$RUN_SCRIPT"
     # Relay's MCP child is launched by the agent from this generated script,
     # not from the original ttyd command. Preserve the launch-bound command
     # here so reconnects and shell relaunches retain the complete Relay context.
