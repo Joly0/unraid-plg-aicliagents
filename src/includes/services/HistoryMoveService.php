@@ -126,7 +126,7 @@ class HistoryMoveService
     public static function destinationShapeOk(string $dest): bool
     {
         $d = rtrim(trim($dest), '/');
-        return $d !== '' && preg_match('#^/[A-Za-z0-9._ /+-]+$#', $d) === 1 && strpos($d, '..') === false;
+        return $d !== '' && preg_match('#^/[A-Za-z0-9._ /+-]+$#D', $d) === 1 && strpos($d, '..') === false;
     }
 
     /**
@@ -142,7 +142,7 @@ class HistoryMoveService
         $root = getenv('AICLI_MNT_ROOT');
         $root = ($root !== false && $root !== '') ? rtrim($root, '/') : '/mnt';
         if (strncmp($v, $root . '/', strlen($root) + 1) !== 0) return $stored;
-        if (preg_match('#^([A-Za-z0-9._-]+)(/|$)#', substr($v, strlen($root) + 1), $m) !== 1) return $stored;
+        if (preg_match('#^([A-Za-z0-9._-]+)(/|$)#D', substr($v, strlen($root) + 1), $m) !== 1) return $stored;
         if (in_array($m[1], ['user', 'user0', 'remotes', 'rootshare', 'addons'], true)) return $stored;
         return $v;
     }
@@ -365,26 +365,35 @@ class HistoryMoveService
         $copier = $opts['copy'] ?? [self::class, 'copyFile'];
         $done = 0;
         $count = count($todo);
-        foreach ($todo as $rel => $e) {
-            $stored = $base . '/' . $e['agent'] . '/' . $rel;
-            $home = rtrim($homeDir, '/') . '/' . $rel;
-            $why = self::restoreOne($stored, $home, $rel, $e, $log, $copier);
-            if ($why === null) {
-                $res['restored']++;
-                $res['bytes'] += (int)$e['size'];
-            } else {
-                $res['skipped'][] = ['file' => $rel, 'reason' => $why];
+        try {
+            foreach ($todo as $rel => $e) {
+                $stored = $base . '/' . $e['agent'] . '/' . $rel;
+                $home = rtrim($homeDir, '/') . '/' . $rel;
+                $why = self::restoreOne($stored, $home, $rel, $e, $log, $copier);
+                if ($why === null) {
+                    $res['restored']++;
+                    $res['bytes'] += (int)$e['size'];
+                } else {
+                    $res['skipped'][] = ['file' => $rel, 'reason' => $why];
+                }
+                $done++;
+                if ($done % self::LEDGER_FLUSH_EVERY === 0) self::flushLedger($base, false);
+                if (isset($opts['progress'])) {
+                    $opts['progress'](['phase' => 'restoring', 'done' => $done, 'total' => $count,
+                                       'bytes' => $res['bytes'], 'skipped' => count($res['skipped'])]);
+                }
             }
-            $done++;
-            if ($done % self::LEDGER_FLUSH_EVERY === 0) self::flushLedger($base, false);
-            if (isset($opts['progress'])) {
-                $opts['progress'](['phase' => 'restoring', 'done' => $done, 'total' => $count,
-                                   'bytes' => $res['bytes'], 'skipped' => count($res['skipped'])]);
-            }
+        } catch (\Throwable $ex) {
+            // #679: the files already brought back stay counted, so the result reports them.
+            // The stop is logged here; the caller gets the plain sentence and the totals.
+            LogService::log('Bring back stopped after ' . $res['restored'] . ' files: ' . $ex->getMessage(), LogService::LOG_ERROR, 'HistoryJob');
+            $res = self::fail($res, 'The job stopped with an error. Details are in the Debug Console.');
         }
         fclose($log);
         self::flushLedger($base, true);
-        $res['message'] = sprintf('Brought back %d files. Skipped %d.', $res['restored'], count($res['skipped']));
+        if ($res['status'] === 'ok') {
+            $res['message'] = sprintf('Brought back %d files. Skipped %d.', $res['restored'], count($res['skipped']));
+        }
         return $res;
     }
 

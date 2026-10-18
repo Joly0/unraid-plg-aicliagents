@@ -82,7 +82,7 @@ class ConvertOfferNotifyService
         $out = [];
         foreach ($users as $u) {
             $u = (string)$u;
-            if (preg_match('/^[A-Za-z0-9._-]+$/', $u) !== 1) continue;
+            if (preg_match('/^[A-Za-z0-9._-]+$/D', $u) !== 1) continue;
             if ($canConvert($u)) $out[] = $u;
         }
         return self::normalise($out);
@@ -142,7 +142,7 @@ class ConvertOfferNotifyService
         $out = [];
         foreach ($homes as $h) {
             $h = (string)$h;
-            if (preg_match('/^[A-Za-z0-9._-]+$/', $h) === 1) $out[$h] = true;
+            if (preg_match('/^[A-Za-z0-9._-]+$/D', $h) === 1) $out[$h] = true;
         }
         $out = array_map('strval', array_keys($out));
         sort($out, SORT_STRING);

@@ -761,7 +761,8 @@ class NotebookService {
             case 'addMedia': {
                 if ($type !== 'media') return 'addMedia works on a media artefact.';
                 $asset = (string)($op['asset'] ?? '');
-                if (!preg_match('#^assets/[^/\0]+$#', $asset) || strpos($asset, '..') !== false) return 'The asset must be a file inside assets/.';
+                // #677: a newline is not part of a file name here. The class excludes it, and D stops $ before a final newline.
+                if (!preg_match('#^assets/[^/\0\n]+$#D', $asset) || strpos($asset, '..') !== false) return 'The asset must be a file inside assets/.';
                 $kind = (string)($op['kind'] ?? 'file');
                 if (!in_array($kind, ['image', 'video', 'audio', 'pdf', 'file'], true)) $kind = 'file';
                 $data['items'][] = ['asset' => $asset, 'caption' => (string)($op['caption'] ?? ''), 'kind' => $kind];
@@ -1750,14 +1751,14 @@ class NotebookService {
                     $entry = (string)$zip->getNameIndex($i);
                     $data = $zip->getFromIndex($i);
                     if ($data === false || substr($entry, -1) === '/') continue;
-                    if (preg_match('#^(inbox|working|notes|archive)/([^/\0]+)$#', $entry, $m) && strpos($m[2], '..') === false) {
+                    if (preg_match('#^(inbox|working|notes|archive)/([^/\0\n]+)$#D', $entry, $m) && strpos($m[2], '..') === false) {
                         $ext = strtolower(pathinfo($m[2], PATHINFO_EXTENSION));
                         if (!in_array($ext, NotebookFormat::EXTENSIONS, true)) { $skipped[] = ['name' => $entry, 'reason' => 'unknown file type']; continue; }
                         $r = self::importOne($ctx, $m[1], $m[2], $ext, $data, $existing, $confirm, false);
                         if ($r === null) $imported++; else $skipped[] = ['name' => $entry, 'reason' => $r];
-                    } elseif (preg_match('#^\.comments/(a_[0-9a-f]{12})\.json$#', $entry, $m)) {
+                    } elseif (preg_match('#^\.comments/(a_[0-9a-f]{12})\.json$#D', $entry, $m)) {
                         $comments[$m[1]] = $data;
-                    } elseif (preg_match('#^assets/([^/\0]+)$#', $entry, $m) && strpos($m[1], '..') === false) {
+                    } elseif (preg_match('#^assets/([^/\0\n]+)$#D', $entry, $m) && strpos($m[1], '..') === false) {
                         $r = self::assetPut($ctx, $m[1], $data);
                         if (isset($r['error'])) $skipped[] = ['name' => $entry, 'reason' => $r['error']];
                     }

@@ -997,7 +997,7 @@ class StorageHandler {
         $snapshots = [];
         foreach (@glob("$base/*", GLOB_ONLYDIR) ?: [] as $dir) {
             $name = basename($dir);
-            if (!preg_match('/^\d{8}T\d{6}Z$/', $name)) continue; // skips 'latest' + stray dirs
+            if (!preg_match('/^\d{8}T\d{6}Z$/D', $name)) continue; // skips 'latest' + stray dirs
             $manifest = self::readBackupManifest("$dir/backup.json");
             $snapshots[] = [
                 'path'  => $dir,
@@ -1190,7 +1190,7 @@ class StorageHandler {
         $snapshots = [];
         foreach (@glob("$base/*", GLOB_ONLYDIR) ?: [] as $dir) {
             $name = basename($dir);
-            if (!preg_match('/^\d{8}T\d{6}Z$/', $name)) continue; // skips 'latest' + stray dirs
+            if (!preg_match('/^\d{8}T\d{6}Z$/D', $name)) continue; // skips 'latest' + stray dirs
             $manifest = self::readBackupManifest("$dir/backup.json");
             if ($manifest === null) continue;
             $snapshots[] = self::snapshotRowFromManifest($dir, $manifest);

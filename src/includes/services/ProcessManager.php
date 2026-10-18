@@ -289,7 +289,7 @@ class ProcessManager {
      * digest.
      */
     public static function bridgeFingerprint(string $generation): string {
-        if (preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $generation) !== 1) return '';
+        if (preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/D', $generation) !== 1) return '';
         if (isset(self::$bridgeFingerprintCache[$generation])) return self::$bridgeFingerprintCache[$generation];
         $root = (self::$generationsRoot ?? self::PLUGIN_ROOT . '/.generations') . '/' . $generation . '/src';
         if (!is_file($root . '/scripts/aicli-shell.sh')) return '';
