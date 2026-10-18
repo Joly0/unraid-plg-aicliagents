@@ -56,14 +56,14 @@ class SshHandler {
         $pluginCfg = \AICliAgents\Services\ConfigService::getConfig();
         $sshUser = $pluginCfg['user'] ?? 'root';
         if (empty($sshUser)) $sshUser = 'root';
-        if (!file_exists($cfg)) return ['enabled' => false, 'client_has_key' => false, 'user' => $sshUser];
+        // Server-scoped, not browser-scoped: if ANY key is registered on this Unraid box, every
+        // browser shows the SSH launch button. It does not depend on ident.cfg being readable.
+        $clientHasKey = !empty(SshKeyService::listKeys());
+        if (!file_exists($cfg)) return ['enabled' => false, 'client_has_key' => $clientHasKey, 'user' => $sshUser];
         $content = (string)@file_get_contents($cfg);
         $enabled = (bool)preg_match('/^USE_SSH\s*=\s*"?yes"?/mi', $content);
-        // Server-scoped, not browser-scoped: if ANY key is registered on this
-        // Unraid box, every browser shows the SSH launch button. The OS-level
-        // private key is what actually gates the connection — the cookie-based
+        // The OS-level private key is what actually gates the connection — the cookie-based
         // per-browser check was solving a fake problem.
-        $clientHasKey = !empty(SshKeyService::listKeys());
         return ['enabled' => $enabled, 'client_has_key' => $clientHasKey, 'user' => $sshUser];
     }
 }
