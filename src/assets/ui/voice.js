@@ -87,6 +87,11 @@
     // or error event) must not hold the queue for ever. A playing clip reports `timeupdate`
     // several times a second; this long without one ends it as heard.
     var AUDIO_STALL_MS = 30000;
+    // #672: a voice_transcribe POST that never answers must not hold the ordered
+    // piece queue, or the 'transcribing' state, for ever. The server's own call
+    // to the engine is capped at 30 s (VOICE_INPUT.md R2); this is that bound
+    // plus one round trip, so a wedged request ends like an engine failure.
+    var TRANSCRIBE_TIMEOUT_MS = 45000;
     // VOICE_SWITCHES.md: the confirmation sentence when voice is turned on. The
     // server picks the same fixed text for purpose=switch (VoiceHandler).
     var VOICE_CONFIRM_TEXT = 'Voice enabled.';
@@ -1167,19 +1172,33 @@
                     '&seconds=' + encodeURIComponent(String(pieceSeconds)) +
                     '&workspaceId=' + encodeURIComponent(inputOpts.workspaceId || '') +
                     '&csrf_token=' + encodeURIComponent(inputCsrf());
+                var settled = false;
+                var timer = null;
+                var finish = function (text, error, engineFailure) {
+                    if (settled) return;
+                    settled = true;
+                    if (timer) { clearTimeout(timer); timer = null; }
+                    onDone(text, error, engineFailure);
+                };
+                var controller = typeof AbortController === 'function' ? new AbortController() : null;
+                timer = setTimeout(function () {
+                    if (controller) { try { controller.abort(); } catch (e) { /* noop */ } }
+                    finish('', 'The transcription server did not answer.', true);
+                }, TRANSCRIBE_TIMEOUT_MS);
                 fetch(inputAjaxUrl('voice_transcribe'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: body
+                    body: body,
+                    signal: controller ? controller.signal : undefined
                 }).then(function (r) { return r.json(); }).then(function (data) {
                     if (data && data.status === 'ok') {
-                        onDone(String(data.text || '').replace(/^\s+|\s+$/g, ''), null);
+                        finish(String(data.text || '').replace(/^\s+|\s+$/g, ''), null);
                     } else {
                         // `engine` (set by voice_transcribe) marks a failure of the engine itself, not a refusal.
-                        onDone('', (data && data.message) || 'The transcription server did not answer.', !!(data && data.engine));
+                        finish('', (data && data.message) || 'The transcription server did not answer.', !!(data && data.engine));
                     }
                 }).catch(function () {
-                    onDone('', 'The transcription server did not answer.', true);
+                    finish('', 'The transcription server did not answer.', true);
                 });
             };
             reader.onerror = function () { onDone('', 'The transcription server did not answer.'); };
