@@ -1425,7 +1425,7 @@ class AgentRelayService {
         $file=self::path("requests/$id.json");
         // R-057 (#635): read, check and write under one lock, so a cancel that lands
         // in between is seen here and cannot be overwritten.
-        return self::locked('requests', function () use ($file,$actor,$state,$note): array {
+        return self::locked('requests', function () use ($file,$actor,$state,$note,$id): array {
             $r=self::readJson($file,[]);
             // #664 R-145: no session id, or no such request, must not "succeed" and
             // leave a junk request file that only holds a state.
