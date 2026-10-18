@@ -545,6 +545,7 @@ class NotebookService {
                 // #664 R-149: the vault is written before the card file. Every refusal after a
                 // vault write clears what was written, so no orphan secret is left for a card
                 // that does not exist.
+                /** @var list<string> $vaulted Secret fields written before a later refusal. */
                 $vaulted = [];
                 $fail = function (array $err) use (&$vaulted, $ctx, $id): array {
                     foreach ($vaulted as $field) self::vaultClear($ctx, $id, $field);
