@@ -166,6 +166,7 @@
             api._es = es;
             es.onopen = function () {
                 setStatus('open');
+                reconnectDelay = 2000;
                 // One reconcile per (re)connect for EVERY consumer: it closes
                 // the gap a depth-1 buffer cannot replay.
                 noteReopen();
@@ -174,10 +175,28 @@
             es.onmessage = deliver;
             // EventSource reconnects by itself and resumes per channel with
             // Last-Event-ID; consumers tighten their fallback read meanwhile.
-            es.onerror = function () { setStatus('broken'); };
+            // #657: after one non-200 answer (a deploy, an nginx reload) the browser sets
+            // readyState CLOSED (2) and never retries. Then this script opens a new stream
+            // itself, after 2 s, 4 s, 8 s ... up to 30 s. A good open resets the delay.
+            es.onerror = function () {
+                setStatus('broken');
+                if (es.readyState === 2) scheduleReconnect(es);
+            };
         } catch (e) {
             setStatus('unsupported');
         }
+    }
+
+    var reconnectDelay = 2000;
+    var reconnectTimer = null;
+    function scheduleReconnect(deadEs) {
+        if (reconnectTimer !== null) return;
+        try { deadEs.close(); } catch (e) { /* already closed */ }
+        reconnectTimer = setTimeout(function () {
+            reconnectTimer = null;
+            connect();
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
     }
 
     // The replay buffer only serves consumers that mount in the first seconds.

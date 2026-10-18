@@ -722,6 +722,39 @@
         }
 
         /**
+         * Start a home job (convert_storage or consolidate_storage) from a tray button.
+         * #656: a refusal (status error) or an unreadable reply is shown in the row, and the
+         * next poll draws the button enabled again. Before, the reply was dropped.
+         */
+        _startHomeJob(action, user, opId) {
+            var self = this;
+            var fail = function (message) {
+                self._relayNote[opId] = message;
+                self._render();
+                self._poll();
+            };
+            fetch(ajaxUrl(action, { type: 'home', id: user }))
+                .then(function (r) {
+                    return Promise.resolve().then(function () { return r.json(); }).then(
+                        function (res) { return { res: res }; },
+                        function () { return { res: undefined }; }
+                    );
+                })
+                .then(function (box) {
+                    var res = box.res;
+                    if (!res || typeof res !== 'object') { fail('Could not reach the server.'); return; }
+                    if (res.status === 'error') {
+                        var m = typeof res.message === 'string' ? res.message.trim() : '';
+                        fail(m || 'The server did not accept this.');
+                        return;
+                    }
+                    delete self._relayNote[opId];
+                    self._poll();
+                })
+                .catch(function () { fail('Could not reach the server.'); });
+        }
+
+        /**
          * Take the operator to one workspace. The tray is mounted on the
          * AICliAgents tab AND on Settings, so this either drives the React app on
          * this page through its own hash route, or navigates to that tab carrying
@@ -922,10 +955,7 @@
                         }, function () {
                             el.disabled = true;
                             el.textContent = 'Starting…';
-                            fetch(ajaxUrl('consolidate_storage', { type: 'home', id: user }))
-                                .then(function (r) { return r.json(); })
-                                .then(function () { self._poll(); })
-                                .catch(function () { self._poll(); });
+                            self._startHomeJob('consolidate_storage', user, opId);
                         });
                         return;
                     }
@@ -947,10 +977,7 @@
                         }, function () {
                             el.disabled = true;
                             el.textContent = 'Starting…';
-                            fetch(ajaxUrl('convert_storage', { type: 'home', id: cUser }))
-                                .then(function (r) { return r.json(); })
-                                .then(function () { self._poll(); })
-                                .catch(function () { self._poll(); });
+                            self._startHomeJob('convert_storage', cUser, opId);
                         });
                         return;
                     }
