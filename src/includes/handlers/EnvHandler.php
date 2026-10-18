@@ -130,6 +130,7 @@ class EnvHandler {
         $current = SecretService::getAgentSecrets();
         // Secret key shape matches the existing vault: UPPER_SNAKE.
         $clean = [];
+        $emptied = [];
         $rejected = [];
         foreach ($payload as $k => $v) {
             $k = (string)$k; $v = (string)$v;
@@ -147,7 +148,9 @@ class EnvHandler {
                 if (isset($current[$k]) && (string)$current[$k] !== '') $clean[$k] = (string)$current[$k];
                 continue;
             }
-            if ($v === '') continue; // empty → don't persist (deleting a value = clearing the row)
+            // An empty value clears the stored value (#669). Without this a schema key,
+            // which is never free-form, could not be cleared by this save at all.
+            if ($v === '') { $emptied[] = $k; continue; }
             $clean[$k] = EnvService::sanitiseValue($v);
         }
         if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
@@ -158,11 +161,12 @@ class EnvHandler {
         $schemaKeys   = self::collectAllSchemaSecretKeys();
 
         // Drop existing free-form keys (about to be replaced wholesale by the POST);
-        // keep everything else (schema-managed keys, and — conservatively — any
-        // pre-feature key that's in neither the schema nor the free-form sidecar).
+        // drop a key the POST sent empty (cleared); keep everything else (schema-managed
+        // keys, and — conservatively — any pre-feature key that's in neither the schema
+        // nor the free-form sidecar).
         $next = [];
         foreach ($current as $k => $v) {
-            if (!in_array($k, $freeformKeys, true)) $next[$k] = $v;
+            if (!in_array($k, $freeformKeys, true) && !in_array($k, $emptied, true)) $next[$k] = $v;
         }
         foreach ($clean as $k => $v) {
             $next[$k] = $v;

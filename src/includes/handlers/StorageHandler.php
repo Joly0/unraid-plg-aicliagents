@@ -658,6 +658,10 @@ class StorageHandler {
      * that is not a plain user id.
      */
     public static function homeActionUser(): string {
+        foreach (['user', 'id', 'type'] as $key) {
+            $raw = $_REQUEST[$key] ?? '';
+            if ($raw !== '' && (!is_string($raw) || preg_match('/[\x00-\x1F\x7F]/', $raw))) return '';
+        }
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '') $user = trim((string)($_REQUEST['id'] ?? ''));
         if ($user === '') {

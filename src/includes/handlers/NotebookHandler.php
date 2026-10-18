@@ -275,6 +275,10 @@ class NotebookHandler
         $bytes = base64_decode((string)($_REQUEST['data'] ?? ''), true);
         if ($bytes === false || $bytes === '') return self::error('The file data is missing or is not valid base64.');
         $name = self::str('name');
+        if ($aid !== '') {
+            $existing = NotebookService::get($ctx, $aid);
+            if (isset($existing['error'])) return self::reply($existing);
+        }
         $put = NotebookService::assetPut($ctx, $name, $bytes);
         if (isset($put['error'])) return self::reply($put);
         if ($aid !== '') {

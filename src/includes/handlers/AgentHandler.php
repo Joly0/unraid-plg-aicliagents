@@ -12,6 +12,13 @@ namespace AICliAgents\Handlers;
 
 class AgentHandler {
 
+    /** Test seam for the raw install-status file directory. */
+    public static ?string $installStatusDirOverride = null;
+    /** Test seam for blocker enumeration in a raw install-status response. */
+    public static ?\Closure $externalBinaryHoldersProbe = null;
+    /** Test seam: called instead of starting the background version check (get_version_cache). */
+    public static ?\Closure $versionCheckSpawnProbe = null;
+
     /** Time limit override for long-running actions (seconds). */
     private static $TIME_LIMITS = [
         'install_agent'        => 900,
@@ -460,7 +467,9 @@ class AgentHandler {
                 static fn($s): string => (string)$s['id'],
                 \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId)
             )));
-            $externalHolders = self::externalBinaryHolders($agentId, $ourSids);
+            // The probe seam lets a unit test stand in for the /proc scan (#669).
+            $holdersProbe = self::$externalBinaryHoldersProbe;
+            $externalHolders = $holdersProbe !== null ? $holdersProbe($agentId, $ourSids) : self::externalBinaryHolders($agentId, $ourSids);
             if (!empty($externalHolders)) {
                 $n = count($externalHolders);
                 $name = \AICliAgents\Services\AgentRegistry::getDefaultAgents()[$agentId]['name'] ?? $agentId;
@@ -902,9 +911,10 @@ class AgentHandler {
             echo json_encode(['status' => 'error', 'message' => 'invalid agentId']);
             return;
         }
+        $statusDir = self::$installStatusDirOverride ?? '/tmp/unraid-aicliagents';
         $file = empty($agentId)
-            ? "/tmp/unraid-aicliagents/install-status"
-            : "/tmp/unraid-aicliagents/install-status-{$agentId}";
+            ? "$statusDir/install-status"
+            : "$statusDir/install-status-{$agentId}";
         header('Content-Type: application/json');
         // $agentId is restricted to [a-z0-9-] above, so no path-traversal surface
         // remains. File content is author-written JSON.
@@ -917,7 +927,8 @@ class AgentHandler {
             // refreshable instead of an indefinite unexplained 99%.
             $status = $agentId !== '' ? json_decode($raw, true) : null;
             if (is_array($status) && (string)($status['phase'] ?? '') === 'awaiting_activation') {
-                $holders = self::externalBinaryHolders($agentId, []);
+                $probe = self::$externalBinaryHoldersProbe;
+                $holders = $probe !== null ? $probe($agentId, []) : self::externalBinaryHolders($agentId, []);
                 $status['holders'] = $holders;
                 $status['blockers'] = $holders === []
                     ? 'No process is running the old version now; activation runs on the next supervisor pass.'
@@ -998,7 +1009,13 @@ class AgentHandler {
             }
         }
         if ($needsCheck && !$checking) {
-            aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/version-check-bg.php");
+            // The spawn seam lets a unit test see the request without starting a background check (#669).
+            $spawn = self::$versionCheckSpawnProbe;
+            if ($spawn !== null) {
+                $spawn();
+            } else {
+                aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/version-check-bg.php");
+            }
             $checking = true;
         }
 
