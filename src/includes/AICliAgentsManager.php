@@ -8,15 +8,6 @@
  * </module_context>
  */
 
-// Bug #1043: route every tmux command this plugin shells out to (capture-pane,
-// send-keys, kill-session, ...) at a plugin-private socket directory instead of
-// the shared /tmp/tmux-<uid>, which other processes can leave with permissions
-// tmux rejects. Child processes the plugin spawns inherit this env var.
-// SecretPaths has no side effects, so it loads first here: the tmux folder is under the state root,
-// which a test sandbox redirects (AICLI_STATE_ROOT).
-require_once __DIR__ . '/services/SecretPaths.php';
-putenv('TMUX_TMPDIR=' . \AICliAgents\Services\SecretPaths::stateRoot() . '/tmux');
-
 // Forgejo #367 (docs/specs/RUNNING_AGENT_SAFE_UPDATES.md, 2026-09-29): pin this
 // process to ONE plugin generation. PHP gives __DIR__ as the real generation
 // path, so AICLI_GEN_SRC names the generation this file came from. Load every
@@ -26,6 +17,15 @@ putenv('TMUX_TMPDIR=' . \AICliAgents\Services\SecretPaths::stateRoot() . '/tmux'
 // redeclare class". An entry point that is not inside a generation (the root
 // AICliAjax.php and the .page files) defines the constant first.
 defined('AICLI_GEN_SRC') || define('AICLI_GEN_SRC', dirname(__DIR__));
+
+// Bug #1043: route every tmux command this plugin shells out to (capture-pane,
+// send-keys, kill-session, ...) at a plugin-private socket directory instead of
+// the shared /tmp/tmux-<uid>, which other processes can leave with permissions
+// tmux rejects. Child processes the plugin spawns inherit this env var.
+// SecretPaths has no side effects, so it loads first here: the tmux folder is under the state root,
+// which a test sandbox redirects (AICLI_STATE_ROOT).
+require_once __DIR__ . '/services/SecretPaths.php';
+putenv('TMUX_TMPDIR=' . \AICliAgents\Services\SecretPaths::stateRoot() . '/tmux');
 
 // 1. Include Atomic Services
 require_once __DIR__ . '/services/LogService.php';
