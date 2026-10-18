@@ -12,6 +12,11 @@ namespace AICliAgents\Services;
 
 class ValidationService {
 
+    /** Raw media reads cannot send a form token. Every other browser action needs one. */
+    public static function isCsrfExemptRead($action): bool {
+        return is_string($action) && in_array($action, ['voice_clip', 'notebook_asset'], true);
+    }
+
     /**
      * R-176: AJAX actions that change storage or history. They are accepted as POST only, so the
      * CSRF token travels in the request body and never appears in a URL, a proxy log or the

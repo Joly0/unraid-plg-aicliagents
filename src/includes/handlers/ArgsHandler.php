@@ -29,13 +29,13 @@ class ArgsHandler {
         $agentId = ValidationService::validateId($_GET['agentId'] ?? '');
         if (!$agentId) return ['status' => 'error', 'message' => 'Missing or invalid agentId'];
 
-        $args   = trim($_REQUEST['args'] ?? '');
+        $args   = $_REQUEST['args'] ?? '';
         $errors = ArgsService::validateArgs($args);
         if ($errors) {
             return ['status' => 'error', 'message' => 'Rejected chars: ' . implode(', ', $errors)];
         }
 
-        $ok = ArgsService::saveAgentArgs($agentId, $args);
+        $ok = ArgsService::saveAgentArgs($agentId, trim($args));
         return $ok ? ['status' => 'ok'] : ['status' => 'error', 'message' => 'Write failed'];
     }
 
@@ -52,13 +52,13 @@ class ArgsHandler {
         if (!$agentId) return ['status' => 'error', 'message' => 'Missing or invalid agentId'];
         if (empty($path)) return ['status' => 'error', 'message' => 'Missing path'];
 
-        $args   = trim($_REQUEST['args'] ?? '');
+        $args   = $_REQUEST['args'] ?? '';
         $errors = ArgsService::validateArgs($args);
         if ($errors) {
             return ['status' => 'error', 'message' => 'Rejected chars: ' . implode(', ', $errors)];
         }
 
-        $ok = ArgsService::saveWorkspaceArgs($path, $agentId, $args);
+        $ok = ArgsService::saveWorkspaceArgs($path, $agentId, trim($args));
         return $ok ? ['status' => 'ok'] : ['status' => 'error', 'message' => 'Write failed'];
     }
 

@@ -142,17 +142,14 @@ if (isset($_GET['action'])) {
     // CSRF token (the tag has no way to add a header or a form field), and it is
     // safe to exempt: the resource id is unguessable and expiring, and the
     // session cookie still applies. A write action must NEVER appear here.
-    // A `const` cannot be declared inside an `if` block in PHP, so this uses
-    // `define()` instead — functionally the same fixed, explicit list.
     // notebook_asset: a media tag cannot send a token. Read only, path validated to the
     // notebook's assets/ folder (NotebookHandler::rawAsset, NotebookService::assetPath).
-    define('CSRF_EXEMPT_READS', ['voice_clip', 'notebook_asset']);
 
     // CSRF Validation — see PLUGIN_STANDARDS.md Lesson 3.
     // local_prepend.php (auto_prepend_file) validates CSRF from $_POST or X-CSRF-TOKEN
     // header for POST requests, then unsets them. We re-check here from $_REQUEST
     // (which retains the GET copy) so GET-based callers also pass.
-    if (!in_array($action, CSRF_EXEMPT_READS, true)) {
+    if (!ValidationService::isCsrfExemptRead($action)) {
         $var = @parse_ini_file("/var/local/emhttp/var.ini");
         $expected = trim((string)($var['csrf_token'] ?? ''));
         $received = $_REQUEST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';

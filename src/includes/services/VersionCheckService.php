@@ -387,7 +387,13 @@ class VersionCheckService {
     {
         $channel = AgentRegistry::normalizeChannel($channel);
         if ($channel === 'pinned') {
-            $target = ($pinned !== null && trim($pinned) !== '') ? trim($pinned) : null;
+            $target = ($pinned !== null && $pinned !== '') ? $pinned : null;
+            if ($target !== null && !AgentRegistry::isSafeVersionString($target)) {
+                return [
+                    'channel' => 'pinned', 'target' => null, 'resolved_tag' => null,
+                    'fallback' => false, 'error' => 'invalid_version',
+                ];
+            }
             return [
                 'channel' => 'pinned',
                 'target' => $target,
@@ -399,8 +405,14 @@ class VersionCheckService {
 
         $candidates = $channel === 'beta' ? ['beta', 'next'] : ['stable', 'latest'];
         foreach ($candidates as $index => $tag) {
-            $version = isset($distTags[$tag]) ? trim((string)$distTags[$tag]) : '';
+            $version = isset($distTags[$tag]) ? (string)$distTags[$tag] : '';
             if ($version === '') continue;
+            if (!AgentRegistry::isSafeVersionString($version)) {
+                return [
+                    'channel' => $channel, 'target' => null, 'resolved_tag' => null,
+                    'fallback' => false, 'error' => 'invalid_version',
+                ];
+            }
             return [
                 'channel' => $channel,
                 'target' => $version,
@@ -433,10 +445,17 @@ class VersionCheckService {
      */
     public static function resolveInstallTarget(string $agentId, ?string $explicitTarget): array
     {
-        if ($explicitTarget !== null && trim($explicitTarget) !== '') {
+        if ($explicitTarget !== null && $explicitTarget !== '') {
+            $target = $explicitTarget;
+            if (!AgentRegistry::isSafeVersionString($target)) {
+                return [
+                    'channel' => 'explicit', 'target' => null, 'resolved_tag' => null,
+                    'fallback' => false, 'error' => 'invalid_version', 'explicit' => true,
+                ];
+            }
             return [
                 'channel' => 'explicit',
-                'target' => trim($explicitTarget),
+                'target' => $target,
                 'resolved_tag' => null,
                 'fallback' => false,
                 'error' => null,

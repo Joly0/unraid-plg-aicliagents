@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -31,16 +33,29 @@ func runSelftest(busAddr string) {
 		stFail("connect session bus", err)
 	}
 	defer conn.Close()
+	if err := selftestRoundTrip(conn); err != nil {
+		stFail("round trip", err)
+	}
+	fmt.Println("SELFTEST PASS")
+}
 
+// selftestRoundTrip removes its own item and closes its session on every return.
+func selftestRoundTrip(conn *dbus.Conn) (result error) {
 	svcObj := conn.Object(busName, servicePath)
 
 	var output dbus.Variant
 	var session dbus.ObjectPath
 	if err := svcObj.Call(ifaceService+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&output, &session); err != nil {
-		stFail("OpenSession", err)
+		return fmt.Errorf("OpenSession: %w", err)
 	}
+	defer func() {
+		if err := conn.Object(busName, session).Call(ifaceSession+".Close", 0).Err; result == nil && err != nil {
+			result = fmt.Errorf("Close: %w", err)
+		}
+	}()
 
-	attrs := map[string]string{"service": "aicli-selftest", "account": "smoke"}
+	// A test must not replace an item from a prior or concurrent invocation.
+	attrs := map[string]string{"service": "aicli-selftest", "account": "smoke", "run": strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)}
 	want := []byte("aicli-secret-service-selftest-value")
 
 	collObj := conn.Object(busName, collPath)
@@ -50,26 +65,29 @@ func runSelftest(busAddr string) {
 	}
 	sec := secret{Session: session, Parameters: []byte{}, Value: want, ContentType: "text/plain"}
 	var itemP, promptP dbus.ObjectPath
-	if err := collObj.Call(ifaceCollection+".CreateItem", 0, createProps, sec, true).Store(&itemP, &promptP); err != nil {
-		stFail("CreateItem", err)
+	if err := collObj.Call(ifaceCollection+".CreateItem", 0, createProps, sec, false).Store(&itemP, &promptP); err != nil {
+		return fmt.Errorf("CreateItem: %w", err)
 	}
+	defer func() {
+		if err := conn.Object(busName, itemP).Call(ifaceItem+".Delete", 0).Err; result == nil && err != nil {
+			result = fmt.Errorf("Delete: %w", err)
+		}
+	}()
 
 	var unlocked, locked []dbus.ObjectPath
 	if err := svcObj.Call(ifaceService+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil {
-		stFail("SearchItems", err)
+		return fmt.Errorf("SearchItems: %w", err)
 	}
 	if len(unlocked) == 0 {
-		stFail("SearchItems", fmt.Errorf("created item not found"))
+		return fmt.Errorf("SearchItems: created item not found")
 	}
 
 	var got secret
 	if err := conn.Object(busName, unlocked[0]).Call(ifaceItem+".GetSecret", 0, session).Store(&got); err != nil {
-		stFail("GetSecret", err)
+		return fmt.Errorf("GetSecret: %w", err)
 	}
 	if !bytes.Equal(got.Value, want) {
-		stFail("GetSecret", fmt.Errorf("secret value mismatch"))
+		return fmt.Errorf("GetSecret: secret value mismatch")
 	}
-
-	fmt.Println("SELFTEST PASS")
-	os.Exit(0)
+	return nil
 }

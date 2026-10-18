@@ -82,6 +82,12 @@ class AgentSettingsSeedService {
         }
 
         $file = "$home/$rel";
+        $realHome = realpath($home);
+        $realFile = SecretPaths::resolveReal($file);
+        if ($realHome === false || strpos($realFile, rtrim($realHome, '/') . '/') !== 0) {
+            LogService::log("seedSettings: $agentId refused a target outside HOME for '$rel'", LogService::LOG_ERROR, 'AgentSettingsSeed');
+            return ['seeded' => [], 'skipped' => [], 'errors' => ['unsafe_path']];
+        }
         $raw  = is_file($file) ? (string)@file_get_contents($file) : '';
         if (trim($raw) !== '') {
             $data = json_decode($raw);

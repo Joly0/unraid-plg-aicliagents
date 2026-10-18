@@ -28,7 +28,7 @@ class Transpiler {
         ksort($servers);
         $blocks = [];
         foreach ($servers as $name => $def) {
-            $lines = ['[mcp_servers.' . $name . ']'];
+            $lines = ['[mcp_servers.' . self::tomlKey((string)$name) . ']'];
             // Per-server tool-approval default (Codex `default_tools_approval_mode`).
             // It is a TOP-LEVEL key of [mcp_servers.NAME], so it MUST be emitted before
             // the [mcp_servers.NAME.env] sub-table opens, or TOML would bind it to env.
@@ -44,7 +44,7 @@ class Transpiler {
                 if (!empty($env)) {
                     ksort($env);
                     $lines[] = '';
-                    $lines[] = '[mcp_servers.' . $name . '.env]';
+                    $lines[] = '[mcp_servers.' . self::tomlKey((string)$name) . '.env]';
                     foreach ($env as $k => $v) {
                         $lines[] = self::tomlKey((string)$k) . ' = ' . self::tomlString((string)$v);
                     }
@@ -56,7 +56,7 @@ class Transpiler {
                 if (!empty($headers)) {
                     ksort($headers);
                     $lines[] = '';
-                    $lines[] = '[mcp_servers.' . $name . '.' . $headersKey . ']';
+                    $lines[] = '[mcp_servers.' . self::tomlKey((string)$name) . '.' . $headersKey . ']';
                     foreach ($headers as $k => $v) {
                         $lines[] = self::tomlKey((string)$k) . ' = ' . self::tomlString((string)$v);
                     }
@@ -170,9 +170,12 @@ class Transpiler {
         return '"' . $out . '"';
     }
 
-    /** TOML key: bare if [A-Za-z0-9_-]+, else quoted. */
+    /**
+     * TOML key: bare if [A-Za-z0-9_-]+, else quoted. The D modifier matters: without it $
+     * also matches before a final line feed, and a key such as "MY_KEY\n" would be written bare.
+     */
     public static function tomlKey(string $k): string {
-        return preg_match('/^[A-Za-z0-9_-]+$/', $k) ? $k : self::tomlString($k);
+        return preg_match('/^[A-Za-z0-9_-]+$/D', $k) ? $k : self::tomlString($k);
     }
 
     // ---------- YAML quoting ----------
@@ -204,9 +207,11 @@ class Transpiler {
         }
         // Bare-safe: no YAML indicators, not number/bool/null-like, no leading/trailing
         // space. A leading '-' is fine for flag-style args ('--port') but a bare '-'
-        // or '- x' would read as a sequence indicator → quoted.
+        // or '- x' would read as a sequence indicator → quoted. A leading '@' is a
+        // reserved YAML indicator, so an npm scope such as '@scope/pkg' must be quoted
+        // (a bare one makes the whole Goose file unreadable); '@' inside a value is fine.
         $boolNullNum = '/^(?:true|false|yes|no|on|off|null|~|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|0x[0-9a-fA-F]+)$/i';
-        if (preg_match('#^[A-Za-z0-9_./@+-][A-Za-z0-9_./@+ -]*$#', $v)
+        if (preg_match('#^[A-Za-z0-9_./+-][A-Za-z0-9_./@+ -]*$#', $v)
             && !preg_match('/^-( |$)/', $v)
             && !preg_match($boolNullNum, $v)
             && $v === trim($v)
@@ -216,8 +221,13 @@ class Transpiler {
         return "'" . str_replace("'", "''", $v) . "'";
     }
 
-    /** YAML map key: bare if simple, else single-quoted. */
+    /**
+     * YAML map key: bare if simple (D modifier: no final line feed), double-quoted when it holds a
+     * control character (a single-quoted key cannot span lines), else single-quoted.
+     */
     public static function yamlKey(string $k): string {
-        return preg_match('/^[A-Za-z0-9_-]+$/', $k) ? $k : "'" . str_replace("'", "''", $k) . "'";
+        if (preg_match('/^[A-Za-z0-9_-]+$/D', $k)) return $k;
+        if (preg_match('/[\x00-\x1F\x7F]/', $k)) return self::yamlScalar($k);
+        return "'" . str_replace("'", "''", self::validUtf8($k)) . "'";
     }
 }

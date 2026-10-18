@@ -36,6 +36,14 @@ class HubProjector {
     private static $vendors = null;
 
     /**
+     * Test seam (#667): projectAll() calls it once, after every vendor file is reconciled and
+     * just before the ledger is saved. A test uses it to run a Settings save in that window.
+     * Always null in production.
+     * @var \Closure|null
+     */
+    public static ?\Closure $beforeLedgerSave = null;
+
+    /**
      * Agents with NO projectable MCP config surface. EVERY agent in AgentRegistry
      * must be EITHER a supportedVendors() entry OR listed here with a reason — so a
      * newly-added agent cannot silently lack hub MCP wiring. This is enforced by
@@ -712,6 +720,7 @@ class HubProjector {
             if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
 
+        if (self::$beforeLedgerSave !== null) (self::$beforeLedgerSave)();
         HubStore::saveLedger($state);
         LogService::log('hub project: agents=[' . implode(',', $targets) . '] changed=[' . implode(',', $writtenAgents) . '] drift=' . count($driftAll), LogService::LOG_INFO, 'HubProjector');
         if (!empty($writtenAgents)) {

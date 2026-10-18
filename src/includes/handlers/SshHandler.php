@@ -29,10 +29,10 @@ class SshHandler {
     }
 
     private static function addKey(): array {
-        $pubkey = trim($_POST['pubkey'] ?? '');
+        $pubkey = $_POST['pubkey'] ?? '';
         $label  = trim($_POST['label']  ?? '');
         $ua     = $_SERVER['HTTP_USER_AGENT'] ?? '';
-        if ($pubkey === '') return ['status' => 'error', 'message' => 'pubkey is required'];
+        if (!is_string($pubkey) || trim($pubkey) === '') return ['status' => 'error', 'message' => 'pubkey is required'];
         if ($label  === '') $label = 'Unnamed key';
         return SshKeyService::addKey($pubkey, $label, $ua);
     }

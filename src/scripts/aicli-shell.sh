@@ -779,6 +779,32 @@ esac
 # launches.
 trap : INT
 
+# #667: the launcher runs saved arguments with `bash -c`. The UI refuses an
+# unsafe argument at save time (ArgsService::validateArgs), but a file saved
+# before that check, restored from a backup or edited by hand is read here with
+# no check. Mirror the same rules so such a file cannot run a redirect or a
+# subshell: a character from ; | & ` $ or a line break anywhere, an unquoted
+# > < ( ) * or a comment, or an open quote. Returns 0 when the text is UNSAFE.
+_aicli_args_unsafe() {
+    local _a="$1" _q="" _i _c _len=${#1}
+    case "$_a" in
+        *';'*|*'|'*|*'&'*|*'`'*|*'$'*|*$'\n'*|*$'\r'*) return 0 ;;
+    esac
+    for ((_i = 0; _i < _len; _i++)); do
+        _c="${_a:_i:1}"
+        if [ "$_q" = "'" ]; then [ "$_c" = "'" ] && _q=""; continue; fi
+        if [ "$_c" = '\' ]; then _i=$((_i + 1)); continue; fi
+        if [ "$_q" = '"' ]; then [ "$_c" = '"' ] && _q=""; continue; fi
+        if [ "$_c" = "'" ] || [ "$_c" = '"' ]; then _q="$_c"; continue; fi
+        case "$_c" in
+            '>'|'<'|'('|')'|'*') return 0 ;;
+            '#') if [ "$_i" -eq 0 ] || [[ "${_a:_i-1:1}" =~ [[:space:]] ]]; then return 0; fi ;;
+        esac
+    done
+    [ -z "$_q" ] || return 0
+    return 1
+}
+
 # Pure helper: assemble the fresh-launch command from parts.
 # plugin_args is appended AFTER user effective_args so codex's last-`-c`-wins
 # makes the plugin sandbox_mode override any user workspace arg.
@@ -1074,6 +1100,17 @@ while true; do
         _refresh_args=$(php -r "\$d=json_decode(file_get_contents('$AICLI_ARGS_WS_FILE'),true);echo is_array(\$d)?(\$d['args']??''):'';" 2>/dev/null)
     elif [ -n "$AICLI_ARGS_AGENT_FILE" ] && [ -f "$AICLI_ARGS_AGENT_FILE" ]; then
         _refresh_args=$(php -r "\$d=json_decode(file_get_contents('$AICLI_ARGS_AGENT_FILE'),true);echo is_array(\$d)?(\$d['args']??''):'';" 2>/dev/null)
+    fi
+    # #667: refuse a saved argument that holds a shell operator (see
+    # _aicli_args_unsafe). Check the seeded value too: it came from a file
+    # that the UI check may never have seen.
+    if [ -n "$frozen_effective_args" ] && _aicli_args_unsafe "$frozen_effective_args"; then
+        log_aicli "WARN" 1 "Saved agent arguments hold a shell operator; launching with no arguments"
+        frozen_effective_args=""
+    fi
+    if [ -n "$_refresh_args" ] && _aicli_args_unsafe "$_refresh_args"; then
+        log_aicli "WARN" 1 "Saved agent arguments hold a shell operator; launching with no arguments"
+        _refresh_args=""
     fi
     if [ "$_refresh_args" != "$frozen_effective_args" ]; then
         log_aicli "INFO" 2 "Args changed since last launch: '$frozen_effective_args' -> '$_refresh_args' (applying on this relaunch)"

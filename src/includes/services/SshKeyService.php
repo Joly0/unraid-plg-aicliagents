@@ -113,10 +113,10 @@ class SshKeyService {
      * comment keeps only [A-Za-z0-9._@+-]; any other run of characters becomes "_".
      */
     public static function normalisePubkey(string $pubkey): ?string {
-        // A NUL anywhere is refused before trim(), which would strip a trailing one.
-        if (strpos($pubkey, "\0") !== false) return null;
+        // Refuse line breaks and NUL before trim(), which strips trailing CR/LF/NUL.
+        if (preg_match('/[\r\n\0]/', $pubkey)) return null;
         $pubkey = trim($pubkey);
-        if ($pubkey === '' || preg_match('/[\r\n\0]/', $pubkey)) return null;
+        if ($pubkey === '') return null;
         $parts = preg_split('/\s+/', $pubkey, 3);
         if (!is_array($parts) || count($parts) < 2) return null;
         [$type, $b64] = $parts;

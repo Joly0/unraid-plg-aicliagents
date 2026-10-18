@@ -26,7 +26,7 @@ class AgentRegistry {
      * TerminalHandler, AgentHandler. Not introducing a new convention — reusing
      * the one this codebase already settled on.
      */
-    private const AGENT_ID_RE = '/^[a-z0-9][a-z0-9-]{0,63}$/';
+    private const AGENT_ID_RE = '/^[a-z0-9][a-z0-9-]{0,63}$/D';
 
     /** Resolve the override once per operation so tests and live writes share the same path. */
     private static function versionsPath(): string {
@@ -1055,7 +1055,7 @@ class AgentRegistry {
      * "github:owner/repo", a URL, a path, a space or a shell character (#666 R-165).
      */
     public static function isSafeVersionString(string $v): bool {
-        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/', $v) === 1;
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/D', $v) === 1;
     }
 
     /**
@@ -1070,6 +1070,10 @@ class AgentRegistry {
         $accepted = [];
         foreach ($custom as $id => $def) {
             if (!is_array($def)) continue;
+            if (!is_string($id) || preg_match(self::AGENT_ID_RE, $id) !== 1) {
+                LogService::log('agents.json: ignored an entry with an invalid agent id', LogService::LOG_WARN, 'AgentRegistry');
+                continue;
+            }
             if (array_key_exists($id, $defaults)) {
                 LogService::log("agents.json: ignored the entry '$id' because it is a built-in agent id", LogService::LOG_WARN, "AgentRegistry");
                 continue;

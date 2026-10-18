@@ -29,10 +29,10 @@ use AICliAgents\Services\LogService;
 class HubStore {
 
     const SCHEMA = 1;
-    const NAME_RE = '/^[a-zA-Z0-9_-]{1,64}$/';
-    const ENV_KEY_RE = '/^[A-Za-z_][A-Za-z0-9_]{0,127}$/';
+    const NAME_RE = '/^[a-zA-Z0-9_-]{1,64}$/D';
+    const ENV_KEY_RE = '/^[A-Za-z_][A-Za-z0-9_]{0,127}$/D';
     /** HTTP header field-name (RFC 9110 token), capped at 128 chars. */
-    const HEADER_KEY_RE = "/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/";
+    const HEADER_KEY_RE = "/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/D";
     /** Headers the MCP client manages itself; a user value would break the transport. */
     const RESERVED_HEADERS = ['accept', 'content-length', 'content-type', 'host',
                               'mcp-protocol-version', 'mcp-session-id', 'last-event-id'];
@@ -53,6 +53,8 @@ class HubStore {
     const TREE_FILE_MAX_BYTES = 262144; // 256 KB
     /** Total size cap across the skills/ + commands/ trees (H-03). */
     const TREE_TOTAL_MAX_BYTES = 2097152; // 2 MB
+    /** Names already written by system skill projectors, not user-owned hub trees. */
+    private const RESERVED_SYSTEM_SKILLS = ['aicli-admin', 'aicli-artefacts', 'aicli-relay'];
     /** Max path depth of a file inside a skill (SKILL.md=1, scripts/run.sh=2, …). */
     const TREE_MAX_DEPTH = 3;
     /** One path segment of a skill file: no leading dot, no traversal, ≤64 chars. */
@@ -598,6 +600,10 @@ class HubStore {
     public static function saveSkillFile(string $skill, string $rel, string $content, array &$errors = []): bool {
         $errors = [];
         if (!preg_match(self::NAME_RE, $skill)) { $errors[] = 'invalid skill name (allowed: [a-zA-Z0-9_-]{1,64})'; return false; }
+        if (in_array(strtolower($skill), self::RESERVED_SYSTEM_SKILLS, true)) {
+            $errors[] = "skill name '$skill' is reserved for a system skill";
+            return false;
+        }
         if (!self::validateTreePath($rel, $errors)) return false;
         if (strlen($content) > self::TREE_FILE_MAX_BYTES) {
             $errors[] = 'file exceeds the ' . (self::TREE_FILE_MAX_BYTES / 1024) . ' KB per-file cap';

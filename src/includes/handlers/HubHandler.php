@@ -34,7 +34,22 @@ class HubHandler
      * A drift key as the projectors make it: an MCP name path, a tree file path, or an
      * OpenCode-Claude entry such as "instructions:~/.claude/rules/my rule.md" (#666 R-163).
      */
-    public const DRIFT_KEY_RE = '#^[A-Za-z0-9_.~][A-Za-z0-9_./:~ +@,=-]{0,200}$#';
+    public const DRIFT_KEY_RE = '#^[A-Za-z0-9_.~][A-Za-z0-9_./:~ +@,=-]{0,200}$#D';
+
+    /**
+     * An OpenCode-Claude entry names a file the user made under ~/.claude, so the file name can
+     * hold any printable character, such as "rule (1).md" or "Café.md" (#667). The key is only
+     * matched against the projector's entries. It never becomes a path, so only control
+     * characters are refused.
+     */
+    public const COMPAT_DRIFT_KEY_RE = '#^instructions:~/\.claude/[^\x00-\x1F\x7F]{1,400}$#uD';
+
+    /** True when the drift key is one the projectors can make and the resolve action may take. */
+    public static function driftKeyIsValid(string $key): bool
+    {
+        if (preg_match(self::DRIFT_KEY_RE, $key) === 1 && strpos($key, '..') === false) return true;
+        return preg_match(self::COMPAT_DRIFT_KEY_RE, $key) === 1;
+    }
 
     public static function handle($action, $id): ?array
     {
@@ -568,12 +583,12 @@ class HubHandler
         // The '#' must stay escaped: it is also the delimiter, so an unescaped one
         // closes the pattern early and preg_match returns false for *every* input,
         // which broke Adopt/Overwrite/Release for all agents, not just Relay keys.
-        if (!preg_match('#^~/[A-Za-z0-9_./\#-]{1,160}$#', $file) || strpos($file, '..') !== false) {
+        if (!preg_match('#^~/[A-Za-z0-9_./\#-]{1,160}$#D', $file) || strpos($file, '..') !== false) {
             return ['status' => 'error', 'message' => 'invalid file'];
         }
         // Tree keys (H-03) are relative file paths (e.g. 'my-skill/SKILL.md') —
         // slashes allowed, traversal rejected outright.
-        if (!preg_match(self::DRIFT_KEY_RE, $key) || strpos($key, '..') !== false) {
+        if (!self::driftKeyIsValid($key)) {
             return ['status' => 'error', 'message' => 'invalid key'];
         }
         return HubProjector::resolveDrift($file, $key, $mode);
