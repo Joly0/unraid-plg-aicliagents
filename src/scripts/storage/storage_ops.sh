@@ -1373,12 +1373,11 @@ manifest_set_backend "$TYPE" "$ID" "flash" || exit 1
 
 # Retain both old representations for recovery/audit. The new layer is the only
 # live authority; the archive is deliberately outside layer discovery.
-shopt -s nullglob
-for _old in "$PERSIST_PATH/${TYPE}_${ID}_"*.sqsh; do
+while IFS= read -r _old; do   # R-002 (#580): exact entity only
+    [ -n "$_old" ] || continue
     [ "$(basename "$_old")" = "$_BM_NEW_LAYER" ] && continue
     mv -f "$_old" "$_BM_ARCHIVE/" || exit 1
-done
-shopt -u nullglob
+done < <(layer_files_of "$PERSIST_PATH" "$TYPE" "$ID")
 _BM_PT_REAL="$(readlink -f "$_BM_PT" 2>/dev/null || true)"
 if [ -n "$_BM_PT_REAL" ] && [ "$_BM_PT_REAL" != "$_BM_PT" ] && [ -d "$_BM_PT_REAL" ]; then
     # A direct side-by-side entity's stable path is a symlink. Archive the
@@ -2831,9 +2830,7 @@ _consol_phase "writing"
 update_task_status "Baking consolidated volume..." 40 ""
 
 # Snapshot pre-bake layer list. nullglob ensures empty array when no layers present.
-shopt -s nullglob
-OLD_LAYERS=("$PERSIST_PATH/${TYPE}_${ID}_"*.sqsh)
-shopt -u nullglob
+mapfile -t OLD_LAYERS < <(layer_files_of "$PERSIST_PATH" "$TYPE" "$ID")   # R-002 (#580): exact entity only
 
 # Record a marker BEFORE bake. Any writes to UPPER_DIR after this marker
 # won't be included in the baked volume — if we wipe the upper afterwards,
@@ -3111,9 +3108,7 @@ fi
 # (before the unlocked mksquashfs)? If so, the consolidated layer just built is
 # already stale — it cannot contain that delta. Discard it (non-destructive —
 # nothing else has been touched yet) and defer. The bake always wins.
-shopt -s nullglob
-_CURRENT_LAYERS=("$PERSIST_PATH/${TYPE}_${ID}_"*.sqsh)
-shopt -u nullglob
+mapfile -t _CURRENT_LAYERS < <(layer_files_of "$PERSIST_PATH" "$TYPE" "$ID")   # R-002 (#580): exact entity only
 for _cur in "${_CURRENT_LAYERS[@]}"; do
     _cur_base="$(basename "$_cur")"
     [ "$_cur_base" = "$FINAL_NAME" ] && continue
@@ -3651,6 +3646,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     fi
 
     _GR_PT_DIR="$PERSIST_PATH/passthrough/${TYPE}s/$ID"
+    _GR_UPPER_KEEP="${UPPER_DIR}.convert-keep"
     _GR_STAGING_MARKER="$PERSIST_PATH/.graduate_staging_${TYPE}_${_GR_LOCK_ID}"
     _GR_VERIFIED_MARKER="$PERSIST_PATH/.graduate_verified_${TYPE}_${_GR_LOCK_ID}"
     _GR_AGENT_GEN=""
@@ -3832,6 +3828,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     fi
     for _gr_lm in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
         [ -d "$_gr_lm" ] || continue
+        layer_name_is_of "$TYPE" "$ID" "${_gr_lm##*/}" || continue   # R-002 (#580): not another entity's mount
         # #504: a real unmount only. A lazy one hides the mount but keeps the
         # squashfs and its loop alive while anything still uses it, so a moved
         # layer keeps its space on the boot disk. release_layer_loops below
@@ -3909,8 +3906,15 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
                 _gr_rollback; _gr_cleanup_meta; exit 1
             fi
         else
-            # A RAM writable layer: its content is in the copy; it is not kept.
-            rm -rf "$UPPER_DIR" 2>/dev/null || true
+            # A writable layer on another file system (RAM): its content is in
+            # the copy, but the copy is the only other holder until the switch is
+            # done. R-001 (#579): rename it aside on its own file system and
+            # delete it only after clear_intent. convert_rollback puts it back.
+            rm -rf "$_GR_UPPER_KEEP" 2>/dev/null || true
+            if ! mv -f "$UPPER_DIR" "$_GR_UPPER_KEEP" 2>>"$DEBUG_LOG"; then
+                error "Could not set the writable layer aside."
+                _gr_rollback; _gr_cleanup_meta; exit 1
+            fi
         fi
         mkdir -p "$UPPER_DIR" 2>/dev/null || true
     fi
@@ -3941,6 +3945,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     fi
     _itest_sigkill_window "graduate_after_manifest"
     clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
+    rm -rf "$_GR_UPPER_KEEP" 2>/dev/null || true
     rm -f "$_GR_STAGING_MARKER" "$_GR_VERIFIED_MARKER" 2>/dev/null || true
     if [ "$_GR_MODE" = "staged" ]; then
         rm -rf "$_GR_COPY" 2>/dev/null
@@ -4195,6 +4200,7 @@ if [ "$_GR_TD" -eq 0 ]; then
     # Lift this entity's now-orphaned layer loop mounts.
     for _gr_lm in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
         [ -d "$_gr_lm" ] || continue
+        layer_name_is_of "$TYPE" "$ID" "${_gr_lm##*/}" || continue   # R-002 (#580): not another entity's mount
         umount_or_keep "$_gr_lm" "layer mount" 3 || continue   # #512: never lazy; a kept mount keeps its dir
         rmdir "$_gr_lm" 2>/dev/null || true
     done

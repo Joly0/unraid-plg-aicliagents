@@ -287,6 +287,7 @@ _layer_next_seq() {
     shopt -s nullglob
     for f in "$persist"/"${type}_${id}_"*.sqsh; do
         [ -e "$f" ] || continue
+        layer_name_is_of "$type" "$id" "$f" || continue   # R-002: not bob_smith's layer
         s="$(_layer_parse_seq "$f")"
         [ "$s" -gt "$max" ] && max="$s"
     done
@@ -415,6 +416,7 @@ _layer_discover_sorted() {
     shopt -s nullglob
     for f in "$persist"/"${type}_${id}_"*.sqsh; do
         [ -e "$f" ] || continue
+        layer_name_is_of "$type" "$id" "$f" || continue   # R-002: not bob_smith's layer
         printf '%s\t%s\n' "$(_layer_sort_key "$f")" "$f"
     done | LC_ALL=C sort -r | cut -f2-
     shopt -u nullglob
@@ -1652,6 +1654,13 @@ convert_rollback_fits() {
 #       intent, and the next try moves the rest (each step can run again).
 convert_rollback() {
     local persist="${1%/}" pt="$2" retire="$3" upper="$4" f rc=0
+    # R-001 (#579): a writable layer on another file system (RAM) was set aside
+    # as <upper>.convert-keep. It is the only copy of the unsaved work, so it goes
+    # back FIRST, before anything can stop the rollback (a rename: no room needed).
+    if [ -n "$upper" ] && [ -d "$upper.convert-keep" ]; then
+        rm -rf "$upper" 2>/dev/null || true
+        mv -f "$upper.convert-keep" "$upper" || return 1
+    fi
     # Nothing moved yet: only the partial plain folder goes.
     [ -d "$retire" ] || { rm -rf "$pt" 2>/dev/null || true; return 0; }
     if ! convert_rollback_fits "$persist" "$retire" "$pt"; then

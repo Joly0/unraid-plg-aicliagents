@@ -852,6 +852,41 @@ class LayerManifestService {
     }
 
     /**
+     * R-002 (#580): is $filename a layer of EXACTLY this entity? A prefix test on
+     * "{type}_{id}_" is wrong: home "bob" would own the layers of home "bob_smith".
+     * The text after the prefix must be a whole layer-name tail, current or legacy.
+     * Mirrors layer_name_is_of() in src/scripts/storage/detect_backend.sh.
+     */
+    public static function isLayerOfEntity(string $filename, string $type, string $id): bool {
+        $name = basename($filename);
+        if ($type === '' || $id === '' || substr($name, -5) !== '.sqsh') {
+            return false;
+        }
+        $prefix = $type . '_' . $id . '_';
+        $name   = substr($name, 0, -5);
+        if (strncmp($name, $prefix, strlen($prefix)) !== 0) {
+            return false;
+        }
+        $rest = substr($name, strlen($prefix));
+        return preg_match('/^(?:(?:delta|consolidated)_\d{10}_\d{8}T\d{6}Z|(?:delta|consolidated)_\d{8}T\d{6}Z|delta_\d+|(?:v\d+_)?vol\d+)$/', $rest) === 1;
+    }
+
+    /**
+     * The layer files of exactly this entity in $dir (full paths, name order).
+     *
+     * @return array<int, string>
+     */
+    public static function layerFilesOfEntity(string $dir, string $type, string $id): array {
+        $out = [];
+        foreach ((@glob(rtrim($dir, '/') . "/{$type}_{$id}_*.sqsh") ?: []) as $f) {
+            if (self::isLayerOfEntity($f, $type, $id)) {
+                $out[] = $f;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * The manifest entries of one entity, from the layer files in $dir, oldest first.
      * A zero-byte file is not a layer and is left out. Nothing is changed on disk.
      *

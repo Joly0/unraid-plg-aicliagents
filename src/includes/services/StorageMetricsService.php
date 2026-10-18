@@ -130,8 +130,8 @@ class StorageMetricsService {
         // 2. Discover Homes from Home Storage Path
         $unraidUsers = UtilityService::getUnraidUsers();
         foreach ($unraidUsers as $user) {
-            $pattern = "$homePath/home_{$user}_*.sqsh";
-            $files = glob($pattern);
+            require_once __DIR__ . '/LayerManifestService.php';
+            $files = LayerManifestService::layerFilesOfEntity($homePath, 'home', (string)$user);   // R-002: exact entity
             if (count($files) > 0 || is_dir(UtilityService::getWorkDir($user))) {
                 $mnt = "/tmp/unraid-aicliagents/work/$user/home";
                 $homes[$user] = self::getEntityStats('home', $user, $homePath, $mnt);
@@ -413,7 +413,8 @@ class StorageMetricsService {
         // ("20260506T143022Z") sort correctly together via lex compare.
         $physicalSize = 0;
         $layerFiles = [];
-        foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $sqsh) {
+        require_once __DIR__ . '/LayerManifestService.php';
+        foreach (LayerManifestService::layerFilesOfEntity((string)$persistPath, (string)$type, (string)$id) as $sqsh) {   // R-002: exact entity
             $fsize = @filesize($sqsh);
             $physicalSize += $fsize;
             $bname = basename($sqsh);

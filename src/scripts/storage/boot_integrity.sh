@@ -17,6 +17,10 @@
 if [ -z "${PLUGIN_BASE:-}" ]; then
     source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" 2>/dev/null || true
 fi
+# R-002 (#580): the exact-entity layer matcher lives in detect_backend.sh.
+if ! declare -f layer_name_is_of >/dev/null 2>&1; then
+    source "$(dirname "${BASH_SOURCE[0]}")/detect_backend.sh" 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------
 # boot_integrity_classify <type> <id> <persist_path>
@@ -90,9 +94,8 @@ boot_integrity_classify() {
     local active_count=0
     local active_files=()
     if [ -d "$persist_path" ]; then
-        shopt -s nullglob
-        active_files=("$persist_path"/${type}_${id}_*.sqsh)
-        shopt -u nullglob
+        # R-002 (#580): exactly this entity's layers, not those of a longer id.
+        mapfile -t active_files < <(layer_files_of "$persist_path" "$type" "$id")
         active_count="${#active_files[@]}"
     fi
 
@@ -125,6 +128,7 @@ boot_integrity_classify() {
         for sd in "${sibling_dirs[@]}"; do
             for f in "$sd"/${type}_${id}_*.sqsh; do
                 [ -f "$f" ] || continue
+                layer_name_is_of "$type" "$id" "$f" || continue   # R-002 (#580)
                 sibling_count=$((sibling_count + 1))
                 [ -z "$sibling_sample" ] && sibling_sample="$f"
             done

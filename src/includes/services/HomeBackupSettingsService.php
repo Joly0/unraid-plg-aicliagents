@@ -78,8 +78,9 @@ class HomeBackupSettingsService {
             if ($configured === $user) return true;
             require_once __DIR__ . '/StoragePathResolver.php';
             if (is_dir(StoragePathResolver::homeMount($user))) return true;
-            $layers = @glob(StoragePathResolver::homePersistPath($user) . '/home_' . $user . '_*.sqsh');
-            return is_array($layers) && $layers !== [];
+            require_once __DIR__ . '/LayerManifestService.php';
+            // R-002 (#580): exact entity, not a name prefix (bob vs bob_smith).
+            return LayerManifestService::layerFilesOfEntity(StoragePathResolver::homePersistPath($user), 'home', $user) !== [];
         } catch (\Throwable $e) {
             return false;
         }

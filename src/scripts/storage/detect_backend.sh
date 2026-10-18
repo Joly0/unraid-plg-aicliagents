@@ -222,12 +222,48 @@ effective_backend_from_facts() {
     printf 'flash'
 }
 
+# layer_name_is_of <type> <id> <name> — R-002 (#580). 0 when <name> (with or
+# without the .sqsh suffix) is a layer of EXACTLY this entity. A prefix test
+# ("${type}_${id}_*") is not enough: home bob would own the layers of home
+# bob_smith. The text after "${type}_${id}_" must be a whole layer-name tail:
+#   (delta|consolidated)_<seq10>_<YYYYmmddTHHMMSSZ>   current
+#   (delta|consolidated)_<YYYYmmddTHHMMSSZ>           ISO, before the seq
+#   delta_<epoch>                                     legacy epoch
+#   v<n>_vol<m> or vol<m>                             legacy consolidated
+# These are the names the layer sort helpers in common.sh read. Pure: no file access.
+layer_name_is_of() {
+    local type="${1:-}" id="${2:-}" n="${3:-}" prefix rest
+    [ -n "$type" ] && [ -n "$id" ] && [ -n "$n" ] || return 1
+    n="${n##*/}"; n="${n%.sqsh}"
+    prefix="${type}_${id}_"
+    case "$n" in "$prefix"*) rest="${n#"$prefix"}" ;; *) return 1 ;; esac
+    [[ "$rest" =~ ^(delta|consolidated)_[0-9]{10}_[0-9]{8}T[0-9]{6}Z$ ]] && return 0
+    [[ "$rest" =~ ^(delta|consolidated)_[0-9]{8}T[0-9]{6}Z$ ]] && return 0
+    [[ "$rest" =~ ^delta_[0-9]+$ ]] && return 0
+    [[ "$rest" =~ ^(v[0-9]+_)?vol[0-9]+$ ]] && return 0
+    return 1
+}
+
+# layer_files_of <dir> <type> <id> — the layer files of exactly this entity in
+# <dir>, one path per line, in name order. Nothing found: no output.
+layer_files_of() {
+    local dir="${1:-}" type="${2:-}" id="${3:-}" f had=0
+    shopt -q nullglob && had=1
+    shopt -s nullglob
+    for f in "$dir"/"${type}_${id}_"*.sqsh; do
+        [ -e "$f" ] || continue
+        layer_name_is_of "$type" "$id" "$f" && printf '%s\n' "$f"
+    done
+    [ "$had" = 1 ] || shopt -u nullglob
+    return 0
+}
+
 # _entity_has_layers <persist> <type> <id> -> "1" if any .sqsh layer exists, else "0".
 _entity_has_layers() {
     local persist="$1" type="$2" id="$3" f
     shopt -s nullglob
     for f in "$persist"/"${type}_${id}_"*.sqsh; do
-        if [ -e "$f" ]; then shopt -u nullglob; printf '1'; return 0; fi
+        if [ -e "$f" ] && layer_name_is_of "$type" "$id" "$f"; then shopt -u nullglob; printf '1'; return 0; fi
     done
     shopt -u nullglob
     printf '0'

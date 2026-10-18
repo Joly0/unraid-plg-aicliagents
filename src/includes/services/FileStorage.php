@@ -959,7 +959,7 @@ final class FileStorage
         // Check if entity has any presence (manifest or .sqsh files on disk).
         require_once __DIR__ . '/LayerManifestService.php';
         $mentry     = LayerManifestService::getEntity($entity);
-        $sqshGlob   = glob("$persist/home_{$id}_*.sqsh") ?: [];
+        $sqshGlob   = LayerManifestService::layerFilesOfEntity($persist, 'home', $id);   // R-002: not bob_smith's layers
         if ($mentry === null && empty($sqshGlob)) {
             return ['ok' => false, 'reason' => 'entity_not_found',
                     'message' => "No storage entity found for home/$id"];

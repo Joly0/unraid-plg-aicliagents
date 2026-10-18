@@ -226,9 +226,9 @@ class StorageStateAuditService {
 
     /** Does an on-disk .sqsh exist for <type>_<id>_*? @param array<string,bool> $onDisk */
     private static function entityHasLayers(string $type, string $id, array $onDisk): bool {
-        $prefix = $type . '_' . $id . '_';
+        // R-002 (#580): exact entity, not a name prefix (bob vs bob_smith).
         foreach (array_keys($onDisk) as $fn) {
-            if (strncmp($fn, $prefix, strlen($prefix)) === 0) return true;
+            if (LayerManifestService::isLayerOfEntity((string)$fn, $type, $id)) return true;
         }
         return false;
     }

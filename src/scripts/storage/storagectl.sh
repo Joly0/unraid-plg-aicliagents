@@ -662,6 +662,7 @@ do_wipe() {
     local _wl
     for _wl in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
         [ -d "$_wl" ] || continue
+        layer_name_is_of "$TYPE" "$ID" "${_wl##*/}" || continue   # R-002 (#580): not another entity's mount
         umount_or_keep "$_wl" "layer mount" 3 || continue   # #512: never lazy; a kept mount keeps its dir
         rmdir "$_wl" 2>/dev/null || true
     done
@@ -671,7 +672,7 @@ do_wipe() {
     fi
     if [ "$WANT_LAYERS" -eq 1 ]; then
         shopt -s nullglob
-        local f; for f in "$PERSIST"/${TYPE}_${ID}_*.sqsh; do layer_retire_file "$f" || true; done   # #512: a held layer is parked, not hidden
+        local f; for f in "$PERSIST"/${TYPE}_${ID}_*.sqsh; do layer_name_is_of "$TYPE" "$ID" "$f" || continue; layer_retire_file "$f" || true; done   # R-002 (#580): exactly this entity   # #512: a held layer is parked, not hidden
         shopt -u nullglob
     fi
     if [ "$WANT_MANIFEST" -eq 1 ]; then
