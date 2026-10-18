@@ -37,7 +37,9 @@ class ConvertOfferNotifyService
         $prev  = $notified === null ? null : self::normalise($notified);
         $changed = $prev === null ? true : ($prev !== $homes);
         $n = count($homes);
-        $send = $changed && $n > 0;
+        // #629: announce only a home the marker has not seen. A set that only shrinks
+        // is recorded (below) but says nothing: the remaining home was announced before.
+        $send = $changed && $n > 0 && ($prev === null || array_diff($homes, $prev) !== []);
         return [
             'send'  => $send,
             // An empty set is recorded too (when it differs), so a home that becomes
@@ -91,7 +93,8 @@ class ConvertOfferNotifyService
      * notification, then write the marker. Never throws.
      *
      * @param list<string>|null $homes  the convertible homes (null = compute them)
-     * @param callable|null     $exec   runs the notify command line (test seam)
+     * @param callable|null     $exec   runs the notify command line and returns its exit code
+     *                                  (null counts as 0; test seam)
      * @return array{sent:bool,homes:list<string>}
      */
     public static function run(?array $homes = null, string $markerPath = self::MARKER_PATH,
@@ -108,10 +111,18 @@ class ConvertOfferNotifyService
                 }
                 $cmd = self::command($plan, $notifyScript);
                 if ($exec !== null) {
-                    $exec($cmd);
+                    $r = $exec($cmd);
+                    $rc = $r === null ? 0 : (int)$r;   // a seam that returns nothing means "ran"
                 } else {
+                    $o = [];
+                    $rc = 1;
                     // nosemgrep: php.lang.security.exec-use.exec-use
-                    @exec($cmd . ' 2>/dev/null');
+                    @exec($cmd . ' 2>/dev/null', $o, $rc);
+                }
+                if ($rc !== 0) {
+                    // #629: the notify daemon may not be ready at install time. Leave the
+                    // marker alone, so the next install or boot tries again.
+                    return ['sent' => false, 'homes' => $plan['homes']];
                 }
                 $sent = true;
             }

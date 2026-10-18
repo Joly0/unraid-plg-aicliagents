@@ -22,6 +22,34 @@ class CurlInstallSource implements AgentSource {
      * are plugin-owned but a shell `rm -rf` is an unnecessary injection
      * surface for a pure filesystem operation.
      */
+    /**
+     * #620: rename bin/ and home/ to <name>.prev-<pid>. Returns [name => path] of
+     * what was moved. A directory that cannot be renamed is deleted, as before.
+     * @return array<string,string>
+     */
+    private static function moveAside(string $agentDir): array {
+        $moved = [];
+        foreach (['bin', 'home'] as $name) {
+            $dir = "$agentDir/$name";
+            if (!is_dir($dir)) continue;
+            $prev = "$dir.prev-" . getmypid();
+            self::rrmdir($prev);
+            if (@rename($dir, $prev)) $moved[$name] = $prev;
+            else self::rrmdir($dir);
+        }
+        return $moved;
+    }
+
+    /** #620: drop what a failed run wrote and put the moved-aside directories back. */
+    private static function restoreAside(string $agentDir, array $aside): void {
+        foreach ($aside as $name => $prev) {
+            self::rrmdir("$agentDir/$name");
+            if (!@rename($prev, "$agentDir/$name")) {
+                LogService::log("CurlInstallSource: could not restore $agentDir/$name from $prev", LogService::LOG_ERROR, "CurlInstallSource");
+            }
+        }
+    }
+
     private static function rrmdir(string $dir): void {
         if (!is_dir($dir)) return;
         $it = new \RecursiveIteratorIterator(
@@ -159,8 +187,12 @@ class CurlInstallSource implements AgentSource {
         // script does write there is a declared captive_state path: it was
         // copied to the version-independent store in step 1, and the wipe
         // removes only the link to it, never the store.
-        self::rrmdir("$agentDir/bin");
-        self::rrmdir("$agentDir/home");
+        //
+        // #620: the old bin/ and home/ are moved aside, not deleted. When the
+        // script fails, the install may be running in the LIVE tree (staging
+        // unavailable), and a deleted bin/ would leave the recorded version
+        // with no program. A failed run puts them back; a good run drops them.
+        $aside = self::moveAside($agentDir);
         @mkdir("$agentDir/home", 0755, true);
         @mkdir("$agentDir/bin", 0755, true);
 
@@ -180,6 +212,7 @@ class CurlInstallSource implements AgentSource {
         if ($run === null) {
             LogService::log("CurlInstallSource: invalid source env key for $agentId", LogService::LOG_ERROR, "CurlInstallSource");
             self::$lastError = 'Invalid source.env / source.version_env key (letters, digits and underscores only)';
+            self::restoreAside($agentDir, $aside);
             return false;
         }
         $timeoutS = self::scriptTimeoutSeconds($src);
@@ -193,8 +226,10 @@ class CurlInstallSource implements AgentSource {
             $free = @disk_free_space($agentDir);
             self::$lastError = self::scriptFailureReason($res, $timeoutS, $free === false ? null : (int)floor($free / 1048576));
             LogService::log("CurlInstallSource: install script failed for $agentId (" . self::$lastError . "):\n" . $out, LogService::LOG_ERROR, "CurlInstallSource");
+            self::restoreAside($agentDir, $aside);
             return false;
         }
+        foreach ($aside as $moved) self::rrmdir($moved);
 
         if ($statePaths !== null) {
             AgentCaptiveStateService::settle($agentId, $agentDir, $statePaths);

@@ -127,13 +127,17 @@ class OldVersionsJobService
         try {
             self::writeProgress($jobId, ['phase' => 'removing']);
             $res = isset($seams['remove']) ? ($seams['remove'])($agent) : AgentVersionCleanupService::removeOldVersions($agent);
-            self::writeResult($jobId, [
-                'status' => 'ok', 'agent' => $agent,
+            // #621: a script that failed or timed out ends the job as FAILED, with the numbers of what did go.
+            $failed = ($res['status'] ?? 'ok') === 'error';
+            $out = [
+                'status' => $failed ? 'error' : 'ok', 'agent' => $agent,
                 'freed_bytes' => (int)($res['freed_bytes'] ?? 0),
                 'removed' => count((array)($res['removed'] ?? [])),
                 'skipped' => count((array)($res['skipped'] ?? [])),
-            ]);
-            $code = 0;
+            ];
+            if ($failed) $out['message'] = (string)($res['message'] ?? 'The clean-up did not finish.');
+            self::writeResult($jobId, $out);
+            $code = $failed ? 1 : 0;
         } catch (\Throwable $e) {
             self::writeResult($jobId, ['status' => 'error', 'message' => 'The job stopped: ' . $e->getMessage()]);
             $code = 1;

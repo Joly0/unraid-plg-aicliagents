@@ -140,9 +140,9 @@ class UpgradeRelaunchService
             // purpose (awaiting_activation) — never reap that marker.
             if (self::hasPendingAgentUpgrade($agentId)) continue;
 
-            $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
-            exec($cmd, $ignored, $rc);
-            if ($rc === 0) continue; // a live install-bg process is authoritative
+            // #591/F5: read /proc, no shell (the id used to sit inside a grep string).
+            require_once __DIR__ . '/PendingAgentUpgradeService.php';
+            if (PendingAgentUpgradeService::backgroundInstallRunning($agentId)) continue; // a live install-bg process is authoritative
 
             if (@unlink($file)) $reaped++;
         }

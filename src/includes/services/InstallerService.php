@@ -48,6 +48,22 @@ class InstallerService {
         StorageMountService::unstageAgentInstall($agentId);
     }
 
+    /**
+     * #618: run the source's stage() step. Returns null when it placed the
+     * program, or the error result installAgent must return when it did not
+     * (stage() returns '' for "no executable found"). Records nothing and
+     * touches no status file, so installAgent decides how to report it.
+     *
+     * @return array{status:string,message:string}|null
+     */
+    public static function stageFailure(Sources\AgentSource $source, string $agentId, array $agent): ?array {
+        $staged = $source->stage($agentId, $agent);
+        if (trim((string)$staged) !== '') return null;
+        $reason = 'The install finished but the agent program was not found.';
+        LogService::log("Install of $agentId failed: stage() found no executable after a successful fetch.", LogService::LOG_ERROR, "InstallerService");
+        return ['status' => 'error', 'message' => $reason];
+    }
+
     public static function installAgent($agentId, $targetVersion = null) {
         @set_time_limit(900);
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
@@ -193,7 +209,14 @@ class InstallerService {
             return ['status' => 'error', 'message' => $reason !== '' ? "Fetch failed: $reason" : 'Fetch failed'];
         }
 
-        $source->stage($agentId, $agent);
+        // #618: a stage() that returns '' found no program. Recording a version and
+        // baking the layer would end as "Installation complete" with no binary.
+        $stageError = self::stageFailure($source, $agentId, $agent);
+        if ($stageError !== null) {
+            setInstallStatus("Install failed", 0, $agentId, $stageError['message']);
+            self::endStagedInstall($agentId, $stagedRoot);
+            return $stageError;
+        }
 
         // 3. Set version and permissions
         setInstallStatus("Finalizing permissions...", 80, $agentId);

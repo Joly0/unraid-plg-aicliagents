@@ -29,12 +29,14 @@ class InstallLock
      * release()/fclose or when the process exits (so a crashed holder never wedges
      * the queue). If the lock can't be taken within $deadlineSec we return
      * held=false and let the caller PROCEED rather than hang forever (the activity
-     * watchdog already fails a stalled install at 20 min). $onWait fires once, the
-     * first time we have to queue.
+     * watchdog already fails a stalled install at 20 min). $onWait fires the first
+     * time we have to queue, then again every $repeatSec seconds, so the caller can
+     * keep its tray row fresh while it waits (#619: one call let a healthy queued
+     * install show as stalled after 2 minutes and failed after 20).
      *
      * @return array{fh:?resource, held:bool, queued:bool}
      */
-    public static function acquire(?callable $onWait = null, int $deadlineSec = 1500, ?string $lockFile = null, int $pollUs = 400000): array
+    public static function acquire(?callable $onWait = null, int $deadlineSec = 1500, ?string $lockFile = null, int $pollUs = 400000, int $repeatSec = 30): array
     {
         $lockFile = $lockFile ?? self::LOCK_FILE;
         @mkdir(dirname($lockFile), 0755, true);
@@ -43,13 +45,15 @@ class InstallLock
 
         $deadline = time() + max(1, $deadlineSec);
         $queued = false;
+        $nextWait = 0;
         while (true) {
             if (@flock($fh, LOCK_EX | LOCK_NB)) {
                 return ['fh' => $fh, 'held' => true, 'queued' => $queued];
             }
-            if (!$queued) {
-                if ($onWait) { try { $onWait(); } catch (\Throwable $e) { /* status update is best-effort */ } }
-                $queued = true;
+            $queued = true;
+            if ($onWait && time() >= $nextWait) {
+                try { $onWait(); } catch (\Throwable $e) { /* status update is best-effort */ }
+                $nextWait = time() + max(1, $repeatSec);
             }
             if (time() >= $deadline) {
                 // Proceed unlocked rather than block indefinitely behind a wedged holder.

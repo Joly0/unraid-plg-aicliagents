@@ -83,17 +83,37 @@ class AgentVersionCleanupService {
         return ['items' => $items, 'skipped' => $skipped, 'total_bytes' => $total, 'log' => $log];
     }
 
-    /** Run the script. Returns its standard output. */
-    private static function run(string $verb, string $target, int $timeout): string {
+    /**
+     * Run the script. Returns its standard output and its exit code (#621: the code
+     * was dropped, so a timeout (124) or a missing generation.sh (64) looked like
+     * "nothing to remove"). Its standard error goes to the log.
+     * @return array{out:string,exit:int}
+     */
+    private static function run(string $verb, string $target, int $timeout): array {
         $cmd = 'timeout ' . (int)$timeout . ' bash ' . escapeshellarg(self::script())
             . ' ' . escapeshellarg($verb) . ' ' . escapeshellarg($target)
             . ' --persist ' . escapeshellarg(self::persistPath())
             . ' --keep-rollback ' . (self::keepPrevious() ? '1' : '0');
         $out = [];
         $exit = 1;
+        $errFile = (string)@tempnam(sys_get_temp_dir(), 'avc-err');
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec($cmd . ' 2>/dev/null', $out, $exit);
-        return implode("\n", $out);
+        exec($cmd . ' 2>' . escapeshellarg($errFile !== '' ? $errFile : '/dev/null'), $out, $exit);
+        if ($errFile !== '') {
+            $err = trim((string)@file_get_contents($errFile, false, null, 0, 2000));
+            @unlink($errFile);
+            if ($exit !== 0) {
+                LogService::log("agent-versions.sh $verb $target exited $exit" . ($err !== '' ? ": $err" : ''), LogService::LOG_ERROR, "AgentVersionCleanupService");
+            }
+        }
+        return ['out' => implode("\n", $out), 'exit' => (int)$exit];
+    }
+
+    /** One plain sentence for a script that did not finish. */
+    private static function failureText(int $exit, int $timeout): string {
+        return $exit === 124
+            ? "The clean-up did not finish in $timeout seconds."
+            : "The clean-up script stopped with an error (code $exit).";
     }
 
     /**
@@ -113,7 +133,10 @@ class AgentVersionCleanupService {
             MeasureDeadline::markPartial();
             return ['items' => [], 'skipped' => [], 'total_bytes' => 0];
         }
-        $r = self::parse(self::run('list', $target, $t));
+        $res = self::run('list', $target, $t);
+        // A list that timed out or failed is partial: say so, so the card does not claim "nothing to remove".
+        if ($res['exit'] !== 0) MeasureDeadline::markPartial();
+        $r = self::parse($res['out']);
         return ['items' => $r['items'], 'skipped' => $r['skipped'], 'total_bytes' => $r['total_bytes']];
     }
 
@@ -125,7 +148,8 @@ class AgentVersionCleanupService {
     public static function removeOldVersions(?string $agentId = null): array {
         $target = self::target($agentId);
         $before = self::oldVersions($agentId);
-        $run = self::parse(self::run('remove', $target, self::REMOVE_TIMEOUT));
+        $res = self::run('remove', $target, self::REMOVE_TIMEOUT);
+        $run = self::parse($res['out']);
         $removed = []; $kept = []; $freed = 0;
         foreach ($before['items'] as $it) {
             if (file_exists($it['path'])) { $kept[] = $it; continue; }
@@ -139,7 +163,13 @@ class AgentVersionCleanupService {
         }
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'storage', 'agent_old_versions_removed',
             ['agent' => $target, 'freed_bytes' => $freed, 'removed' => count($removed), 'skipped' => count($skipped)]);
-        return ['status' => 'ok', 'freed_bytes' => $freed, 'removed' => $removed, 'kept' => $kept,
-                'skipped' => $skipped, 'log' => $run['log']];
+        $result = ['status' => 'ok', 'freed_bytes' => $freed, 'removed' => $removed, 'kept' => $kept,
+                   'skipped' => $skipped, 'log' => $run['log']];
+        if ($res['exit'] !== 0) {
+            // #621: report what did go, but not as a success.
+            $result['status'] = 'error';
+            $result['message'] = self::failureText($res['exit'], self::REMOVE_TIMEOUT);
+        }
+        return $result;
     }
 }

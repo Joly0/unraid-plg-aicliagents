@@ -85,9 +85,18 @@ if ($isUpgrade && $upgradeTo === null) {
 require_once dirname(__DIR__) . '/includes/services/InstallLock.php';
 $installLock = \AICliAgents\Services\InstallLock::acquire(
     function () use ($agentId) {
+        // #619: InstallLock calls this every 30 s while we queue. The status write
+        // keeps the Store card text; ActivityService::wait parks the tray row, which
+        // the stall and 20-minute watchdog skip (a healthy queue can run 25 minutes).
         setInstallStatus("Queued — waiting for another agent upgrade to finish...", 5, $agentId);
+        \AICliAgents\Services\ActivityService::wait(
+            "install_$agentId", "Queued — waiting for another agent upgrade to finish", 5);
     }
 );
+if ($installLock['queued'] ?? false) {
+    // The row was parked while we queued. This progress write revives it to running.
+    setInstallStatus("Starting install...", 5, $agentId);
+}
 if (($installLock['queued'] ?? false) && !($installLock['held'] ?? false)) {
     aicli_log("Install lock deadline hit for $agentId — proceeding unlocked to avoid an indefinite queue", AICLI_LOG_WARN, "InstallBG");
 } elseif ($installLock['queued'] ?? false) {
@@ -214,7 +223,7 @@ try {
         if ($layerLive) {
             if (!empty(\AICliAgents\Services\UpgradeRelaunchService::readManifest($agentId))) {
                 $rl = \AICliAgents\Services\UpgradeRelaunchService::relaunchClosedSet($agentId);
-                aicli_log("Upgrade relaunch for $agentId: relaunched={$rl['relaunched']} skipped={$rl['skipped']}", AICLI_LOG_INFO);
+                aicli_log("Upgrade relaunch for $agentId: relaunched={$rl['relaunched']} skipped={$rl['skipped']} failed=" . ($rl['failed'] ?? 0), AICLI_LOG_INFO);
             } else {
                 // No upgrade manifest (e.g. fresh install with no prior session):
                 // keep the original autoLaunch sweep so configured workspaces start.
