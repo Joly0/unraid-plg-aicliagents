@@ -326,13 +326,15 @@ final class TransientErrorService
     }
 
     /**
-     * The text typed into the pane. $summary is re-sanitised here, because the
-     * value comes back from the schedule sidecar at send time.
+     * The text typed into the pane. $summary comes back from the schedule
+     * sidecar at send time and holds text from the screen, so it is NOT typed
+     * back. Only a status code (429 or 5xx) found in it is kept (Forgejo #616):
+     * a broad pattern must not make a pane receive its own screen text.
      */
     public static function continuePrompt(string $summary): string
     {
-        $summary = self::sanitise($summary);
-        $what = $summary !== '' ? " ($summary)" : '';
+        $code = preg_match('/(?<![\d.])(429|5\d\d)(?![\d.])/', $summary, $m) ? $m[1] : '';
+        $what = $code !== '' ? " ($code)" : '';
         return "The previous model call failed with a temporary provider error$what. Continue from where you stopped.";
     }
 

@@ -38,6 +38,8 @@ final class AutoContinueRules
     public const REPORT_LABEL = 'auto-continue-pattern';
     /** GitHub refuses very long new-issue URLs; stay well below its ~8 KiB limit. */
     public const MAX_URL = 7500;
+    /** Ordinary screen text no pattern may match (#616). */
+    private const HARMLESS_TEXT = ['Hello', 'Done.', '$ ls', '> ', '1. item', 'ok', 'Running tests', 'user@host:~$'];
 
     /** @var array{key:string,data:array}|null per-process cache of the parsed file */
     private static ?array $cache = null;
@@ -75,6 +77,13 @@ final class AutoContinueRules
         if (preg_match('/\\\\[1-9]|\\\\g\{?-?\d|\(\?(?:R|P>|P=|>|&|\d)/', $re)) return 'back-references, recursion and atomic groups are not allowed';
         if (self::catastrophic($re)) return 'catastrophic backtracking: the expression is too slow on long input';
         if (PaneInputRules::safeMatch($re, '') || PaneInputRules::safeMatch($re, ' ')) return 'the expression matches an empty line, so it would match every line';
+        // Forgejo #616: refuse an expression that matches ordinary text. A pattern like ^\S would
+        // make every idle workspace look like an error, or stop every automatic continue.
+        foreach (self::HARMLESS_TEXT as $text) {
+            if (PaneInputRules::safeMatch($re, $text) || PaneInputRules::safeMatch($re, TransientErrorService::detectorLine($text))) {
+                return 'the expression matches ordinary text such as "' . $text . '", so it is too broad';
+            }
+        }
         if ($kind === 'error' && !preg_match('#^/\^#', $re)) return 'a transient error pattern must start with ^ (it is matched at the start of a line)';
         if ($kind === 'quota' && self::captureGroup($re) === null) return 'a quota pattern needs a capture group for the retry time, for example (?<retry>\d+h\s*\d+m)';
         return null;

@@ -87,10 +87,18 @@ final class QuotaDetectionService
     {
         if ($agentId === 'claude-code') return self::detectClaude($text, $now);
         if (in_array($agentId, self::OPENCODE_AGENTS, true)) return self::detectOpencode($text, $now);
-        if ($agentId !== 'codex-cli' || !preg_match(self::CODEX_QUOTA_MESSAGE, $text)) return null;
+        if ($agentId !== 'codex-cli') return null;
+        // Forgejo #613: look only at the bottom rows, the same rows sendDecision uses. An old limit
+        // message that scrolled above them is not current, even while it is still in the capture.
+        $tail = self::codexTail($text);
+        $hit = self::codexLastLimitRow($tail);
+        if ($hit < 0) return null;
         // The message is only current while it is the newest output. A busy footer, a message
         // the person sent or an agent line under it means the task resumed (Forgejo #459).
         if (self::codexResumedAfterLimit($text)) return null;
+        // The reset time comes from the message row and the rows it wraps onto, never from an
+        // older row.
+        $text = implode("\n", array_slice($tail, $hit, 5));
 
         if (preg_match(self::CODEX_DATE_RESET, $text, $m)) {
             $at = self::namedDateTime($now, (string)$m[1], (int)$m[2], (int)$m[4], (int)($m[5] ?: 0), (string)$m[6], (string)($m[7] ?? ''), (int)($m[3] ?: 0));

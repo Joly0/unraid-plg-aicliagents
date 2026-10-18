@@ -475,6 +475,12 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     RUN_SCRIPT="$USER_WORK_DIR/aicli-run-$ID.sh"
 
     # 1. Minimal Header (Safe injections only)
+    # #638: this file will hold every secret. Create it private (umask 077, mode
+    # 0600) BEFORE the first byte is written, so it is never readable by others,
+    # not even for a moment. It becomes 0700 (owner only) just before launch.
+    rm -f "$RUN_SCRIPT" 2>/dev/null
+    ( umask 077; : > "$RUN_SCRIPT" )
+    chmod 600 "$RUN_SCRIPT"
     echo "#!/bin/bash" > "$RUN_SCRIPT"
     printf 'export PLUGIN_SRC=%q\n' "$PLUGIN_SRC" >> "$RUN_SCRIPT"
     
@@ -802,16 +808,36 @@ _aicli_discover_claude_chat() {
     [ "$AGENT_ID" = "claude-code" ] || return 0
     [ -n "$AICLI_WORKSPACE_PATH" ] || return 0
 
-    local _project_key _project_dir _newest_jsonl
-    _project_key="-$(printf '%s' "${AICLI_WORKSPACE_PATH#/}" | tr '/' '-')"
-    _project_dir="$HOME_DIR/.claude/projects/$_project_key"
-    [ -d "$_project_dir" ] || return 0
+    # Claude names the project folder by turning EVERY non-alphanumeric
+    # character of the cwd into a dash ("_" and "." too). The legacy key, which
+    # replaced only "/", is tried as well. Both the workspace path and the
+    # launch folder are tried, as ClaudeSessionNameResolver::projectDirs does (#609).
+    local _path _key _project_dir _newest_jsonl _cands=""
+    for _path in "$AICLI_WORKSPACE_PATH" "${AICLI_CWD:-}"; do
+        [ -n "$_path" ] || continue
+        [ "$_path" = "/" ] || _path="${_path%/}"
+        for _key in "$(printf '%s' "$_path" | sed 's/[^A-Za-z0-9]/-/g')" \
+                    "-$(printf '%s' "${_path#/}" | tr '/' '-')"; do
+            _project_dir="$HOME_DIR/.claude/projects/$_key"
+            [ -d "$_project_dir" ] || continue
+            case "$_cands
+" in *"
+$_project_dir
+"*) continue ;; esac
+            _cands="$_cands
+$_project_dir"
+        done
+    done
+    [ -n "$_cands" ] || return 0
 
     # Issue #71: exclude subagent transcripts (`agent-<id>.jsonl`). They are
     # not resumable conversations — resuming from one opens the wrong
     # transcript. Only main-session GUIDs may be discovered.
-    _newest_jsonl=$(find "$_project_dir" -maxdepth 1 -name '*.jsonl' ! -name 'agent-*' -type f \
-        -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    _newest_jsonl=$(printf '%s\n' "$_cands" | while IFS= read -r _project_dir; do
+        [ -n "$_project_dir" ] || continue
+        find "$_project_dir" -maxdepth 1 -name '*.jsonl' ! -name 'agent-*' -type f \
+            -printf '%T@ %p\n' 2>/dev/null
+    done | sort -rn | head -1 | cut -d' ' -f2-)
     [ -n "$_newest_jsonl" ] && basename "$_newest_jsonl" .jsonl
 }
 
@@ -930,6 +956,36 @@ _aicli_resume_was_established() {
     [ "$1" -ge 3 ]
 }
 
+# #610: "Start New Session" sets frozen_chat_id to _fresh_ for the FIRST launch
+# only. Called after every launch, it drops the mark so a later relaunch in the
+# same tmux session resumes the chat the agent started (resume-latest, or the
+# id Claude/OpenCode sync finds) instead of opening a blank one each time.
+_aicli_clear_fresh_mark() {
+    if [ "${frozen_chat_id:-}" = "_fresh_" ]; then
+        frozen_chat_id=""
+    fi
+}
+
+# Build a resume command from a registry template: $1 template, $2 chat id
+# (empty for resume-latest), $3 binary, $4 args. The chat id is shell-escaped
+# with printf %q because a renamed Claude chat prints its name, which can hold
+# spaces, quotes or "&". Bash 5.2 turns on patsub_replacement, where an
+# unescaped "&" in a replacement text means "the matched text" and the %q
+# backslash before it is dropped, so "x&reboot" would run as a command under
+# bash -c. Turn that option off before every replacement (#649).
+_aicli_build_resume_cmd() {
+    local _tpl="$1" _chat="$2" _bin="$3" _args="$4" _esc
+    shopt -u patsub_replacement 2>/dev/null || true
+    if [ -n "$_chat" ]; then
+        _esc=$(printf '%q' "$_chat")
+        _tpl="${_tpl//\{chatId\}/$_esc}"
+    fi
+    _tpl="${_tpl//\{binary\}/$_bin}"
+    _tpl="${_tpl//\{args\}/$_args}"
+    _tpl="${_tpl//  / }"
+    printf '%s' "$_tpl"
+}
+
 # WP #736 hot-apply: re-read the 5-tier effective env via EnvService on every
 # loop iteration. Diffs against $AICLI_EXPORTED_KEYS_FILE: unsets any key we
 # previously exported but is no longer present; re-exports the current set.
@@ -937,10 +993,25 @@ _aicli_resume_was_established() {
 # Single PHP invocation per iteration (~50 ms — negligible against agent
 # startup cost).
 _aicli_load_envs() {
-    local script="/tmp/aicli-envreload-$$-$RANDOM.sh"
-    php "$PLUGIN_SRC/scripts/user/effective-env-export.php" \
+    # The reload file holds every secret. Make it with mktemp (mode 0600) in the
+    # user's own .aicli folder, never in the shared /tmp (#638).
+    local script
+    script="$(mktemp "$(dirname "$AICLI_EXPORTED_KEYS_FILE")/.envreload.XXXXXX" 2>/dev/null)" || script=""
+    if [ -z "$script" ]; then
+        log_aicli "WARN" 1 "Env reload skipped: cannot create a private reload file. The last good environment stays."
+        return 0
+    fi
+    # #608: a failed export (php error, vault mid-write) must not wipe the
+    # environment. Keep the last good env and tracker unless the export both
+    # succeeded and carries the key-set line.
+    if ! php "$PLUGIN_SRC/scripts/user/effective-env-export.php" \
         "$PLUGIN_SRC/includes/AICliAgentsManager.php" reload \
-        "$AICLI_WORKSPACE_PATH" "$AGENT_ID" > "$script" 2>/dev/null
+        "$AICLI_WORKSPACE_PATH" "$AGENT_ID" > "$script" 2>/dev/null \
+        || ! grep -q '^_AICLI_NEW_KEYS=' "$script"; then
+        log_aicli "WARN" 1 "Env reload failed; the last good environment stays for this launch."
+        rm -f "$script"
+        return 0
+    fi
 
     # Source it: exports the new env AND sets _AICLI_NEW_KEYS in our scope.
     # shellcheck disable=SC1090
@@ -1414,11 +1485,7 @@ while true; do
         # produces a broken command line. printf %q yields a safely-quoted
         # token that bash re-parses back to the literal. Bare-UUID ids round-
         # trip unchanged, so existing agents are unaffected.
-        escaped_chat_id=$(printf '%q' "$frozen_chat_id")
-        FINAL_CMD="${frozen_resume_cmd//\{chatId\}/$escaped_chat_id}"
-        FINAL_CMD="${FINAL_CMD//\{binary\}/$frozen_binary}"
-        FINAL_CMD="${FINAL_CMD//\{args\}/$frozen_effective_args}"
-        FINAL_CMD="${FINAL_CMD//  / }"
+        FINAL_CMD=$(_aicli_build_resume_cmd "$frozen_resume_cmd" "$frozen_chat_id" "$frozen_binary" "$frozen_effective_args")
         log_aicli "INFO" 2 "Attempting Resume: $FINAL_CMD"
 
         # 1. Command-based Execution (Uses PATH or absolute path)
@@ -1440,9 +1507,7 @@ while true; do
             status="resume_failed"
         fi
     elif [ "$can_resume" == "1" ]; then
-        LATEST_CMD="${frozen_resume_latest//\{binary\}/$frozen_binary}"
-        LATEST_CMD="${LATEST_CMD//\{args\}/$frozen_effective_args}"
-        LATEST_CMD="${LATEST_CMD//  / }"
+        LATEST_CMD=$(_aicli_build_resume_cmd "$frozen_resume_latest" "" "$frozen_binary" "$frozen_effective_args")
         log_aicli "INFO" 2 "Attempting Latest Resume: $LATEST_CMD"
         _attempt_started=$(date +%s)
         safe_exec "$LATEST_CMD"
@@ -1522,6 +1587,11 @@ while true; do
     elif [ "$status" != "ok" ]; then
         log_aicli "ERROR" 1 "Agent launch attempts ended before an interactive session was established (agent=$AGENT_ID rc=$last_launch_rc). Check $DEBUG_LOG and the captured crash record."
     fi
+
+    # #610: the "Start New Session" mark covers the FIRST launch only. Clear it
+    # now, so every later relaunch in this tmux session resumes the chat the
+    # agent just started instead of opening a blank one each time.
+    _aicli_clear_fresh_mark
 
     # Restore PTY line discipline after every agent exit. TUI agents (agy,
     # gemini-cli, claude-code) call cfmakeraw() which disables ONLCR; on exit
@@ -1624,7 +1694,7 @@ EOF
 
 
 
-    chmod +x "$RUN_SCRIPT"
+    chmod 700 "$RUN_SCRIPT"
     log_aicli "DEBUG" 3 "Launching tmux session $SESSION for script $RUN_SCRIPT"
     perf_log tmux.new.begin
     # Bug #1054 follow-up: re-sanitize the per-uid socket dir immediately before
