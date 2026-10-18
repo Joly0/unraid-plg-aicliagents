@@ -243,7 +243,7 @@ class StorageStateAuditService {
     private static function pluginOverlayMounts(): array {
         $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
         $out = [];
-        $root = preg_quote(rtrim(StoragePathResolver::MOUNT_ROOT, '/'), '#');
+        $root = preg_quote(rtrim(StoragePathResolver::mountRoot(), '/'), '#');
         if (preg_match_all('#^\S+\s+(' . $root . '/work/([^/\s]+)/home)\s+overlay\b#m', $mounts, $m, PREG_SET_ORDER)) {
             foreach ($m as $row) $out['home/' . $row[2]] = $row[1];
         }
@@ -288,7 +288,7 @@ class StorageStateAuditService {
     public static function deferMarkerAges(?string $runtimeDir = null, ?string $lockDir = null): array {
         $ages = [];
         $now = time();
-        $rt = $runtimeDir ?? (getenv('AICLI_RUNTIME_DIR') ?: StoragePathResolver::MOUNT_ROOT);
+        $rt = $runtimeDir ?? (getenv('AICLI_RUNTIME_DIR') ?: StoragePathResolver::mountRoot());
         $rt = rtrim($rt, '/');
         foreach (@glob("$rt/.bake_defer_reason_*") ?: [] as $f) {
             $mt = @filemtime($f);

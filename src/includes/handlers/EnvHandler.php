@@ -60,7 +60,7 @@ class EnvHandler {
 
         $payload = self::decodeMapPayload();
         [$clean, $rejected] = EnvService::validateMap($payload);
-        if (!empty($rejected) && empty($clean)) {
+        if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
             return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
         }
 
@@ -94,7 +94,7 @@ class EnvHandler {
 
         $payload = self::decodeMapPayload();
         [$clean, $rejected] = EnvService::validateMap($payload);
-        if (!empty($rejected) && empty($clean)) {
+        if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
             return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
         }
 
@@ -133,8 +133,8 @@ class EnvHandler {
         $rejected = [];
         foreach ($payload as $k => $v) {
             $k = (string)$k; $v = (string)$v;
-            if (!preg_match('/^[A-Z][A-Z0-9_]{0,127}$/', $k)) {
-                $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE only)'];
+            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', $k)) {
+                $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
                 continue;
             }
             if (EnvService::isReservedKey($k)) {
@@ -150,7 +150,7 @@ class EnvHandler {
             if ($v === '') continue; // empty → don't persist (deleting a value = clearing the row)
             $clean[$k] = EnvService::sanitiseValue($v);
         }
-        if (!empty($rejected) && empty($clean)) {
+        if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
             return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
         }
 
@@ -210,8 +210,8 @@ class EnvHandler {
         $rejected = [];
         foreach ($payload as $k => $v) {
             $k = (string)$k; $v = (string)$v;
-            if (!preg_match('/^[A-Z][A-Z0-9_]{0,127}$/', $k)) {
-                $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE only)'];
+            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', $k)) {
+                $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
                 continue;
             }
             if (EnvService::isReservedKey($k)) {
@@ -225,7 +225,7 @@ class EnvHandler {
             if ($v === '') continue;
             $clean[$k] = EnvService::sanitiseValue($v);
         }
-        if (!empty($rejected) && empty($clean)) {
+        if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
             return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
         }
 
@@ -294,7 +294,7 @@ class EnvHandler {
         foreach ($rejected as [$k, $why]) {
             $bits[] = "$k ($why)";
         }
-        return 'Rejected: ' . implode('; ', $bits);
+        return 'Nothing was saved. Rejected: ' . implode('; ', $bits);
     }
 
     /**

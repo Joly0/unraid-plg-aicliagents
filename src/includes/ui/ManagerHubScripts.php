@@ -928,6 +928,11 @@
                 acts.appendChild(b);
             });
             row.appendChild(head);
+            if (d.reason) {
+                var why = el('div', 'font-size:11px; opacity:0.85; padding-top:3px;', String(d.reason));
+                why.className = 'hub-drift-reason';
+                row.appendChild(why);
+            }
             var det = document.createElement('details');
             var sum = document.createElement('summary');
             sum.style.cssText = 'font-size:10px; opacity:0.6; cursor:pointer;';

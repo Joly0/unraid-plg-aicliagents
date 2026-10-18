@@ -753,7 +753,7 @@ class StorageMountService {
         ?string $mounts = null,
         ?string $persistPath = null,
         ?string $policyMode = null,
-        string $zramBase = StoragePathResolver::ZRAM_BASE
+        ?string $zramBase = null
     ): ?string {
         // #372 (docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount
         // wins"): the SAME three rules as bash common.sh _entity_paths_live.
@@ -761,6 +761,7 @@ class StorageMountService {
         //    The old code recalculated the mode and, after a policy change, named
         //    an empty upper while the real changes sat in the live one.
         $mnt = rtrim(UtilityService::getWorkDir($user) . '/home', '/');
+        $zramBase ??= StoragePathResolver::zramBase();
         if ($mounts === null) {
             $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
         }
@@ -788,7 +789,8 @@ class StorageMountService {
     }
 
     /** #372: the home upper path for one mode — mirrors bash _entity_upper_for_mode. */
-    public static function homeUpperForMode(string $safeUser, string $persistPath, string $mode, string $zramBase = StoragePathResolver::ZRAM_BASE): string {
+    public static function homeUpperForMode(string $safeUser, string $persistPath, string $mode, ?string $zramBase = null): string {
+        $zramBase ??= StoragePathResolver::zramBase();
         if ($mode === 'zram') {
             return rtrim($zramBase, '/') . "/homes/$safeUser/upper";
         }
@@ -983,7 +985,7 @@ class StorageMountService {
      * repair still runs whenever content exists (the case it was built for: an
      * overlay that HAS lower layers but lost its view).
      */
-    public static function agentRemountCannotHelp(string $agentId, ?string $persistPath = null, ?string $policy = null, string $zramBase = AgentRegistry::ZRAM_UPPER_BASE): bool {
+    public static function agentRemountCannotHelp(string $agentId, ?string $persistPath = null, ?string $policy = null, ?string $zramBase = null): bool {
         $persistPath = $persistPath ?? StoragePathResolver::agentPersistPath();
         // Cannot trust what storage shows: keep the old behaviour (remount).
         if (!self::isPathAvailable($persistPath) || !AgentRegistry::persistRootMounted($persistPath)) return false;

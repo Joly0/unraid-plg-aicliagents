@@ -89,6 +89,35 @@ class ArgsService {
                 $rejected[] = $label;
             }
         }
-        return $rejected;
+        // #666 R-153: the launcher runs the text with `bash -c`. A redirect, a
+        // subshell, a glob or a comment written OUTSIDE quotes changes what the
+        // command does ("--foo > /boot/config/go" writes a file). Walk the text
+        // like the shell does: quoted text is plain data, a backslash makes the
+        // next character plain.
+        $quote = '';
+        $len = strlen($args);
+        $outside = ['>' => '>', '<' => '<', '(' => '(', ')' => ')', '*' => '*'];
+        for ($i = 0; $i < $len; $i++) {
+            $c = $args[$i];
+            if ($quote === "'") {
+                if ($c === "'") $quote = '';
+                continue;
+            }
+            if ($c === '\\') { $i++; continue; }
+            if ($quote === '"') {
+                if ($c === '"') $quote = '';
+                continue;
+            }
+            if ($c === "'" || $c === '"') { $quote = $c; continue; }
+            if (isset($outside[$c])) {
+                $rejected[] = $outside[$c];
+            } elseif ($c === '#' && ($i === 0 || ctype_space($args[$i - 1]))) {
+                $rejected[] = '# (comment)';
+            }
+        }
+        if ($quote !== '') {
+            $rejected[] = 'unbalanced quote';
+        }
+        return array_values(array_unique($rejected));
     }
 }

@@ -30,7 +30,7 @@ class AgentRegistry {
 
     /** Resolve the override once per operation so tests and live writes share the same path. */
     private static function versionsPath(): string {
-        return getenv('AICLI_VERSIONS_FILE') ?: self::VERSIONS_FILE;
+        return getenv('AICLI_VERSIONS_FILE') ?: (SecretPaths::flashRoot() . '/versions.json'); // VERSIONS_FILE is the live default (#646, F19)
     }
 
     /**
@@ -338,11 +338,12 @@ class AgentRegistry {
         $defaultRegistry = self::getDefaultAgents();
         $registry = $defaultRegistry;
 
-        if (file_exists(self::MANIFEST_FILE)) {
-            LogService::log("Merging custom agents from " . self::MANIFEST_FILE, LogService::LOG_DEBUG, "AgentRegistry");
-            $custom = json_decode(@file_get_contents(self::MANIFEST_FILE), true);
+        $manifestFile = SecretPaths::flashRoot() . '/agents.json'; // MANIFEST_FILE is the live default (#646, F19)
+        if (file_exists($manifestFile)) {
+            LogService::log("Merging custom agents from " . $manifestFile, LogService::LOG_DEBUG, "AgentRegistry");
+            $custom = json_decode(@file_get_contents($manifestFile), true);
             if (is_array($custom) && isset($custom['agents'])) {
-                $registry = array_merge($defaultRegistry, $custom['agents']);
+                $registry = array_merge($defaultRegistry, self::acceptCustomAgents((array)$custom['agents'], $defaultRegistry));
             }
         }
 
@@ -1048,6 +1049,36 @@ class AgentRegistry {
         return self::normalizeChannel((string)($entry['channel'] ?? 'stable'));
     }
 
+    /**
+     * True for a plain release name: a version number ("1.2.3", "2026.10.1-rc.1+b5") or a
+     * dist-tag ("latest"). False for anything an installer would read as a source: "pkg@git+..",
+     * "github:owner/repo", a URL, a path, a space or a shell character (#666 R-165).
+     */
+    public static function isSafeVersionString(string $v): bool {
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/', $v) === 1;
+    }
+
+    /**
+     * Custom agents from agents.json that may be merged: the built-in ids are not
+     * replaceable, so the file cannot swap a built-in agent's install command or binary
+     * (#666 R-165). A refused id is logged.
+     * @param array<string,mixed> $custom the "agents" map of agents.json
+     * @param array<string,mixed> $defaults the built-in registry
+     * @return array<string,mixed>
+     */
+    public static function acceptCustomAgents(array $custom, array $defaults): array {
+        $accepted = [];
+        foreach ($custom as $id => $def) {
+            if (!is_array($def)) continue;
+            if (array_key_exists($id, $defaults)) {
+                LogService::log("agents.json: ignored the entry '$id' because it is a built-in agent id", LogService::LOG_WARN, "AgentRegistry");
+                continue;
+            }
+            $accepted[$id] = $def;
+        }
+        return $accepted;
+    }
+
     /** Normalize persisted/UI channel values to the supported semantic set. */
     public static function normalizeChannel(string $channel): string {
         $channel = strtolower(trim($channel));
@@ -1194,6 +1225,11 @@ class AgentRegistry {
      */
     public static function setChannel(string $agentId, string $channel, ?string $pinned = null): bool {
         $channel = self::normalizeChannel($channel);
+        // #666 R-165: the pin becomes an install argument later; it must be a plain release name.
+        if ($pinned !== null && !self::isSafeVersionString($pinned)) {
+            LogService::log("setChannel: refused the pinned version '" . substr($pinned, 0, 80) . "' for $agentId", LogService::LOG_WARN, "AgentRegistry");
+            return false;
+        }
         return self::mutateVersions(function (array &$versions) use ($agentId, $channel, $pinned): void {
             $existing = $versions[$agentId] ?? null;
             $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');
@@ -1261,7 +1297,8 @@ class AgentRegistry {
      * from the cfg file ('' when the key is absent — the engine then decides
      * by device, so the plain directory counts).
      */
-    public static function agentHasStoredContent(string $id, string $persistPath, string $policy, string $zramBase = self::ZRAM_UPPER_BASE): bool {
+    public static function agentHasStoredContent(string $id, string $persistPath, string $policy, ?string $zramBase = null): bool {
+        $zramBase ??= StoragePathResolver::zramBase();
         if (!preg_match(self::AGENT_ID_RE, $id)) return true;   // unknown shape: never heal it
         $persist = rtrim($persistPath, '/');
         if (glob($persist . '/agent_' . $id . '_*.sqsh') ?: []) return true;
@@ -1289,7 +1326,7 @@ class AgentRegistry {
 
     /** The RAW storage_backend_mode from the cfg file ('' when absent), as bash `_rp_read_cfg` reads it. */
     public static function rawStorageBackendPolicy(): string {
-        $path = ConfigService::CONFIG_PATH;
+        $path = ConfigService::configPath();
         if (!is_file($path)) return '';
         $cfg = @parse_ini_file($path);
         return is_array($cfg) ? (string)($cfg['storage_backend_mode'] ?? '') : '';
@@ -1349,7 +1386,7 @@ class AgentRegistry {
      * recorded value under the versions lock, so a concurrent install that
      * records a new version wins. Returns true when the record was cleared.
      */
-    public static function healPhantomInstallRecord(string $id, bool $binExists, bool $sqshExists, string $persistPath, string $zramBase = self::ZRAM_UPPER_BASE): bool {
+    public static function healPhantomInstallRecord(string $id, bool $binExists, bool $sqshExists, string $persistPath, ?string $zramBase = null): bool {
         if ($id === 'terminal' || $binExists || $sqshExists) return false;   // cheap exits first
         $recorded = self::getInstalledVersion($id);
         if (!self::hasRealInstalledVersion($id)) return false;

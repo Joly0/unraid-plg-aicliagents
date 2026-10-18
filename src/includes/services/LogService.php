@@ -10,6 +10,7 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/SecretPaths.php'; // the flash root of the cfg file (#646, F19)
 require_once __DIR__ . '/TraceContext.php';
 
 class LogService {
@@ -160,7 +161,7 @@ class LogService {
 
     /** Raw .cfg read shared by the level/format/max-bytes lookups (no ConfigService — circular). */
     private static function readRawConfig() {
-        $configFile = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
+        $configFile = SecretPaths::flashRoot() . "/unraid-aicliagents.cfg"; // same file as ConfigService::configPath() (#646, F19)
         if (file_exists($configFile)) {
             $config = @parse_ini_file($configFile);
             if (is_array($config)) {

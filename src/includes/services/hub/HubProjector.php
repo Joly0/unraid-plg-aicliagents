@@ -712,7 +712,7 @@ class HubProjector {
             if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
 
-        HubStore::saveState($state);
+        HubStore::saveLedger($state);
         LogService::log('hub project: agents=[' . implode(',', $targets) . '] changed=[' . implode(',', $writtenAgents) . '] drift=' . count($driftAll), LogService::LOG_INFO, 'HubProjector');
         if (!empty($writtenAgents)) {
             // H-04 (#1365): debounced auto-commit AFTER the vendor writes — agent ids only.
@@ -817,7 +817,7 @@ class HubProjector {
             if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
 
-        HubStore::saveState($state);
+        HubStore::saveLedger($state);
         LogService::log('hub policy project: agents=[' . implode(',', $targets) . '] changed=[' . implode(',', $writtenAgents) . '] drift=' . count($driftAll), LogService::LOG_INFO, 'HubProjector');
         if (!empty($writtenAgents)) {
             GitHomeService::commitIfEnabled('hub: file-path policy projected to [' . implode(',', $writtenAgents) . ']');
@@ -1063,7 +1063,7 @@ class HubProjector {
                 unset($entry['lastProjectedHash'][$key]);
                 $entry['managedKeys'] = array_values(array_diff($entry['managedKeys'] ?? [], [$key]));
                 self::putLedgerEntry($state, $file, $entry);
-                HubStore::saveState($state);
+                HubStore::saveLedger($state);
                 if ($isPolicy || $isClaudeCompat || $isRelay || $isAdmin) {
                     // Relay and Admin rows are plugin-owned too: no user target list (#640).
                     // Always-on policy content has no target list to remove the
@@ -1122,7 +1122,7 @@ class HubProjector {
                 }
                 $entry['lastRun'] = gmdate('c');
                 self::putLedgerEntry($state, $file, $entry);
-                HubStore::saveState($state);
+                HubStore::saveLedger($state);
                 return ['status' => 'ok', 'mode' => 'overwrite'];
 
             case 'adopt':
@@ -1138,7 +1138,7 @@ class HubProjector {
                     unset($entry['lastProjectedHash'][$key]);
                     $entry['managedKeys'] = array_values(array_diff($entry['managedKeys'] ?? [], [$key]));
                     self::putLedgerEntry($state, $file, $entry);
-                    HubStore::saveState($state);
+                    HubStore::saveLedger($state);
                     self::untargetAgent($mcp, $projector->agentId(), $serverName);
                     return ['status' => 'ok', 'mode' => 'adopt', 'adopted' => 'deletion'];
                 }
@@ -1155,7 +1155,7 @@ class HubProjector {
                 if (!in_array($key, $entry['managedKeys'] ?? [], true)) $entry['managedKeys'][] = $key;
                 $entry['lastRun'] = gmdate('c');
                 $state['projections'][$file] = $entry;
-                HubStore::saveState($state);
+                HubStore::saveLedger($state);
                 return ['status' => 'ok', 'mode' => 'adopt', 'adopted' => 'value'];
         }
         // No trailing return: $mode is validated to release|overwrite|adopt
@@ -1235,6 +1235,16 @@ class HubProjector {
             $path = dirname($path);
         }
         if (is_dir($path) && !is_writable($path)) return "$path is not writable";
+        // #666 R-159: a JSON file with comments (OpenCode and Kilo allow them) is valid for the
+        // agent but not for a strict reader. Say so, so the person knows what to change.
+        if (is_file($abs)) {
+            $raw = (string)@file_get_contents($abs);
+            if (trim($raw) !== '' && json_decode($raw) === null && JsonMcpProjector::stripJsonComments($raw) !== $raw
+                && json_decode(JsonMcpProjector::stripJsonComments($raw)) !== null) {
+                return basename($abs) . ' has comments or trailing commas, and the Config Hub cannot rewrite such a file without losing them. '
+                    . 'Remove the comments and trailing commas from the file, then project again';
+            }
+        }
         return 'the existing file could not be read safely (unparseable files are never clobbered)';
     }
 
@@ -1326,10 +1336,14 @@ class HubProjector {
                     $removed[] = $key;
                 }
             } else {
+                // #666 R-159: the reason goes into the row, so the tray says why, not only that it failed.
+                $why = self::writeFailReason($abs);
                 foreach (array_merge(array_keys($set), $remove) as $key) {
-                    $drift[] = self::driftRec($file, $key, $agentId, 'write_failed', $current[$key] ?? null, $desired[$key] ?? null);
+                    $rec = self::driftRec($file, $key, $agentId, 'write_failed', $current[$key] ?? null, $desired[$key] ?? null);
+                    $rec['reason'] = $why;
+                    $drift[] = $rec;
                 }
-                LogService::log("hub project: could not write $file: " . self::writeFailReason($abs), LogService::LOG_WARN, 'HubProjector');
+                LogService::log("hub project: could not write $file: " . $why, LogService::LOG_WARN, 'HubProjector');
             }
         }
 

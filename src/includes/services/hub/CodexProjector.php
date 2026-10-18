@@ -105,7 +105,10 @@ class CodexProjector extends VendorProjector {
     /** Remove the fence and its preceding blank separator; leaves the rest untouched. */
     public static function stripFence(string $raw, string $open, string $close): string {
         $re = '/\n?\n?^' . preg_quote($open, '/') . '\n.*?^' . preg_quote($close, '/') . '$\n?/ms';
-        $out = (string)preg_replace($re, "\n", $raw, 1);
+        $out = (string)preg_replace($re, "\n", $raw, 1, $replaced);
+        // #666 R-161: with no fence there is nothing to remove; leave the user's blank
+        // lines exactly as they are.
+        if ($replaced === 0) return $raw;
         $out = ltrim($out, "\n");
         return $out === '' ? '' : rtrim($out, "\n") . "\n";
     }

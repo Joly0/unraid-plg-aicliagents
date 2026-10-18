@@ -125,10 +125,35 @@ class Transpiler {
         return implode("\n", $out);
     }
 
+    /**
+     * The text with every byte that is not valid UTF-8 replaced by "?" (#666 R-161).
+     * TOML and YAML files must be valid UTF-8; a bad byte makes the whole agent file unreadable.
+     */
+    public static function validUtf8(string $v): string {
+        if (preg_match('//u', $v) === 1) return $v;
+        // Walk the text and keep only well-formed sequences.
+        $out = '';
+        $len = strlen($v);
+        for ($i = 0; $i < $len;) {
+            $b = ord($v[$i]);
+            $n = $b < 0x80 ? 1 : ($b >= 0xC2 && $b <= 0xDF ? 2 : ($b >= 0xE0 && $b <= 0xEF ? 3 : ($b >= 0xF0 && $b <= 0xF4 ? 4 : 0)));
+            $seq = $n > 0 ? substr($v, $i, $n) : '';
+            if ($n > 0 && strlen($seq) === $n && preg_match('//u', $seq) === 1) {
+                $out .= $seq;
+                $i += $n;
+            } else {
+                $out .= '?';
+                $i++;
+            }
+        }
+        return $out;
+    }
+
     // ---------- TOML quoting ----------
 
     /** Basic TOML string: double-quoted, backslash escapes, control chars as \uXXXX. */
     public static function tomlString(string $v): string {
+        $v = self::validUtf8($v);
         $out = '';
         $len = strlen($v);
         for ($i = 0; $i < $len; $i++) {
@@ -139,7 +164,7 @@ class Transpiler {
             elseif ($c === "\n")  $out .= '\\n';
             elseif ($c === "\r")  $out .= '\\r';
             elseif ($c === "\t")  $out .= '\\t';
-            elseif ($ord < 0x20)  $out .= sprintf('\\u%04X', $ord);
+            elseif ($ord < 0x20 || $ord === 0x7F) $out .= sprintf('\\u%04X', $ord);
             else                  $out .= $c;
         }
         return '"' . $out . '"';
@@ -159,7 +184,8 @@ class Transpiler {
      */
     public static function yamlScalar(string $v): string {
         if ($v === '') return "''";
-        if (preg_match('/[\x00-\x1F]/', $v)) {
+        $v = self::validUtf8($v);
+        if (preg_match('/[\x00-\x1F\x7F]/', $v)) {
             // control chars → double-quoted style
             $out = '';
             $len = strlen($v);
@@ -171,7 +197,7 @@ class Transpiler {
                 elseif ($c === "\n") $out .= '\\n';
                 elseif ($c === "\t") $out .= '\\t';
                 elseif ($c === "\r") $out .= '\\r';
-                elseif ($ord < 0x20) $out .= sprintf('\\x%02X', $ord);
+                elseif ($ord < 0x20 || $ord === 0x7F) $out .= sprintf('\\x%02X', $ord);
                 else                 $out .= $c;
             }
             return '"' . $out . '"';

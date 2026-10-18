@@ -191,6 +191,32 @@ class SecretService {
         }
 
         // 0600 from the first byte: the temp file is never group- or world-readable.
-        return \AICliAgents\Services\AtomicWriteService::write($file, $content, 0600);
+        $ok = \AICliAgents\Services\AtomicWriteService::write($file, $content, 0600);
+        if ($ok) {
+            $problem = self::modeProblem($file);
+            if ($problem !== null && !self::$modeWarned) {
+                self::$modeWarned = true;
+                LogService::log('Secret store: ' . $problem, LogService::LOG_WARN, 'SecretService');
+            }
+        }
+        return $ok;
+    }
+
+    /** Log the loose-mode warning once per process, not on every save. */
+    private static bool $modeWarned = false;
+
+    /**
+     * #666 R-167: why the file is not private, or null when it is. On a FAT drive (the Unraid
+     * flash at /boot is one) chmod does nothing: the mode that stat shows comes from the mount
+     * options, so a vault written there can be readable by other local users whatever this
+     * code asks for. See docs/specs/ENV_AND_SECRETS_TIERS.md (Secret file mode on a FAT flash drive).
+     */
+    public static function modeProblem(string $file): ?string {
+        clearstatcache(true, $file);
+        $perm = @fileperms($file);
+        if ($perm === false) return null;
+        $perm &= 0777;
+        if (($perm & 0077) === 0) return null;
+        return sprintf('%s has mode %04o, not 0600. On a FAT drive such as /boot, chmod has no effect and the mount options decide who can read the file.', basename($file), $perm);
     }
 }

@@ -53,7 +53,7 @@ final class UpperPlacementService
         if (is_callable($mounts)) $mounts = $mounts();
         $upper = StorageMountService::overlayOptionAt((string)$mounts, $mnt, 'upperdir');
         if ($upper === null) return null;
-        return strpos($upper, StoragePathResolver::ZRAM_BASE . '/') === 0 ? 'zram' : 'disk';
+        return strpos($upper, StoragePathResolver::zramBase() . '/') === 0 ? 'zram' : 'disk';
     }
 
     /**

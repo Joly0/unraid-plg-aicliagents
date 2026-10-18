@@ -505,9 +505,10 @@ class HubStore {
         if (!empty($errors)) return false;
         $ids = array_values(array_unique($ids));
         sort($ids);
-        $state = self::getState();
-        $state[$field] = $ids;
-        $ok = self::saveState($state);
+        $ok = self::updateState(static function (array $state) use ($field, $ids): array {
+            $state[$field] = $ids;
+            return $state;
+        });
         if ($ok) LogService::log("$label targets set to [" . implode(',', $ids) . ']', LogService::LOG_INFO, 'HubStore');
         return $ok;
     }
@@ -754,6 +755,58 @@ class HubStore {
             $data[$field] = array_values(array_map('strval', $targets));
         }
         return $data;
+    }
+
+    /**
+     * Run $fn while holding the state.json interlock. The lock is taken non-blocking in a
+     * poll loop with a deadline (never a blocking flock). When it cannot be taken in time,
+     * $fn still runs, with a warning: a missed lock must not stop a Settings save.
+     * @return mixed what $fn returns
+     */
+    private static function withStateLock(callable $fn) {
+        $lockFile = self::stateFile() . '.lock';
+        @mkdir(dirname($lockFile), 0755, true);
+        $fp = @fopen($lockFile, 'c');
+        $got = false;
+        if ($fp) {
+            $deadline = microtime(true) + 3.0;
+            do {
+                if (@flock($fp, LOCK_EX | LOCK_NB)) { $got = true; break; }
+                usleep(50000);
+            } while (microtime(true) < $deadline);
+            if (!$got) LogService::log('state.json interlock not taken within 3 s; continuing without it', LogService::LOG_WARN, 'HubStore');
+        }
+        try {
+            return $fn();
+        } finally {
+            if ($fp) {
+                if ($got) @flock($fp, LOCK_UN);
+                fclose($fp);
+            }
+        }
+    }
+
+    /**
+     * Read-modify-write of state.json under the interlock (#666 R-160). $fn gets the
+     * CURRENT state and returns the state to save.
+     */
+    public static function updateState(callable $fn): bool {
+        return (bool)self::withStateLock(static function () use ($fn): bool {
+            return self::saveState($fn(self::getState()));
+        });
+    }
+
+    /**
+     * Save the projection ledger only (#666 R-160). A projection run loads the state at its
+     * start and saves at its end. A Settings save of a target set in between would be undone
+     * by saving the whole stale copy. Here the ledger comes from $state and every target set
+     * comes from the file as it is NOW.
+     */
+    public static function saveLedger(array $state): bool {
+        return self::updateState(static function (array $fresh) use ($state): array {
+            $fresh['projections'] = is_array($state['projections'] ?? null) ? $state['projections'] : [];
+            return $fresh;
+        });
     }
 
     public static function saveState(array $state): bool {

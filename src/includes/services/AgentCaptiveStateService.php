@@ -48,7 +48,7 @@ final class AgentCaptiveStateService
         if (is_string($env) && $env !== '') {
             return rtrim($env, '/');
         }
-        return StoragePathResolver::PLUGIN_BASE . '/' . self::STORE_DIR;
+        return StoragePathResolver::pluginBase() . '/' . self::STORE_DIR;
     }
 
     /** The store directory of one agent. */

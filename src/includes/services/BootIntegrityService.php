@@ -1021,7 +1021,7 @@ class BootIntegrityService {
      * @return array{0: string[]}
      */
     private static function buildSiblingCandidateDirs(): array {
-        $pluginBase    = StoragePathResolver::PLUGIN_BASE;
+        $pluginBase    = StoragePathResolver::pluginBase();
         $parentDir     = dirname($pluginBase);
         $candidateDirs = [];
 

@@ -194,6 +194,47 @@ class AtomicWriteService {
      * JSON convenience: encode + write atomically. Returns false on encode or
      * I/O failure. Callers needing to distinguish should call write() directly.
      */
+    /**
+     * The managed home root ("…/work/<user>/home") a path sits under, at any depth.
+     * Falls back to the nearest ancestor named "home". Null when there is none (#666 R-162).
+     */
+    public static function homeRootOf(string $path): ?string {
+        if (preg_match('#^(.*?/work/[^/]+/home)(?:/|$)#', $path, $m)) return $m[1];
+        $probe = dirname($path);
+        while ($probe !== '/' && $probe !== '' && $probe !== '.') {
+            if (basename($probe) === 'home') return $probe;
+            $probe = dirname($probe);
+        }
+        return null;
+    }
+
+    /** The directories above $file that do not exist yet, outermost first. */
+    public static function missingAncestors(string $file): array {
+        $missing = [];
+        $dir = dirname($file);
+        while ($dir !== '/' && $dir !== '' && $dir !== '.' && !is_dir($dir)) {
+            array_unshift($missing, $dir);
+            $dir = dirname($dir);
+        }
+        return $missing;
+    }
+
+    /**
+     * A root web request writes into a home that belongs to the session user. Give the
+     * file itself, and each directory this write created, to the home owner so the agent
+     * can rewrite its own config. Best-effort, never fatal; a root-owned home needs nothing.
+     */
+    public static function chownToHomeOwner(string $file, array $createdDirs = []): void {
+        if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) return;
+        $home = self::homeRootOf($file);
+        if ($home === null) return;
+        $st = @stat($home);
+        if (!is_array($st) || (int)$st['uid'] === 0) return;
+        $uid = (int)$st['uid']; $gid = (int)$st['gid'];
+        foreach ($createdDirs as $d) { @chown($d, $uid); @chgrp($d, $gid); }
+        @chown($file, $uid); @chgrp($file, $gid);
+    }
+
     public static function writeJson(string $path, $data, int $flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE): bool {
         $json = json_encode($data, $flags);
         if ($json === false) {

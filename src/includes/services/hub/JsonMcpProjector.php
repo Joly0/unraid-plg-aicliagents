@@ -77,6 +77,38 @@ abstract class JsonMcpProjector extends VendorProjector {
         return $this->atomicWrite($file, $json . "\n");
     }
 
+    /**
+     * The text with // and slash-star comments removed (and trailing commas before } or ]),
+     * leaving text inside strings alone. Used only to explain WHY a file is refused (#666 R-159).
+     */
+    public static function stripJsonComments(string $raw): string {
+        $out = '';
+        $len = strlen($raw);
+        $inStr = false;
+        for ($i = 0; $i < $len; $i++) {
+            $c = $raw[$i];
+            if ($inStr) {
+                $out .= $c;
+                if ($c === '\\' && $i + 1 < $len) { $out .= $raw[++$i]; }
+                elseif ($c === '"') { $inStr = false; }
+                continue;
+            }
+            if ($c === '"') { $inStr = true; $out .= $c; continue; }
+            if ($c === '/' && $i + 1 < $len && $raw[$i + 1] === '/') {
+                while ($i < $len && $raw[$i] !== "\n") $i++;
+                $out .= "\n";
+                continue;
+            }
+            if ($c === '/' && $i + 1 < $len && $raw[$i + 1] === '*') {
+                $end = strpos($raw, '*/', $i + 2);
+                $i = $end === false ? $len : $end + 1;
+                continue;
+            }
+            $out .= $c;
+        }
+        return (string)preg_replace('/,(\s*[}\]])/', '$1', $out);
+    }
+
     /** 'mcpServers.<name>' → '<name>' (null if not a managed-key shape). */
     public function serverNameFromKey(string $key): ?string {
         $prefix = $this->topKey() . '.';

@@ -18,6 +18,16 @@ class ConfigService {
     private static ?string $lastWorkspaceSaveMessage = null;
 
     /**
+     * The plugin config file. Production: CONFIG_PATH. The env AICLI_FLASH_ROOT redirects the
+     * flash folder (SecretPaths::flashRoot); tests/bootstrap.php points it at a temp folder,
+     * so a test never reads or writes the real file (#646, F19).
+     */
+    public static function configPath(): string {
+        self::refuseLiveStateInTests();
+        return SecretPaths::flashRoot() . '/unraid-aicliagents.cfg';
+    }
+
+    /**
      * Retrieves the plugin configuration.
      * @return array The configuration array.
      */
@@ -233,11 +243,11 @@ class ConfigService {
             'home_cache_ram_mb'                     => '1024',
         ];
 
-        if (!file_exists(self::CONFIG_PATH)) {
+        if (!file_exists(self::configPath())) {
             return $defaults;
         }
 
-        $config = @parse_ini_file(self::CONFIG_PATH);
+        $config = @parse_ini_file(self::configPath());
         if ($config === false) {
             return $defaults;
         }
@@ -263,8 +273,8 @@ class ConfigService {
      * file is absent or unparsable, same as getConfig()'s own fallback.
      */
     private static function rawConfigFile(): array {
-        if (!file_exists(self::CONFIG_PATH)) return [];
-        $config = @parse_ini_file(self::CONFIG_PATH);
+        if (!file_exists(self::configPath())) return [];
+        $config = @parse_ini_file(self::configPath());
         return is_array($config) ? $config : [];
     }
 
@@ -339,7 +349,7 @@ class ConfigService {
         if (!empty($skipped)) {
             LogService::log("Plugin config: left out keys the INI reader cannot hold: " . implode(', ', $skipped), LogService::LOG_WARN, "ConfigService");
         }
-        return AtomicWriteService::write(self::CONFIG_PATH, $content);
+        return AtomicWriteService::write(self::configPath(), $content);
     }
 
     // Phase 5 consolidate-policy bounds (mirror bash common.sh constants).
@@ -470,7 +480,7 @@ class ConfigService {
         $config = array_merge($config, $newConfig);
 
         if (!self::writeConfigFile($config)) {
-            LogService::log("Error saving configuration to " . self::CONFIG_PATH, LogService::LOG_ERROR, "ConfigService");
+            LogService::log("Error saving configuration to " . self::configPath(), LogService::LOG_ERROR, "ConfigService");
             return false;
         }
 
@@ -865,6 +875,14 @@ class ConfigService {
             . 'again from the drawer. The log records what went wrong.'];
     }
 
+    /** True when workspaces.json holds content that is not a JSON object or list (#666 R-155). */
+    private static function workspacesFileUnreadable(string $file): bool {
+        if (!file_exists($file)) return false;
+        $raw = @file_get_contents($file);
+        if ($raw === false || trim($raw) === '') return false;
+        return !is_array(json_decode($raw, true));
+    }
+
     public static function getWorkspaces() {
         $file = self::getUserStatePath() . "/workspaces.json";
 
@@ -1001,10 +1019,20 @@ class ConfigService {
      */
     public static function saveWorkspaces($data, array $removedIds = [], bool $publish = true) {
         self::$lastWorkspaceSaveMessage = null;
+        $file = self::getUserStatePath() . "/workspaces.json";
+        // #666 R-155: getWorkspaces() turns a file it cannot parse into the empty
+        // default. Saving on top of that default would replace every workspace with
+        // the one record of this save. Keep a copy and refuse until the file is fixed.
+        if (self::workspacesFileUnreadable($file)) {
+            $copy = $file . '.corrupt-' . date('Ymd-His');
+            if (!glob($file . '.corrupt-*')) @copy($file, $copy);
+            LogService::log("saveWorkspaces REFUSED: $file cannot be parsed; a copy was kept as " . basename($copy), LogService::LOG_ERROR, "ConfigService");
+            self::$lastWorkspaceSaveMessage = 'The workspace list file is damaged, so nothing was saved. A copy was kept next to it as workspaces.json.corrupt-*. Restore or remove the damaged file, then retry.';
+            return false;
+        }
         $before = self::getWorkspaces();
         $data = self::mergeWorkspaceSnapshot($before, $data, $removedIds);
         $count = count($data['sessions'] ?? []);
-        $file = self::getUserStatePath() . "/workspaces.json";
         if (self::workspaceDataMatchesFile($file, $data)) {
             LogService::log("saveWorkspaces unchanged: count=$count path=$file", LogService::LOG_DEBUG, "ConfigService");
             return true;
@@ -1361,7 +1389,7 @@ class ConfigService {
         if (!file_exists($file)) {
             // Fallback to legacy path
             $hash = md5($path . $agentId);
-            $legacyFile = "/boot/config/plugins/unraid-aicliagents/envs/env_$hash.json";
+            $legacyFile = SecretPaths::flashRoot() . "/envs/env_$hash.json";
             if (file_exists($legacyFile)) return json_decode(file_get_contents($legacyFile), true) ?: [];
             return [];
         }

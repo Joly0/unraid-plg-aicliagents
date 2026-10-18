@@ -582,17 +582,32 @@ class AssetSurfaceService {
             }
         }
 
-        if ($checkFenceContent && is_file($absPath)) {
-            // Bounded read — fence markers sit near the top of small instruction
-            // files; 256KB comfortably covers any real CLAUDE.md/AGENTS.md.
+        if ($checkFenceContent && is_file($absPath) && !self::isNonInstructionFile($absPath)) {
+            // Bounded read — 256KB comfortably covers any real CLAUDE.md/AGENTS.md.
             $contents = @file_get_contents($absPath, false, null, 0, 262144);
-            if ($contents !== false
-                && (strpos($contents, '>>> aicli-hub') !== false || strpos($contents, '>>> aicli-file-paths') !== false)) {
-                return true;
-            }
+            if ($contents !== false && self::hasManagedFence($contents)) return true;
         }
 
         return false;
+    }
+
+    /**
+     * #666 R-164: a session transcript, a log or a database is never an instruction file.
+     * Reading up to 256 KB of each one only to look for a marker was wasted work, and a
+     * transcript that QUOTES the marker was shown as managed.
+     */
+    private static function isNonInstructionFile(string $absPath): bool {
+        $ext = strtolower(pathinfo($absPath, PATHINFO_EXTENSION));
+        return in_array($ext, ['jsonl', 'ndjson', 'json', 'log', 'db', 'sqlite', 'sqlite3', 'pb', 'bin', 'png', 'jpg', 'jpeg', 'gif', 'zip', 'gz'], true);
+    }
+
+    /**
+     * True when the text holds a Config Hub fence line: the open marker at the START of a
+     * line (after optional blanks), behind the comment opener the projectors write ("#" or
+     * "<!--"). A quote of the marker inside a sentence or a JSON string does not count.
+     */
+    public static function hasManagedFence(string $contents): bool {
+        return preg_match('/^[ \t]*(?:#|<!--)[ \t]*>>> aicli-(?:hub|file-paths)\b/m', $contents) === 1;
     }
 
     /** Union of every projector relPath() across all four Hub registries. */

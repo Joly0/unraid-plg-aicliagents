@@ -1435,7 +1435,7 @@ class SupervisorService {
         require_once __DIR__ . '/StoragePathResolver.php';
         require_once __DIR__ . '/StorageMountService.php';
         $upper = StorageMountService::resolveHomeUpperPath($id) ?? '';
-        if (strpos($upper, StoragePathResolver::ZRAM_BASE . '/') !== 0 || !is_dir($upper)) {
+        if (strpos($upper, StoragePathResolver::zramBase() . '/') !== 0 || !is_dir($upper)) {
             return 0;
         }
         $out = shell_exec('du -sm ' . escapeshellarg($upper) . ' 2>/dev/null');

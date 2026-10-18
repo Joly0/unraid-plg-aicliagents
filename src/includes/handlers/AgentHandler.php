@@ -365,6 +365,12 @@ class AgentHandler {
             return ['status' => 'error', 'message' => 'Invalid agent id'];
         }
 
+        // #666 R-165: the version goes to the installer as an argument. A package source such
+        // as "github:owner/repo" is not a version, and npm would run it as root.
+        if ($version !== '' && !\AICliAgents\Services\AgentRegistry::isSafeVersionString($version)) {
+            return ['status' => 'error', 'message' => 'Invalid version: use a version number such as 1.2.3, or a tag such as latest'];
+        }
+
         // Check if an installation is already active for this specific agent
         if (\AICliAgents\Services\PendingAgentUpgradeService::backgroundInstallRunning($agentId)) {
             return ['status' => 'error', 'message' => 'An installation is already in progress for this agent.'];
@@ -1054,6 +1060,9 @@ class AgentHandler {
             return ['status' => 'error', 'message' => 'Unsupported release channel'];
         }
         $channel = \AICliAgents\Services\AgentRegistry::normalizeChannel($channel);
+        if ($pinned !== null && !\AICliAgents\Services\AgentRegistry::isSafeVersionString((string)$pinned)) {
+            return ['status' => 'error', 'message' => 'Invalid version: use a version number such as 1.2.3'];
+        }
         if ($channel === 'pinned' && $pinned === null) {
             $installed = \AICliAgents\Services\AgentRegistry::getInstalledVersion($agentId);
             if (in_array($installed, ['', '0.0.0', 'unknown', 'installed'], true)) {

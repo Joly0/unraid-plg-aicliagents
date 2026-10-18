@@ -118,12 +118,14 @@ class AgentSettingsSeedService {
 
         if (!empty($seeded)) {
             $dir = dirname($file);
+            $created = AtomicWriteService::missingAncestors($file); // #666 R-156: give new dirs and the file to the home owner
             if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
                 return ['seeded' => [], 'skipped' => $skipped, 'errors' => ['mkdir_failed']];
             }
             if (!AtomicWriteService::writeJson($file, $data)) {
                 return ['seeded' => [], 'skipped' => $skipped, 'errors' => ['write_failed']];
             }
+            AtomicWriteService::chownToHomeOwner($file, $created);
             self::writeSeededSidecar($agentId, $sidecar);
             LogService::log("seedSettings: $agentId — seeded " . implode(',', $seeded) . " into $rel", LogService::LOG_INFO, 'AgentSettingsSeed');
         }

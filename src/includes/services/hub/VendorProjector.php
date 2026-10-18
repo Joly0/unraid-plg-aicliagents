@@ -112,37 +112,14 @@ abstract class VendorProjector {
         return $v;
     }
 
+
     /** Atomic write + best-effort chown to the session user (root web ctx → user home). */
     protected function atomicWrite(string $file, string $content): bool {
-        $existedBefore = is_dir(dirname($file));
+        // #666 R-162: chown the file itself and every directory this write creates, at any
+        // depth below the home. The old walk gave up after six levels.
+        $created = AtomicWriteService::missingAncestors($file);
         if (!AtomicWriteService::write($file, $content)) return false;
-        $this->fixOwnership($file, !$existedBefore);
+        AtomicWriteService::chownToHomeOwner($file, $created);
         return true;
-    }
-
-    /**
-     * Vendor files live in the session user's home; the web ctx runs as root.
-     * Chown the file (and a freshly created parent dir) to the home owner so the
-     * agent itself can rewrite its own config. Best-effort, never fatal.
-     */
-    private function fixOwnership(string $file, bool $chownParent): void {
-        $home = dirname($file);
-        // Walk up to find the home root's owner: use the directory two levels up
-        // is fragile — instead stat the home dir passed via the file path's
-        // closest existing ancestor that is not root-owned. Pragmatic: match the
-        // owner of the HOME root, which the orchestrator's writes always sit under.
-        $uid = null; $gid = null;
-        $probe = $home;
-        for ($i = 0; $i < 6 && $probe !== '/' && $probe !== ''; $i++) {
-            if (basename($probe) === 'home') { // /tmp/unraid-aicliagents/work/<user>/home
-                $st = @stat($probe);
-                if (is_array($st)) { $uid = (int)$st['uid']; $gid = (int)$st['gid']; }
-                break;
-            }
-            $probe = dirname($probe);
-        }
-        if ($uid === null || $uid === 0) return; // root session or unknown — nothing to fix
-        @chown($file, $uid); @chgrp($file, $gid);
-        if ($chownParent) { @chown(dirname($file), $uid); @chgrp(dirname($file), $gid); }
     }
 }

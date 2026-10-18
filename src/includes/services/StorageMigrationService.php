@@ -154,8 +154,9 @@ class StorageMigrationService {
         string $persistPath,
         string $mnt,
         ?string $mounts = null,
-        string $zramBase = StoragePathResolver::ZRAM_BASE
+        ?string $zramBase = null
     ): array {
+        $zramBase ??= StoragePathResolver::zramBase();
         $dirs = [rtrim($zramBase, '/') . "/{$type}s/$id"];
         if ($type !== 'home') return $dirs;
         $safe = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $id) ?: 'unknown';

@@ -88,20 +88,29 @@ class DiagnosticsService {
         if (!is_dir($dir)) @mkdir($dir, 0700, true);
         $version = (string)ConfigService::getVersion();
         $version = preg_replace('/[^A-Za-z0-9._-]/', '_', $version) ?: 'unknown';
-        $name = 'aicli-support-' . $version . '-' . gmdate('Ymd\THis\Z') . '.zip';
+        // #666 R-166: a random part in the name (two bundles in the same second do not
+        // overwrite each other) and mode 0600 (the bundle must not be readable by others,
+        // whatever the umask is).
+        $name = 'aicli-support-' . $version . '-' . bin2hex(random_bytes(3)) . '-' . gmdate('Ymd\THis\Z') . '.zip';
         $path = rtrim($dir, '/') . '/' . $name;
 
-        $zip = new \ZipArchive();
-        if ($zip->open($path, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
-            throw new \RuntimeException("Could not create bundle zip at $path");
+        $oldUmask = umask(0077);
+        try {
+            $zip = new \ZipArchive();
+            if ($zip->open($path, \ZipArchive::CREATE | \ZipArchive::EXCL) !== true) {
+                throw new \RuntimeException("Could not create bundle zip at $path");
+            }
+            foreach ($files as $fname => $content) {
+                $zip->addFromString($fname, $content);
+            }
+            if (!$zip->close()) {
+                @unlink($path);
+                throw new \RuntimeException('Bundle zip finalisation failed');
+            }
+        } finally {
+            umask($oldUmask);
         }
-        foreach ($files as $fname => $content) {
-            $zip->addFromString($fname, $content);
-        }
-        if (!$zip->close()) {
-            @unlink($path);
-            throw new \RuntimeException('Bundle zip finalisation failed');
-        }
+        @chmod($path, 0600);
 
         self::pruneOldBundles($dir);
         LogService::log('Support bundle created: ' . $name . ' (' . count($files) . ' sections)', LogService::LOG_INFO, 'Diagnostics');

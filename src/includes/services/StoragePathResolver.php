@@ -37,7 +37,7 @@ class StoragePathResolver {
         $config = ConfigService::getConfig();
         $path   = $config['agent_storage_path'] ?? '';
         if (empty(trim($path))) {
-            $path = self::PLUGIN_BASE;
+            $path = self::pluginBase();
         }
         return self::normalize($path);
     }
@@ -73,7 +73,7 @@ class StoragePathResolver {
             }
         }
         if ($path === '') {
-            $path = self::PLUGIN_BASE . '/persistence';
+            $path = self::pluginBase() . '/persistence';
         }
         return self::normalize($path);
     }
@@ -114,7 +114,7 @@ class StoragePathResolver {
         // the L3.5 integration suite (run.sh points it at tmpfs) — a test-only hook
         // (same pattern as AICLI_ITEST_BACKEND), unset in production -> the flash path.
         $e = getenv('AICLI_MANIFEST_PATH');
-        return ($e !== false && $e !== '') ? $e : self::PLUGIN_BASE . '/layer_manifest.json';
+        return ($e !== false && $e !== '') ? $e : self::pluginBase() . '/layer_manifest.json';
     }
 
     /**
@@ -123,7 +123,7 @@ class StoragePathResolver {
      */
     public static function lifecycleLogPath(): string {
         $e = getenv('AICLI_LIFECYCLE_LOG');
-        return ($e !== false && $e !== '') ? $e : self::PLUGIN_BASE . '/lifecycle.log';
+        return ($e !== false && $e !== '') ? $e : self::pluginBase() . '/lifecycle.log';
     }
 
     /**
@@ -134,7 +134,7 @@ class StoragePathResolver {
      */
     public static function degradedStatePath(): string {
         $e = getenv('AICLI_DEGRADED_STATE_DIR');
-        $dir = ($e !== false && $e !== '') ? $e : self::PLUGIN_BASE . '/state';
+        $dir = ($e !== false && $e !== '') ? $e : self::pluginBase() . '/state';
         return $dir . '/degraded.json';
     }
 
@@ -145,7 +145,7 @@ class StoragePathResolver {
      */
     public static function homeMount($user): string {
         $user = self::normalizeUser($user);
-        return self::normalize(self::MOUNT_ROOT . "/work/$user/home");
+        return self::normalize(self::mountRoot() . "/work/$user/home");
     }
 
     /**
@@ -167,28 +167,38 @@ class StoragePathResolver {
      * @param string $id   username or agent id
      */
     public static function zramUpper(string $type, string $id): string {
-        return self::normalize(self::ZRAM_BASE . "/{$type}s/$id/upper");
+        return self::normalize(self::zramBase() . "/{$type}s/$id/upper");
     }
 
     /**
      * ZRAM overlay work directory for a given type and id.
      */
     public static function zramWork(string $type, string $id): string {
-        return self::normalize(self::ZRAM_BASE . "/{$type}s/$id/work");
+        return self::normalize(self::zramBase() . "/{$type}s/$id/work");
     }
 
     /**
-     * Returns PLUGIN_BASE constant as a method (for callers that prefer instance-style).
+     * The plugin folder on the flash drive. Production: PLUGIN_BASE. The env AICLI_FLASH_ROOT
+     * redirects it (SecretPaths::flashRoot); tests/bootstrap.php points it at a temp folder
+     * (#646, F19). A test run that would get the live folder is refused.
      */
     public static function pluginBase(): string {
-        return self::PLUGIN_BASE;
+        ConfigService::refuseLiveStateInTests();
+        return SecretPaths::flashRoot();
     }
 
     /**
-     * Returns MOUNT_ROOT constant as a method.
+     * The RAM state folder (work folders, mounts, markers). Production: MOUNT_ROOT. The env
+     * AICLI_STATE_ROOT redirects it (SecretPaths::stateRoot); see pluginBase().
      */
     public static function mountRoot(): string {
-        return self::MOUNT_ROOT;
+        ConfigService::refuseLiveStateInTests();
+        return SecretPaths::stateRoot();
+    }
+
+    /** The RAM folder of the ZRAM upper layers. Production: ZRAM_BASE. */
+    public static function zramBase(): string {
+        return self::mountRoot() . '/zram_upper';
     }
 
     /**
@@ -221,7 +231,12 @@ class StoragePathResolver {
         }
 
         // Plugin-internal paths are always allowed
-        if (self::isUnder($path, self::PLUGIN_BASE) || self::isUnder($path, self::MOUNT_ROOT)) {
+        // The live folders and, in a test run, their sandbox twins.
+        $isInternal = false;
+        foreach (array_unique([self::PLUGIN_BASE, self::MOUNT_ROOT, self::pluginBase(), self::mountRoot()]) as $root) {
+            if (self::isUnder($path, $root)) { $isInternal = true; break; }
+        }
+        if ($isInternal) {
             return ['ok' => true, 'reason' => null];
         }
 

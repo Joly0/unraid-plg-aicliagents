@@ -49,7 +49,7 @@ class PerfTrace {
         if (self::$cfgOn === null) {
             $on = false;
             try {
-                $file = '/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg';
+                $file = SecretPaths::flashRoot() . '/unraid-aicliagents.cfg';
                 $cfg = is_file($file) ? @parse_ini_file($file) : false;
                 $on = is_array($cfg) && (string)($cfg['perf_trace'] ?? '0') === '1';
             } catch (\Throwable $e) {

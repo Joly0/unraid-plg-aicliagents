@@ -516,6 +516,9 @@ class GitHomeService {
             foreach ($valid as $k => $v) {
                 if ($v === '' || strlen($v) < 6) continue;
                 $pairs[] = [$v, '{' . $k . '}'];
+                // #666 R-158: a value with a quote, a backslash or a newline (a PEM key) sits
+                // in a JSON, TOML or YAML file in its ESCAPED form. Match those forms too.
+                foreach (self::escapedForms($v) as $form) $pairs[] = [$form, '{' . $k . '}'];
             }
             usort($pairs, static fn($a, $b) => strlen($b[0]) <=> strlen($a[0]));
             foreach ($pairs as [$val, $ph]) $content = str_replace($val, $ph, $content);
@@ -523,6 +526,22 @@ class GitHomeService {
         }
         foreach ($valid as $k => $v) $content = str_replace('{' . $k . '}', $v, $content);
         return $content;
+    }
+
+    /**
+     * The ways a secret value can be written inside a quoted string of a config file:
+     * JSON or TOML or YAML double-quoted (with and without the escaped slash), and YAML
+     * single-quoted. Only forms that differ from the raw value are returned.
+     * @return string[]
+     */
+    public static function escapedForms(string $value): array {
+        $forms = [];
+        $json = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (is_string($json) && strlen($json) >= 2) $forms[] = substr($json, 1, -1);
+        $jsonSlash = json_encode($value, JSON_UNESCAPED_UNICODE);
+        if (is_string($jsonSlash) && strlen($jsonSlash) >= 2) $forms[] = substr($jsonSlash, 1, -1);
+        $forms[] = str_replace("'", "''", $value);
+        return array_values(array_filter(array_unique($forms), static fn($f) => $f !== $value && strlen($f) >= 6));
     }
 
     /**
@@ -705,7 +724,13 @@ class GitHomeService {
         }
 
         $commit = self::lockedCommit($fresh ? 'hub: initial config backup' : 'hub: refresh managed config');
-        if (($commit['status'] ?? '') === 'busy') return $commit;
+        // #666 R-157: a failed first commit must not be reported as a working backup.
+        // The caller flips the opt-in only on 'ok'. 'busy' and 'error' go back as they are.
+        if (($commit['status'] ?? '') !== 'ok') {
+            self::fixOwnership($home);
+            if (($commit['status'] ?? '') === 'busy') return $commit;
+            return ['status' => 'error', 'message' => (string)($commit['message'] ?? 'the first config backup commit failed')];
+        }
 
         self::fixOwnership($home);
         LogService::log('hub git: init ' . ($fresh ? 'created repo' : 'refreshed existing repo') . " at $home", LogService::LOG_INFO, 'GitHomeService');

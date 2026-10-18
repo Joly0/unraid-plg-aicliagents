@@ -30,6 +30,12 @@ use AICliAgents\Services\TerminalService;
 
 class HubHandler
 {
+    /**
+     * A drift key as the projectors make it: an MCP name path, a tree file path, or an
+     * OpenCode-Claude entry such as "instructions:~/.claude/rules/my rule.md" (#666 R-163).
+     */
+    public const DRIFT_KEY_RE = '#^[A-Za-z0-9_.~][A-Za-z0-9_./:~ +@,=-]{0,200}$#';
+
     public static function handle($action, $id): ?array
     {
         switch ($action) {
@@ -567,7 +573,7 @@ class HubHandler
         }
         // Tree keys (H-03) are relative file paths (e.g. 'my-skill/SKILL.md') —
         // slashes allowed, traversal rejected outright.
-        if (!preg_match('#^[A-Za-z0-9_.][A-Za-z0-9_./-]{0,200}$#', $key) || strpos($key, '..') !== false) {
+        if (!preg_match(self::DRIFT_KEY_RE, $key) || strpos($key, '..') !== false) {
             return ['status' => 'error', 'message' => 'invalid key'];
         }
         return HubProjector::resolveDrift($file, $key, $mode);

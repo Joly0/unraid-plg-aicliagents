@@ -241,7 +241,7 @@ class StorageTargetService {
         }
 
         require_once __DIR__ . '/StoragePathResolver.php';
-        $workRoot = StoragePathResolver::MOUNT_ROOT . '/work';
+        $workRoot = StoragePathResolver::mountRoot() . '/work';
         if (self::isUnderPath($resolved, $workRoot)) {
             return self::backupTargetResult(false, $resolved, $fstype, 0,
                 'The backup target cannot be inside a home mount.');

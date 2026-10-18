@@ -67,9 +67,29 @@ class GeminiCommandsProjector extends TreeProjector {
         $fmText = substr($rest, 0, $m[0][1]);
         $body   = substr($rest, $m[0][1] + strlen($m[0][0]));
         $desc = null;
-        foreach (preg_split('/\r?\n/', $fmText) as $line) {
+        $fmLines = preg_split('/\r?\n/', $fmText);
+        foreach ($fmLines as $idx => $line) {
             if (preg_match('/^\s*description\s*:\s*(.*)$/i', $line, $mm)) {
                 $desc = trim($mm[1]);
+                // #666 R-161: "description: |" or ">" starts a block scalar; the text is on
+                // the indented lines that follow, not the indicator itself.
+                if (preg_match('/^([|>])[+-]?\d?$/', $desc, $ind)) {
+                    $block = [];
+                    for ($j = $idx + 1; $j < count($fmLines); $j++) {
+                        $next = $fmLines[$j];
+                        if (trim($next) !== '' && !preg_match('/^[ \t]/', $next)) break;
+                        $block[] = $next;
+                    }
+                    $indent = null;
+                    foreach ($block as $b) {
+                        if (trim($b) === '') continue;
+                        preg_match('/^[ \t]*/', $b, $w);
+                        $indent = $indent === null ? strlen($w[0]) : min($indent, strlen($w[0]));
+                    }
+                    $block = array_map(static fn($b) => trim($b) === '' ? '' : substr($b, (int)$indent), $block);
+                    $desc = trim($ind[1] === '|' ? implode("\n", $block) : implode(' ', array_filter($block, static fn($b) => $b !== '')));
+                    break;
+                }
                 $len = strlen($desc);
                 if ($len >= 2 && ($desc[0] === '"' || $desc[0] === "'") && substr($desc, -1) === $desc[0]) {
                     $desc = substr($desc, 1, -1);
