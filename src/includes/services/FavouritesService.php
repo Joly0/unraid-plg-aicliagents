@@ -331,24 +331,19 @@ final class FavouritesService {
         if ($handle === false) {
             return $fn();
         }
-        $locked = false;
         for ($tries = 0; $tries < self::LOCK_RETRIES; $tries++) {
             if (@flock($handle, LOCK_EX | LOCK_NB)) {
-                $locked = true;
-                break;
+                try {
+                    return $fn();
+                } finally {
+                    @flock($handle, LOCK_UN);
+                    fclose($handle);
+                }
             }
             usleep(self::LOCK_RETRY_DELAY_US);
         }
-        if (!$locked) {
-            fclose($handle);
-            return $whenBusy;
-        }
-        try {
-            return $fn();
-        } finally {
-            if ($locked) @flock($handle, LOCK_UN);
-            fclose($handle);
-        }
+        fclose($handle);
+        return $whenBusy;
     }
 
     private static function nowMs(): int {
