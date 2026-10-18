@@ -965,7 +965,11 @@ class StorageMountService {
         $isMounted = $isMounted ?? static function (string $p): bool { return self::isMounted($p); };
         $pause = $pause ?? static function (int $us): void { usleep($us); };
         $path = rtrim($path, '/');
-        if ($path === '' || !$isMounted($path)) return true;
+        if ($path === '') return true;
+        // The first probe is kept in a variable: PHPStan treats an identical later call as the same
+        // value and flags the re-check below as always false. Both probes still run, as before.
+        $wasMounted = $isMounted($path);
+        if (!$wasMounted) return true;
         $tries = max(1, $tries);
         for ($i = 1; $i <= $tries; $i++) {
             $rc = $umount($path);
