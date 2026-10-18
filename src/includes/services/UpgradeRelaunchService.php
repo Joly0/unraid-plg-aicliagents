@@ -924,6 +924,12 @@ class UpgradeRelaunchService
         if ($sid === '' || $path === '') {
             return 'skipped';
         }
+        // #605: the upgrade may have waited minutes or hours. A workspace the person deleted
+        // or closed on purpose in that time must stay gone.
+        if (!self::sessionStillWanted($sid)) {
+            LogService::log("relaunchOne: skipped $sid: the workspace was deleted or closed on purpose while the relaunch waited", LogService::LOG_INFO, "UpgradeRelaunchService");
+            return 'skipped';
+        }
         if ($isRunning($sid)) {
             if ($isHealthy($sid)) {
                 // Genuinely healthy (live agent) — e.g. a user reopened the
@@ -946,6 +952,34 @@ class UpgradeRelaunchService
             if ($i < self::START_PROBES - 1) $sleeper(1);
         }
         return 'failed';
+    }
+
+    /** Test seam: fn(string $sid): bool. Null = read the registry and the close marker. */
+    public static $wantedProbe = null;
+
+    /**
+     * #605: true when the person still wants this workspace back. False when the registry
+     * no longer lists it or the person closed it on purpose. Fails open: an unreadable
+     * registry must not stop an upgrade relaunch.
+     */
+    private static function sessionStillWanted(string $sid): bool
+    {
+        if (is_callable(self::$wantedProbe)) {
+            return (bool)call_user_func(self::$wantedProbe, $sid);
+        }
+        try {
+            if (AutoLaunchSuppression::isSuppressed($sid)) return false;
+            // No registry file yet = nothing to compare with: keep the old behaviour.
+            if (!is_file(ConfigService::getUserStatePath() . '/workspaces.json')) return true;
+            $sessions = ConfigService::getWorkspaces()['sessions'] ?? null;
+            if (!is_array($sessions)) return true;
+            foreach ($sessions as $s) {
+                if (is_array($s) && (string)($s['id'] ?? '') === $sid) return true;
+            }
+            return false;
+        } catch (\Throwable $e) {
+            return true;
+        }
     }
 
     /** Probes of isRunning after a start, one second apart, before the start counts as refused. */

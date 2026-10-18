@@ -491,7 +491,7 @@ function saveAICliVersion($agentId, $version) {
 /**
  * Wrapper for starting a terminal session.
  */
-function startAICliTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli') {
+function startAICliTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli', ?float $lockWaitSeconds = null) {
     // Fix 2026-09-12: this wrapper is the single funnel for every explicit,
     // browser-initiated start (TerminalHandler start/emergency_start/restart/
     // restart_fresh — see docs/specs/2026-04-27-auto-launch-workspaces-design.md).
@@ -501,7 +501,7 @@ function startAICliTerminal($id = 'default', $path = null, $chatId = null, $agen
     // TerminalService::startTerminal directly and never pass through here, so
     // they never clear a marker they did not set.
     AutoLaunchSuppression::clear((string)$id);
-    return TerminalService::startTerminal($id, $path, $chatId, $agentId);
+    return TerminalService::startTerminal($id, $path, $chatId, $agentId, 'interactive', $lockWaitSeconds);
 }
 
 /**

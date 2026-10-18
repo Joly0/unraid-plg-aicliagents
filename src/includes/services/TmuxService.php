@@ -385,25 +385,21 @@ class TmuxService {
             : ['status' => 'error', 'message' => $r['err'] ?: $r['out'], 'conf' => $conf];
     }
 
+    /**
+     * Kill ONE session of an agent. #612: every session runs on its own tmux server, so the
+     * session is resolved to its socket first (the default server never has it), and the
+     * target is the exact name ("=" stops tmux from matching a prefix). With no session id
+     * nothing is killed: the old "kill every session of the agent" branch asked the wrong
+     * server and, if it had worked, would have ended every workspace of the agent.
+     *
+     * @return list<string> the names of the sessions killed (empty when not found or not killed)
+     */
     public static function killSessions(string $agentId, ?string $sessionId = null): array {
-        $killed = [];
-        if ($sessionId) {
-            $target = "aicli-agent-{$agentId}-{$sessionId}";
-            $r = self::runTmux(['kill-session', '-t', $target]);
-            if ($r['rc'] === 0) $killed[] = $target;
-            return $killed;
-        }
-        $prefix = "aicli-agent-{$agentId}-";
-        $r = self::runTmux(['list-sessions', '-F', '#{session_name}']);
-        if ($r['rc'] !== 0 || $r['out'] === '') return $killed;
-        foreach (explode("\n", $r['out']) as $name) {
-            $name = trim($name);
-            if (strpos($name, $prefix) === 0) {
-                $k = self::runTmux(['kill-session', '-t', $name]);
-                if ($k['rc'] === 0) $killed[] = $name;
-            }
-        }
-        return $killed;
+        if ($sessionId === null || $sessionId === '' || $sessionId === 'default') return [];
+        [$session, $sock] = self::resolveSession($agentId, $sessionId);
+        if ($session === '') return [];
+        $r = self::runTmuxAt($sock, ['kill-session', '-t', '=' . $session]);
+        return $r['rc'] === 0 ? [$session] : [];
     }
 
     // ---------- Per-session live operations (T-04 / T-06) ----------
@@ -718,6 +714,19 @@ class TmuxService {
     }
 
     /**
+     * #615: tmux reads an argv element that ends in ";" as a command separator and drops
+     * it, so the text "foo;" typed "foo" and the ";" was lost. A trailing "\;" is the
+     * tmux form of a literal semicolon: tmux turns "\;" into ";" and keeps the argument.
+     * Only a trailing ";" needs this; a ";" inside the text is safe.
+     */
+    public static function tmuxLiteralArg(string $text): string {
+        if ($text !== '' && substr($text, -1) === ';') {
+            return substr($text, 0, -1) . '\\;';
+        }
+        return $text;
+    }
+
+    /**
      * Send one allow-listed special key, or a short run of literal text, into
      * a live session — the mobile terminal's arrow pad / Esc-Tab-Ctrl row and
      * its plain-text keyboard input. Exactly one of `$key`/`$text` must be
@@ -763,7 +772,7 @@ class TmuxService {
 
         $send = $hasKey
             ? ['send-keys', '-t', $name, $key]
-            : ['send-keys', '-t', $name, '-l', '--', $text];
+            : ['send-keys', '-t', $name, '-l', '--', self::tmuxLiteralArg($text)];
         $argv = $inMode
             ? array_merge(['send-keys', '-t', $name, '-X', 'cancel', ';'], $send)
             : $send;

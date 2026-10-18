@@ -113,8 +113,14 @@ class TmuxHandler {
         if (empty($agentId)) {
             return ['status' => 'error', 'message' => 'agentId required'];
         }
-        $sessionId = ($id !== 'default') ? $id : null;
-        $killed = TmuxService::killSessions($agentId, $sessionId);
+        // #612: the dispatcher turns a missing id into "default". That must never mean "all".
+        if ($id === 'default' || $id === '') {
+            return ['status' => 'error', 'message' => 'session id required'];
+        }
+        $killed = TmuxService::killSessions($agentId, $id);
+        if ($killed === []) {
+            return ['status' => 'error', 'message' => 'Session not found or could not be stopped', 'killed' => []];
+        }
         return ['status' => 'ok', 'killed' => $killed];
     }
 

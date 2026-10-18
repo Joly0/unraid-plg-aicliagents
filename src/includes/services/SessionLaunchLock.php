@@ -31,6 +31,9 @@ class SessionLaunchLock
     /** How long a close or a restart waits for a start of the same workspace. */
     public const CLOSE_WAIT_SECONDS = 90.0;
 
+    /** #611: how long a browser-facing start waits. It stays below the web request time limit, so the page gets an answer, not a 504. */
+    public const WEB_START_WAIT_SECONDS = 25.0;
+
     /** Poll interval of the non-blocking lock loop. */
     private const POLL_US = 100000;
 

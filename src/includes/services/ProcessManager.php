@@ -1004,11 +1004,9 @@ class ProcessManager {
             return false;
         }
 
-        $escapedSock = escapeshellarg($sock);
-        $pids = [];
-        exec("pgrep -f \"ttyd.*$escapedSock\" 2>/dev/null", $pids);
-
-        return !empty($pids);
+        // #607: use the shared probe (correct quoting, test seam); the old double-quoted
+        // escapeshellarg pattern held literal quote characters and never matched.
+        return self::findTtydPidForSock($sock) !== null;
     }
 
     /**
@@ -1381,6 +1379,35 @@ class ProcessManager {
                 continue;
             }
 
+            // #617: a start or restart of this workspace holds its launch lock while its
+            // pane is briefly at the run-loop prompt, which classifies as a zombie. Reap
+            // only when the lock is free (never wait), and classify again under the lock.
+            if (!SessionLaunchLock::acquire($id, 0.0)) {
+                $kept[] = ['id' => $id, 'reason' => 'launch_in_progress'];
+                continue;
+            }
+            try {
+                $sockAge = time() - ((int)@filemtime($sock) ?: time());
+                $verdict = self::classifyOrphanSession($id, $sock, $sockAge, $minAgeSeconds);
+                if ($verdict['action'] === 'keep') {
+                    $kept[] = $verdict['record'];
+                    continue;
+                }
+                self::reapOrphanSession($id, $verdict);
+                $killed[] = $verdict['record'];
+            } finally {
+                SessionLaunchLock::release($id);
+            }
+        }
+        if (!empty($killed) || !empty($kept)) {
+            LogService::log('Bug #1067 sweep: killed=' . count($killed) . ' kept=' . count($kept), LogService::LOG_INFO, 'ProcessManager');
+        }
+        return ['killed' => $killed, 'kept' => $kept];
+    }
+
+    /** The side effects of one orphan-sweep reap. The caller holds the session's launch lock. */
+    private static function reapOrphanSession(string $id, array $verdict): void {
+        {
             // action === 'reap' — perform the side effects the classification dictates.
             $reason = $verdict['record']['reason'];
             if ($reason === 'no_ttyd') {
@@ -1403,12 +1430,7 @@ class ProcessManager {
                 LogService::log("Bug #1067: orphan ttyd (pid=$pid sid=$id) has no children AND no tmux session -- terminating", LogService::LOG_INFO, 'ProcessManager');
                 self::stopTerminal($id, true);
             }
-            $killed[] = $verdict['record'];
         }
-        if (!empty($killed) || !empty($kept)) {
-            LogService::log('Bug #1067 sweep: killed=' . count($killed) . ' kept=' . count($kept), LogService::LOG_INFO, 'ProcessManager');
-        }
-        return ['killed' => $killed, 'kept' => $kept];
     }
 
     /**

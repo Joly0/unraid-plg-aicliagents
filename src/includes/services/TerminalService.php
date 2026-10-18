@@ -24,14 +24,20 @@ class TerminalService {
      * Before this, the page's start and the restart each launched an agent on
      * the same conversation: two `claude --resume <id>` processes in two tmux
      * servers, one of them invisible. See docs/specs/WORKSPACE_RELOAD_ONTO_CURRENT.md.
+     *
+     * #611: returns ['ok' => bool, 'reason' => string]. A refused start (lock timeout, path
+     * unavailable, array stopping, unknown agent, no terminal server, failed mount, ensure-session
+     * timeout, no ttyd socket) is ok=false, so a caller can tell it from a start that worked.
+     * $lockWaitSeconds lets a web request wait less than the request time limit.
+     * @return array{ok:bool,reason:string}
      */
-    public static function startTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli', string $origin = 'interactive') {
-        if (!SessionLaunchLock::acquire((string)$id, SessionLaunchLock::START_WAIT_SECONDS)) {
+    public static function startTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli', string $origin = 'interactive', ?float $lockWaitSeconds = null): array {
+        if (!SessionLaunchLock::acquire((string)$id, $lockWaitSeconds ?? SessionLaunchLock::START_WAIT_SECONDS)) {
             LogService::log("Start of $id refused: another start, close or restart of this workspace did not finish in time. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
-            return;
+            return ['ok' => false, 'reason' => 'lock_timeout'];
         }
         try {
-            self::startTerminalLocked($id, $path, $chatId, $agentId, $origin);
+            return self::startTerminalLocked($id, $path, $chatId, $agentId, $origin);
         } finally {
             SessionLaunchLock::release((string)$id);
         }
@@ -131,7 +137,7 @@ class TerminalService {
     }
 
     /** startTerminal() body. Call it only while this process holds the workspace's SessionLaunchLock. */
-    private static function startTerminalLocked($id, $path, $chatId, $agentId, string $origin) {
+    private static function startTerminalLocked($id, $path, $chatId, $agentId, string $origin): array {
         LogService::log("Initiating console session sequence for: $id (Agent: $agentId)...", LogService::LOG_INFO, "TerminalService");
         
         // 1. Pre-launch checks
@@ -143,7 +149,7 @@ class TerminalService {
         // it attaches to the existing detached session rather than double-spawning.
         if (ProcessManager::isTtydBound($id)) {
             LogService::log("Session $id already has a bound ttyd — reusing.", LogService::LOG_DEBUG, "TerminalService");
-            return;
+            return ['ok' => true, 'reason' => 'already_running'];
         }
 
         // Issue #56: every caller converges here, including boot auto-launch,
@@ -157,7 +163,7 @@ class TerminalService {
                 LogService::LOG_WARN,
                 "TerminalService"
             );
-            return;
+            return ['ok' => false, 'reason' => 'path_unavailable'];
         }
 
         // Forgejo #558: the array is stopping. A pool stays mounted until the end
@@ -169,7 +175,7 @@ class TerminalService {
                 LogService::LOG_WARN,
                 "TerminalService"
             );
-            return;
+            return ['ok' => false, 'reason' => 'array_stopping'];
         }
 
         // 2. Setup environment
@@ -218,7 +224,7 @@ class TerminalService {
         if (!$agent) {
             LogService::log("Error: Agent $agentId not found in registry.", LogService::LOG_ERROR, "TerminalService");
             self::recordStartFailure($actId, $agentName, self::startFailureSentence('agent_unknown', $agentName), self::START_RECOVERY, $startMeta);
-            return;
+            return ['ok' => false, 'reason' => 'agent_unknown'];
         }
 
         // Running-agent-safe updates: resolve the active `src` pointer once at
@@ -270,7 +276,7 @@ class TerminalService {
         if (!file_exists($ttyd)) {
             LogService::log("CRITICAL: ttyd binary not found in PATH or /usr/bin/ttyd!", LogService::LOG_ERROR, "TerminalService");
             self::recordStartFailure($actId, $agentName, self::startFailureSentence('no_terminal_server', $agentName), self::START_RECOVERY, $startMeta);
-            return;
+            return ['ok' => false, 'reason' => 'no_terminal_server'];
         }
 
         LogService::log("Found ttyd at: $ttyd", LogService::LOG_DEBUG, "TerminalService");
@@ -344,7 +350,7 @@ class TerminalService {
             if (!FileStorage::ensureReady("agent/$agentId")->ok) {   // Epic #1310: express intent via the facade
                 LogService::log("FAILED to mount agent storage for $agentId", LogService::LOG_ERROR, "TerminalService");
                 self::recordStartFailure($actId, $agentName, self::startFailureSentence('agent_storage', $agentName), self::START_RECOVERY, $startMeta);
-                return;
+                return ['ok' => false, 'reason' => 'agent_storage'];
             }
         }
         if (!$isEmergency) {
@@ -352,7 +358,7 @@ class TerminalService {
             if (!FileStorage::ensureReady("home/$username")->ok) {   // Epic #1310: facade intent
                 LogService::log("FAILED to mount home storage for $username", LogService::LOG_ERROR, "TerminalService");
                 self::recordStartFailure($actId, $agentName, self::startFailureSentence('home_storage', $agentName), self::START_RECOVERY, $startMeta);
-                return;
+                return ['ok' => false, 'reason' => 'home_storage'];
             }
 
             // #113: re-assert this agent's managed Hub config now the home
@@ -519,7 +525,7 @@ class TerminalService {
             // Forgejo #521: a blocked ensure-session must end the start with a visible error.
             LogService::log("ensure-session timed out (rc=$ensureRc) for $id after " . self::ENSURE_TIMEOUT_SECONDS . "s. Start aborted.", LogService::LOG_ERROR, "TerminalService");
             self::recordStartFailure($actId, $agentName, self::startFailureSentence('ensure_timeout', $agentName), self::START_RECOVERY, $startMeta);
-            return;
+            return ['ok' => false, 'reason' => 'ensure_timeout'];
         } elseif ($ensureRc !== 0) {
             $tail = file_exists($ensureLog) ? trim((string)shell_exec("tail -n 5 " . escapeshellarg($ensureLog))) : '';
             LogService::log("ensure-session returned rc=$ensureRc for $id (continuing to ttyd; attach will retry). tail: $tail", LogService::LOG_WARN, "TerminalService");
@@ -607,11 +613,14 @@ class TerminalService {
                     $logTail = shell_exec("tail -n 10 " . escapeshellarg($logFile));
                     LogService::log("ttyd stderr tail: " . $logTail, LogService::LOG_ERROR, "TerminalService");
                 }
+                return ['ok' => false, 'reason' => 'terminal_no_answer'];
             }
         } else {
             LogService::log("Failed to launch term process for $id. (No PID returned)", LogService::LOG_ERROR, "TerminalService");
             self::recordStartFailure($actId, $agentName, self::startFailureSentence('terminal_no_launch', $agentName), self::START_RECOVERY, $startMeta);
+            return ['ok' => false, 'reason' => 'terminal_no_launch'];
         }
+        return ['ok' => true, 'reason' => 'started'];
     }
 
     /**
@@ -1061,14 +1070,16 @@ class TerminalService {
      * Each record also carries 'attached' — whether the ttyd socket
      * aicliterm-<id>.sock (a browser terminal) exists.
      *
+     * @param bool $sweep false for a read-only caller (no reaping of orphan sessions)
      * @return array<int,array{id:string,agentId:string,path:string,chatId:string,started_at:int,attached:bool}>
      */
-    public static function listActiveSessionsForAgent(string $agentId): array
+    public static function listActiveSessionsForAgent(string $agentId, bool $sweep = true): array
     {
         // Bug #1067: reconcile orphan ttyd processes first. This only tidies
         // stale browser-terminal sockets now; the count itself comes from tmux
         // (Forgejo #315), so a missing ttyd can no longer hide a running agent.
-        ProcessManager::sweepOrphanSessions();
+        // #617: a read endpoint passes $sweep = false, so a page read never reaps a session.
+        if ($sweep) ProcessManager::sweepOrphanSessions();
 
         $out = [];
         foreach (self::runningSessionRecords() as $rec) {
@@ -1177,7 +1188,7 @@ class TerminalService {
                 if (is_callable($closeSeam)) {
                     $closeSeam($sessionId);
                 } else {
-                    \AICliAgents\Handlers\TerminalHandler::handle('graceful_close', $sessionId);
+                    \AICliAgents\Handlers\TerminalHandler::closeForMaintenance($sessionId);
                 }
                 $closed++;
                 // Only dedup against Part B on a SUCCESSFUL close. If the graceful

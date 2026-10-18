@@ -509,7 +509,7 @@ class TerminalHandler {
                 . "falling back to the cautious flow: " . $e->getMessage(),
                 \AICliAgents\Services\LogService::LOG_WARN, "TerminalHandler");
         }
-        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId);
+        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId, false);
         // #463: the display name of each workspace, so the restart dialog names it by
         // the name the person gave it. '' when it is not known: the page picks a plain
         // fallback and never prints an id.
@@ -718,7 +718,9 @@ class TerminalHandler {
                     'message' => 'Upgrade in progress — this session will resume automatically when the upgrade finishes.',
                 ];
             }
-            startAICliTerminal($id, $workspacePath, $chatId, $agentId);
+            $started = startAICliTerminal($id, $workspacePath, $chatId, $agentId, \AICliAgents\Services\SessionLaunchLock::WEB_START_WAIT_SECONDS);
+            $refused = self::startRefusal($started, (string)$id);
+            if ($refused !== null) return $refused;
             return self::startedResponse($id);
         } finally {
             \AICliAgents\Services\AgentUpgradeAdmissionService::release($admission);
@@ -737,17 +739,33 @@ class TerminalHandler {
         if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('emergency_start', (string)$id, (string)($_GET['path'] ?? ''));
         $path = $_GET['path'] ?? '/mnt';
 
+        // #614: the UI offers an Emergency Session only while home storage is down. Check it
+        // here too, on the server: a direct call must not swap the home of a healthy box.
+        $persistPathEm = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $homePathEm = $config['home_storage_path'] ?? $persistPathEm;
+        $homeUp = is_callable(self::$homeAvailableProbe)
+            ? (bool)call_user_func(self::$homeAvailableProbe, (string)$homePathEm)
+            : \AICliAgents\Services\StorageMountService::isPathAvailable((string)$homePathEm);
+        if ($homeUp) {
+            aicli_log("emergency_start refused for session=$id: home storage is available", AICLI_LOG_WARN, "TerminalHandler");
+            return ['status' => 'error', 'reason' => 'emergency_not_needed',
+                'message' => 'Home storage is available, so an emergency session is not needed. Start the workspace normally.'];
+        }
+
         // Clean up any previous emergency state (allow starting fresh)
         if (\AICliAgents\Services\StorageMountService::isEmergencyMode()) {
             aicli_log("Cleaning previous emergency state before new session.", AICLI_LOG_INFO, "TerminalHandler");
             @unlink(\AICliAgents\Services\StorageMountService::EMERGENCY_FLAG);
         }
-        // Also clean up any stale ttyd/tmux from failed previous attempts
-        exec("pkill -9 -f 'aicli-run-' 2>/dev/null");
-        exec("pkill -9 -f 'ttyd.*aicliterm-' 2>/dev/null");
-        if (function_exists('posix_kill')) {
-            foreach (glob("/var/run/aicliterm-*.sock") as $sock) @unlink($sock);
-            foreach (glob("/var/run/unraid-aicliagents-*.pid") as $pid) @unlink($pid);
+        // Also clean up a stale ttyd/tmux of THIS workspace from a failed earlier attempt.
+        // #614: this used to pkill every aicli-run and ttyd on the box and delete every
+        // socket, which killed all other workspaces. Only this id is stopped now.
+        $busy = self::takeLaunchLock((string)$id, 'emergencyStart');
+        if ($busy !== null) return $busy;
+        try {
+            \AICliAgents\Services\ProcessManager::stopTerminal($id, true, 'stop');
+        } finally {
+            \AICliAgents\Services\SessionLaunchLock::release((string)$id);
         }
         usleep(500000); // 0.5s for process cleanup
 
@@ -802,7 +820,9 @@ class TerminalHandler {
         touch(\AICliAgents\Services\StorageMountService::EMERGENCY_FLAG);
 
         // Start terminal (home is now symlinked to emergency dir, ensureHomeMounted sees the flag)
-        startAICliTerminal($id, $path, null, $agentId);
+        $started = startAICliTerminal($id, $path, null, $agentId, \AICliAgents\Services\SessionLaunchLock::WEB_START_WAIT_SECONDS);
+        $refused = self::startRefusal($started, (string)$id);
+        if ($refused !== null) return $refused;
 
         return self::startedResponse($id, ['emergency' => true]);
     }
@@ -916,6 +936,26 @@ class TerminalHandler {
         return ['status' => 'busy', 'reason' => 'launch_in_progress',
             'message' => 'This workspace is still starting, closing or restarting. Try again in a moment.'];
     }
+
+    /**
+     * #606: close a workspace for a consolidate, backup or restore. Same close as
+     * graceful_close, but it does NOT mark the workspace "closed on purpose": the
+     * plugin relaunches it afterwards, and crash recovery must still see it.
+     */
+    public static function closeForMaintenance($id): array {
+        self::$suppressOnClose = false;
+        try {
+            return self::gracefulCloseSerialized($id);
+        } finally {
+            self::$suppressOnClose = true;
+        }
+    }
+
+    /** Test seam: fn(string $homePath): bool. Null = StorageMountService::isPathAvailable. */
+    public static $homeAvailableProbe = null;
+
+    /** #606: false only while closeForMaintenance() runs. gracefulClose() reads it. */
+    private static bool $suppressOnClose = true;
 
     private static function gracefulClose($id) {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -1045,7 +1085,9 @@ class TerminalHandler {
         // drawer's Close button, a delete, or the CLI's graceful_close action).
         // Auto-launch must not bring it straight back on the next page load.
         // See docs/specs/2026-04-27-auto-launch-workspaces-design.md.
-        \AICliAgents\Services\AutoLaunchSuppression::suppress($safeId);
+        if (self::$suppressOnClose) {
+            \AICliAgents\Services\AutoLaunchSuppression::suppress($safeId);
+        }
         @unlink("/tmp/unraid-aicliagents/close-$safeId.flag");
 
         $resumeStr = $capturedId ? "resume_id=$capturedId" : "resume_id=none";
@@ -1571,7 +1613,9 @@ class TerminalHandler {
             // than it was created with is a silent, destructive surprise.
             $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
             if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('restart', (string)$id, (string)($_GET['path'] ?? ''));
-            startAICliTerminal($id, $_GET['path'] ?? null, $chatId, $agentId);
+            $started = startAICliTerminal($id, $_GET['path'] ?? null, $chatId, $agentId);
+            $refused = self::startRefusal($started, (string)$id);
+            if ($refused !== null) return $refused;
             return self::startedResponse($id);
         } finally {
             \AICliAgents\Services\SessionLaunchLock::release((string)$id);
@@ -1821,6 +1865,26 @@ class TerminalHandler {
      * otherwise the first status poll changes `unknown` to the already-running
      * generation and needlessly replaces a healthy, newly attached terminal.
      */
+    /**
+     * #611: turn the result of a start into an error answer. Null when the start ran (or the
+     * caller gave no result). A refused start must not be answered "ok" with a socket
+     * address that does not exist.
+     *
+     * @param mixed $result  what TerminalService::startTerminal returned
+     * @return array<string,mixed>|null
+     */
+    private static function startRefusal($result, string $id): ?array {
+        if (!is_array($result) || !array_key_exists('ok', $result) || $result['ok']) return null;
+        $reason = (string)($result['reason'] ?? 'start_failed');
+        aicli_log("start refused for session=$id: $reason", AICLI_LOG_WARN, "TerminalHandler");
+        if ($reason === 'lock_timeout') {
+            return ['status' => 'busy', 'reason' => 'launch_in_progress',
+                'message' => 'This workspace is still starting, closing or restarting. Try again in a moment.'];
+        }
+        return ['status' => 'error', 'reason' => $reason,
+            'message' => 'The workspace did not start (' . $reason . '). Check the Activity tray for the cause.'];
+    }
+
     private static function startedResponse($id, array $extra = []): array {
         return array_merge([
             'status' => 'ok',
@@ -1857,16 +1921,22 @@ class TerminalHandler {
         if ($busy !== null) return $busy;
         try {
             self::gracefulClose($id);
-            if ($path !== '') {
-                \AICliAgents\Services\ConfigService::clearResumeId($path, $agentId, (string)$id);
-                aicli_log("restartFresh: cleared saved resume id for (workspace=$path, agent=$agentId)", AICLI_LOG_INFO, "TerminalHandler");
-            }
             $relay = [];
             if (class_exists('\AICliAgents\Services\AgentRelayService')) {
                 try { $relay = \AICliAgents\Services\AgentRelayService::markConversationRestart($safeId, $agentId, $path); }
                 catch (\Throwable $e) { $relay = ['status' => 'error', 'message' => $e->getMessage()]; }
             }
-            startAICliTerminal($id, $path !== '' ? $path : null, '_fresh_', $agentId);
+            $started = startAICliTerminal($id, $path !== '' ? $path : null, '_fresh_', $agentId);
+            $refused = self::startRefusal($started, (string)$id);
+            if ($refused !== null) {
+                // #611: the start was refused, so the saved resume point stays. Only a start that ran may drop it.
+                aicli_log("restartFresh: start refused for session=$safeId reason=" . (string)($refused['reason'] ?? '') . "; the saved resume id is kept", AICLI_LOG_WARN, "TerminalHandler");
+                return $refused;
+            }
+            if ($path !== '') {
+                \AICliAgents\Services\ConfigService::clearResumeId($path, $agentId, (string)$id);
+                aicli_log("restartFresh: cleared saved resume id for (workspace=$path, agent=$agentId)", AICLI_LOG_INFO, "TerminalHandler");
+            }
         } finally {
             \AICliAgents\Services\SessionLaunchLock::release((string)$id);
         }
