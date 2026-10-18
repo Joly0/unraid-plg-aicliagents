@@ -254,6 +254,15 @@ _consol_view_dir() {
     printf '%s\n' "${real:-$mnt}"
 }
 
+# _consol_mount_busy <type> <id> <mount_point>
+# R-026 (#604): the busy gate of a consolidate. It asks home_mount_in_use about
+# the REAL mount directory (_consol_view_dir). The stable name of a versioned
+# agent is a symlink; /proc/mounts never lists a symlink path, so the gate
+# answered "idle" for an agent in use and npm prune wrote into a live view.
+_consol_mount_busy() {
+    home_mount_in_use "$(_consol_view_dir "${1:-}" "${2:-}" "${3:-}")"
+}
+
 # _bake_source_for <type> <upper_dir> <upper_override> <staging_view> <view_mounted 0|1> <sqlite_count>
 # #338: PURE. Print "<source dir><TAB><kind>" for one bake. A staged agent
 # install whose merged staging view is mounted and holds no SQLite database
@@ -554,8 +563,14 @@ for sqsh in "${FILES[@]}"; do
         # #566: keep the error text. A bare "Failed to mount" named no reason.
         if ! _LAYER_MOUNT_ERR="$(mount -o loop,ro "$sqsh" "$SQSH_MNT" 2>&1)"; then
             if declare -f _layer_mount_failed >/dev/null 2>&1; then
-                _LAYER_MSG="$(_layer_mount_failed "$TYPE" "$ID" "$PERSIST_PATH" "$sqsh" "$_LAYER_MOUNT_ERR" "$LOWERS" "$(( ${#FILES[@]} - _LAYER_IDX ))")"
-                _LAYER_RC=$?
+                # R-023 (#601): capture the status in the `if`. A bare assignment
+                # whose $( ) returns 1 ends the op under set -e, before the loop
+                # mounts are released and before the error is logged.
+                if _LAYER_MSG="$(_layer_mount_failed "$TYPE" "$ID" "$PERSIST_PATH" "$sqsh" "$_LAYER_MOUNT_ERR" "$LOWERS" "$(( ${#FILES[@]} - _LAYER_IDX ))")"; then
+                    _LAYER_RC=0
+                else
+                    _LAYER_RC=$?
+                fi
             else
                 _LAYER_MSG="Failed to mount $sqsh: $_LAYER_MOUNT_ERR"
                 _LAYER_RC=1
@@ -957,10 +972,10 @@ if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir=
         # — after `mount` above has already succeeded — so a new session can
         # never resolve agent_mount to a generation whose overlay isn't live
         # yet (mirrors aicli_activate_generation never flipping `src` until its
-        # own payload is staged). A failure here is logged, not fatal: the
-        # overlay is correctly mounted either way, just not yet reachable via
-        # the stable name — the next op_mount (idempotent: same content hashes
-        # to the same generation id) retries the flip.
+        # own payload is staged). R-022 (#600): a failure here FAILS the mount
+        # (exit 1). The overlay is mounted, but the stable name still points at
+        # the old generation or at an empty folder, so a session would start
+        # with no binary; no caller retries a mount that reported success.
         if agent_activate_stable_symlink "$ID" "$_AGENT_GEN_ID" "$MNT_POINT"; then
             lifecycle_log "info" "mount_stack" "agent_generation_activated" \
                 "{\"id\":\"$ID\",\"generation\":\"$_AGENT_GEN_ID\"}" 2>/dev/null || true
@@ -973,7 +988,10 @@ if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir=
             # writable layer, an order of magnitude more than the plugin's own.
             _sweep_agent_generations "$ID" "$PERSIST_PATH"
         else
-            error "Mounted generation $_AGENT_GEN_ID for agent $ID but failed to activate the stable symlink at $_AGENT_STABLE_LINK — will retry on the next mount cycle."
+            error "Mounted generation $_AGENT_GEN_ID for agent $ID but failed to activate the stable symlink at $_AGENT_STABLE_LINK — the mount is reported as failed."
+            lifecycle_log "error" "mount_stack" "agent_stable_symlink_failed" \
+                "{\"id\":\"$ID\",\"generation\":\"$_AGENT_GEN_ID\",\"link\":\"$_AGENT_STABLE_LINK\"}" 2>/dev/null || true
+            exit 1
         fi
     fi
 else
@@ -1919,6 +1937,19 @@ else
             write_defer_reason "$TYPE" "$ID" "no_space"
             exit 1
         fi
+    else
+        # R-021 (#599): a home delta is about the size of what the writable layer
+        # holds (worst case: it does not compress). The fixed 100 MB check above
+        # passed a 1.5 GB upper on a boot disk with 300 MB free; mksquashfs then
+        # filled /boot for minutes and failed, and the automatic bake repeated it
+        # at every cool-down. Defer with no_space instead, before anything is written.
+        _EST_BYTES="$(_dir_bytes "$_BAKE_SRC")"
+        if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+            error "Not enough room on $PERSIST_PATH for the new $_BAKE_KIND layer of $ID: it needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — bake not started. The changes stay in the writable layer."
+            rm -f "$MARKER"
+            _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_no_space" "no_space" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"kind\":\"$_BAKE_KIND\",\"need_mb\":$_FIT_NEED_MB,\"free_mb\":\"$_FIT_FREE_MB\",\"estimate_bytes\":$_EST_BYTES}" "warn"
+        fi
     fi
     if ! NEW_BASENAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$_BAKE_SRC" "$_BAKE_KIND"); then
         error "Atomic bake failed."
@@ -2404,16 +2435,20 @@ if command -v unsquashfs >/dev/null 2>&1; then
     fi
 fi
 
-if ! manifest_record_layer "$TYPE" "$ID" "$PERSIST_PATH" "$_NEW"; then
-    _rebase_discard "the manifest could not record the base" "manifest_record_failed"; exit 1
-fi
-
 # Write-ahead intent: the replaced stack is the SAME package as the base, so the
 # retention sweep must not keep it as the previous version (K4). It survives a
 # crash; the sweep clears it when every listed layer is gone.
 _DEL=""
 for _l in "${_OLD_STACK[@]}"; do _DEL="${_DEL:+$_DEL,}\"$_l\""; done
-write_intent "$PERSIST_PATH" "$TYPE" "$ID" "{\"op\":\"agent_rebase\",\"keep\":\"$_NEW\",\"delete\":[$_DEL]}"
+# R-020 (#598): the intent comes before the manifest record, so a failed write
+# leaves the manifest untouched and the new base is simply discarded.
+if ! write_intent "$PERSIST_PATH" "$TYPE" "$ID" "{\"op\":\"agent_rebase\",\"keep\":\"$_NEW\",\"delete\":[$_DEL]}"; then
+    _rebase_discard "the delete plan could not be written" "intent_write_failed"; exit 1
+fi
+if ! manifest_record_layer "$TYPE" "$ID" "$PERSIST_PATH" "$_NEW"; then
+    clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
+    _rebase_discard "the manifest could not record the base" "manifest_record_failed"; exit 1
+fi
 
 # Switch: a normal refresh binds the generation of the new base and moves the
 # stable name onto it. The old generation is unreferenced and is released.
@@ -2627,7 +2662,7 @@ fi
 # fuser reads "idle" and consolidate would umount/remount the overlay out from
 # under the session. home_mount_in_use (the same arbiter op_bake's reclaim uses)
 # combines the fuser fast-path with the ttyd-session scan, so it defers correctly.
-if home_mount_in_use "$MNT_POINT"; then
+if _consol_mount_busy "$TYPE" "$ID" "$MNT_POINT"; then
     log "Mount is BUSY (open fd or live session on $MNT_POINT). Deferring consolidation — will retry when idle."
     update_task_status "Deferred (mount busy)" 0 "Sessions active — will retry when idle"
     _op_defer "$TYPE" "$ID" "consolidate_layers" "bash_consolidate_deferred" "mount_busy"
@@ -2739,7 +2774,9 @@ fi
 if [ "$TYPE" == "agent" ]; then
     log "Pruning non-essential files..."
     update_task_status "Pruning non-essential files..." 20 ""
-    cd "$_CONSOL_VIEW" && npm prune --production > /dev/null 2>&1 || true
+    # R-026 (#604): in a subshell, so the op's own working directory never stays
+    # inside the mount (it made the later real umount fail with EBUSY).
+    ( cd "$_CONSOL_VIEW" && npm prune --production > /dev/null 2>&1 ) || true
     rm -rf "$_CONSOL_VIEW/tmp/npm_cache"/* 2>/dev/null || true
 fi
 
@@ -2851,6 +2888,17 @@ check_disk_space "$PERSIST_PATH/.diskcheck" 200 || {
     rm -f "$CONSOLIDATE_MARKER"
     exit 1
 }
+# R-021 (#599): the fixed 200 MB above is no estimate. The consolidated layer is
+# at most the old layers plus the writable layer (worst case: no overlap, no
+# compression of the upper). Defer with no_space before mksquashfs starts.
+_EST_BYTES=$(( $(_layer_total_bytes "${OLD_LAYERS[@]}") + $(_dir_bytes "$UPPER_DIR") ))
+if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+    error "Not enough room on $PERSIST_PATH for the consolidated layer of $ID: it needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — consolidate not started."
+    update_task_status "Deferred" 0 "Not enough free space on Flash"
+    rm -f "$CONSOLIDATE_MARKER"
+    _op_defer "$TYPE" "$ID" "consolidate_layers" "bash_consolidate_no_space" "no_space" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"need_mb\":$_FIT_NEED_MB,\"free_mb\":\"$_FIT_FREE_MB\",\"estimate_bytes\":$_EST_BYTES}" "warn"
+fi
 
 # S-09 (#1352): FAT32 per-file cap preflight (consolidate projects from the MERGED
 # view, since the consolidated layer captures the whole home). vfat-only, fstype
@@ -3145,7 +3193,15 @@ update_task_status "Updating manifest..." 85 ""
 if manifest_replace_layers "$TYPE" "$ID" "$PERSIST_PATH" "$FINAL_NAME"; then
     lifecycle_log "info" "consolidate_layers" "manifest_updated_before_delete" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"final\":\"$FINAL_NAME\"}" 2>/dev/null || true
 else
-    log "WARNING: manifest not updated before old-layer delete (php missing or write failed). Reconcile will recover."
+    # R-016 (#594): the old layers are still on disk and the manifest still names
+    # them. Deleting them now would leave the manifest naming deleted layers, the
+    # state the order of steps exists to prevent. Drop the new layer and stop.
+    error "Consolidate $TYPE/$ID: the manifest could not be updated to list $FINAL_NAME — the new layer is removed and the old layers stay. Nothing was deleted."
+    lifecycle_log "error" "consolidate_layers" "consolidate_manifest_update_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"final\":\"$FINAL_NAME\"}" 2>/dev/null || true
+    rm -f "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null
+    rm -f "$CONSOLIDATE_MARKER"
+    update_task_status "Consolidation failed: the layer list could not be updated." 100 ""
+    exit 1
 fi
 
 # L3.5 (Follow-on 4): deterministic SIGKILL window — manifest replaced to
@@ -3171,7 +3227,16 @@ for _ol in "${OLD_LAYERS[@]}"; do
     [ -n "$_INTENT_DEL" ] && _INTENT_DEL="$_INTENT_DEL,"
     _INTENT_DEL="$_INTENT_DEL\"$_olb\""
 done
-write_intent "$PERSIST_PATH" "$TYPE" "$ID" "{\"op\":\"consolidate\",\"keep\":\"$FINAL_NAME\",\"delete\":[$_INTENT_DEL]}"
+if ! write_intent "$PERSIST_PATH" "$TYPE" "$ID" "{\"op\":\"consolidate\",\"keep\":\"$FINAL_NAME\",\"delete\":[$_INTENT_DEL]}"; then
+    # R-020 (#598): no valid plan on disk, so no layer may be deleted. The manifest
+    # lists only $FINAL_NAME; the old layers stay as untracked files that reconcile
+    # recovers harmlessly.
+    error "Consolidate $TYPE/$ID: the delete plan could not be written (disk full?) — the old layers are kept."
+    lifecycle_log "error" "consolidate_layers" "consolidate_intent_write_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
+    rm -f "$CONSOLIDATE_MARKER"
+    update_task_status "Consolidation failed: the delete plan could not be written." 100 ""
+    exit 1
+fi
 
 # L3.5 (Follow-on 4): intent written, deletes not yet started.
 _itest_sigkill_window "after_intent"
@@ -3235,7 +3300,7 @@ if [ -z "$_CONSOLIDATE_MOUNT_LOCK_FD" ] || ! flock -w 30 "$_CONSOLIDATE_MOUNT_LO
     exit 0
 fi
 
-if home_mount_in_use "$MNT_POINT"; then
+if _consol_mount_busy "$TYPE" "$ID" "$MNT_POINT"; then
     log "Mount became BUSY during consolidate (agent launched / live session). Deferring refresh+wipe — next mount cycle picks up $FINAL_NAME."
     rm -f "$CONSOLIDATE_MARKER"
     FINAL_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
@@ -3251,35 +3316,12 @@ fi
 # writes are NOT in the consolidated volume and would be silently lost.)
 UPPER_CHANGED=""
 if [ -f "$CONSOLIDATE_MARKER" ] && [ -d "$UPPER_DIR" ]; then
-    # Read with NUL delimiters so spaces in a home path remain exact. Ignore
-    # only detected SQLite DB `-shm` paths and zero-byte `-wal` files: sqlite3
+    # R-018 (#596): every kind of entry counts (symlink, empty folder, whiteout),
+    # not only regular files. The helper ignores only the SQLite self-writes the
+    # consolidator makes (a detected DB's `-shm`, a zero-byte `-wal`): sqlite3
     # .backup itself can leave those reconstructable artefacts. Any DB,
     # non-empty WAL, journal, or unrelated write remains a real safety stop.
-    while IFS= read -r -d '' _upper_candidate; do
-        _upper_rel="${_upper_candidate#$UPPER_DIR/}"
-        _sqlite_self_write=0
-        while IFS= read -r _shm_rel; do
-            [ -n "$_shm_rel" ] || continue
-            if [ "$_upper_rel" = "$_shm_rel" ]; then
-                _sqlite_self_write=1
-                break
-            fi
-        done <<< "$SQLITE_TRANSIENT_SHM_RELS"
-        if [ "$_sqlite_self_write" -eq 0 ] && [ ! -s "$_upper_candidate" ]; then
-            while IFS= read -r _wal_rel; do
-                [ -n "$_wal_rel" ] || continue
-                if [ "$_upper_rel" = "$_wal_rel" ]; then
-                    _sqlite_self_write=1
-                    break
-                fi
-            done <<< "$SQLITE_EMPTY_WAL_RELS"
-        fi
-        if [ "$_sqlite_self_write" -eq 1 ]; then
-            continue
-        fi
-        UPPER_CHANGED="$_upper_candidate"
-        break
-    done < <(find "$UPPER_DIR" -newer "$CONSOLIDATE_MARKER" -type f -print0 2>/dev/null)
+    UPPER_CHANGED="$(upper_first_changed_entry "$UPPER_DIR" "$CONSOLIDATE_MARKER" || true)"
 fi
 # Forgejo #442: the marker is removed AFTER the swap block below, which needs it
 # to tell the entries that changed during the bake from the ones the base holds.
@@ -3857,8 +3899,13 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         error "Cannot link $AGC_STABLE to the version folder $_GR_AGENT_GEN."
         _gr_fail_cleanup; _gr_cleanup_meta; exit 1
     fi
-    write_intent "$PERSIST_PATH" "$TYPE" "$ID" \
-        "{\"op\":\"graduate\",\"mode\":\"$_GR_MODE\",\"keep\":\"\",\"pt_dir\":\"$_GR_PT_DIR\",\"copy\":\"$_GR_COPY\",\"retire\":\"$_GR_RETIRE\",\"upper\":\"$UPPER_DIR\",\"delete\":[$_GR_LAYER_NAMES]}"
+    if ! write_intent "$PERSIST_PATH" "$TYPE" "$ID" \
+        "{\"op\":\"graduate\",\"mode\":\"$_GR_MODE\",\"keep\":\"\",\"pt_dir\":\"$_GR_PT_DIR\",\"copy\":\"$_GR_COPY\",\"retire\":\"$_GR_RETIRE\",\"upper\":\"$UPPER_DIR\",\"delete\":[$_GR_LAYER_NAMES]}"; then
+        # R-020 (#598): no plan on disk, so no layer may move.
+        _gr_reason "The plan for the change could not be saved (disk full?). Nothing was changed."
+        error "Cannot write the conversion intent — conversion stopped before any move."
+        _gr_fail_cleanup; _gr_cleanup_meta; exit 1
+    fi
     _itest_sigkill_window "graduate_after_intent"
 
     # _gr_rollback — R5: put the layers and the writable layer back, drop the
@@ -4150,8 +4197,12 @@ fi
 # ---- 8. Write-ahead intent → move → manifest flip → clear --------------------
 # Intent format mirrors consolidate's ({"op",...,"delete":[...]}) so the
 # reconcile/boot intentional-prune readers treat the moved layer as benign.
-write_intent "$PERSIST_PATH" "$TYPE" "$ID" \
-    "{\"op\":\"graduate\",\"keep\":\"\",\"pt_dir\":\"$_GR_PT_DIR\",\"files\":$_GR_DST_COUNT,\"delete\":[\"$_GR_SRC_BASE\"]}"
+if ! write_intent "$PERSIST_PATH" "$TYPE" "$ID" \
+    "{\"op\":\"graduate\",\"keep\":\"\",\"pt_dir\":\"$_GR_PT_DIR\",\"files\":$_GR_DST_COUNT,\"delete\":[\"$_GR_SRC_BASE\"]}"; then
+    # R-020 (#598): no plan on disk, so the layer must not move.
+    error "Cannot write the graduate intent (disk full?) — nothing moved, layers authoritative."
+    exit 1
+fi
 _itest_sigkill_window "graduate_after_intent"
 
 _GR_RETIRE_DIR="$PERSIST_PATH/.graduated/${TYPE}_${_GR_LOCK_ID}"

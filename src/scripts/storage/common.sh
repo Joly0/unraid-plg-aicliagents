@@ -455,6 +455,27 @@ _layer_largest_bytes() {
     printf '%d\n' "$max"
 }
 
+# _dir_bytes <dir> -> apparent size in bytes of everything under <dir> (0 when it
+# cannot be read). R-021 (#599): the worst-case estimate of a layer that packs it.
+_dir_bytes() {
+    local b
+    b="$(du -sb "${1:-}" 2>/dev/null | awk 'NR==1 {print $1}')"
+    case "$b" in ''|*[!0-9]*) b=0 ;; esac
+    printf '%d\n' "$b"
+}
+
+# _layer_total_bytes <file>... -> summed size in bytes of the layer files.
+_layer_total_bytes() {
+    local f b sum=0
+    for f in "$@"; do
+        [ -f "$f" ] || continue
+        b="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+        case "$b" in ''|*[!0-9]*) b=0 ;; esac
+        sum=$(( sum + b ))
+    done
+    printf '%d\n' "$sum"
+}
+
 # _layer_fits_space <persist> <estimate_bytes>
 # #338 (2026-09-26, .4 reached 100 % /boot): true when the persist target has
 # room for a new layer of about <estimate_bytes> (+10 %) plus a margin
@@ -1823,12 +1844,18 @@ agent_convert_unlink_layout() {
 detect_sqlite_dbs() {
     local root="$1"
     [ -d "$root" ] || return 0
+    # R-024 (#602): always return 0. find exits 1 when a file vanishes during
+    # the walk (an agent removes a temp file in a live upper). With pipefail that
+    # status ended the whole bake under set -e, with the marker already touched
+    # and no message. The databases found before the file vanished are listed;
+    # a file that is gone has nothing left to bake.
     find "$root" -type f -size -2147483648c 2>/dev/null \
         | while IFS= read -r f; do
             if head -c 16 "$f" 2>/dev/null | grep -q "SQLite format 3"; then
                 printf '%s\n' "$f"
             fi
-        done
+        done || true
+    return 0
 }
 
 # sqlite_db_needs_stage <root> <db> — 0 when the bake must stage a consistent
@@ -2649,9 +2676,20 @@ _defer_marker_fresh() {
 _intent_path() { printf '%s/.aicli-intent-%s-%s.json' "${1%/}" "$2" "$3"; }   # persist type id
 
 # write_intent <persist> <type> <id> <json> — atomic + fsync'd (tmp → sync → rename).
+#   Returns 1 (and installs NO intent file) when the plan could not be written in
+#   full: R-020 (#598). A short file from a full disk used to be renamed into
+#   place and the function returned 0, so the op deleted layers with no valid
+#   plan. Every caller must stop before its destructive step on a non-zero return.
 write_intent() {
     local p; p="$(_intent_path "$1" "$2" "$3")"
-    { printf '%s' "$4" > "$p.tmp" && sync "$p.tmp" 2>/dev/null; mv -f "$p.tmp" "$p"; } 2>/dev/null || true
+    if printf '%s' "$4" > "$p.tmp" 2>/dev/null \
+       && { sync "$p.tmp" 2>/dev/null || true; } \
+       && [ "$(cat "$p.tmp" 2>/dev/null)" = "$4" ] \
+       && mv -f "$p.tmp" "$p" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$p.tmp" 2>/dev/null
+    return 1
 }
 read_intent()  { cat "$(_intent_path "$1" "$2" "$3")" 2>/dev/null || true; }   # persist type id
 clear_intent() { rm -f  "$(_intent_path "$1" "$2" "$3")" 2>/dev/null || true; }   # persist type id
@@ -2776,6 +2814,28 @@ _upper_changed_entries() {
     done < <(find "$old" -mindepth 1 -newer "$marker" -print0 2>/dev/null) > "$tmp"
     sort -u "$tmp"
     rm -f "$tmp"
+}
+
+# upper_first_changed_entry <old_upper> <marker> — prints ONE upper-relative path
+# that changed after <marker> and that the new base cannot hold, or nothing.
+# R-018 (#596): this gate used `find -type f`, so a session that only made a
+# symlink, an empty folder or a deletion (a whiteout device) left the gate empty
+# and the whole old upper was thrown away. Every kind counts, except a folder
+# that still holds entries: its own mtime moves when a child is added or when
+# SQLite makes or removes a -shm file beside a database, and its children are
+# listed on their own. An empty folder made after the marker is a real change.
+upper_first_changed_entry() {
+    local old="${1%/}" marker="${2:-}" rel
+    [ -d "$old" ] && [ -f "$marker" ] || return 0
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        if [ -d "$old/$rel" ] && [ ! -L "$old/$rel" ] && [ -n "$(ls -A "$old/$rel" 2>/dev/null)" ]; then
+            continue
+        fi
+        printf '%s' "$old/$rel"
+        return 0
+    done < <(_upper_changed_entries "$old" "$marker")
+    return 0
 }
 
 # upper_keep_changed_entries <old_upper> <fresh_upper> <marker>
