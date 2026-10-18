@@ -1746,6 +1746,10 @@ class StorageHandler {
      * is FileStorage::canConvertHome. A refusal has no side effect at all.
      */
     public static function convertHome(string $id, ?callable $gate = null, bool $continueAfter = true): array {
+        // #677: refuse a control character before trim(), which would turn "root\n" into "root".
+        if (preg_match('/[\x00-\x1F\x7F]/', $id)) {
+            return ['status' => 'error', 'message' => 'invalid_id'];
+        }
         $id = trim($id);
         if ($id === '' || $id === '0') $id = 'root';
         if (!preg_match('/^[A-Za-z0-9._-]+$/D', $id)) {
