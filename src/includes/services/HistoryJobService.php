@@ -120,11 +120,25 @@ class HistoryJobService
         return $s;
     }
 
-    /** The reason a failed job wrote; '' when none. */
+    /**
+     * The reason a failed job wrote, then the agents it did not reach (#678); '' when none.
+     * The reason is cut to 200 characters. The agent names are added after the cut.
+     */
     public static function failureReason(string $jobId): string
     {
         $r = self::readResult($jobId);
-        return mb_substr(trim((string)($r['message'] ?? '')), 0, 200);
+        $reason = mb_substr(trim((string)($r['message'] ?? '')), 0, 200);
+        $labels = [];
+        foreach ((array)($r['not_reached'] ?? []) as $agentId) $labels[] = self::agentLabel((string)$agentId);
+        if ($labels === []) return $reason;
+        return trim($reason . ' The job did not reach these agents: ' . implode(', ', $labels) . '. Their sessions stay in the home.');
+    }
+
+    /** The name a person sees for an agent: its label in the store table, or the id when there is none. */
+    public static function agentLabel(string $agentId): string
+    {
+        $stores = HistoryStoreService::stores();
+        return (string)($stores[$agentId]['label'] ?? $agentId);
     }
 
     /** Remove the state files of a finished job after the tray has read them. */
@@ -150,15 +164,24 @@ class HistoryJobService
             ? array_keys(array_filter(HistoryStoreService::stores(), static function ($s) { return $s['kind'] === 'files'; }))
             : [(string)$o['agent']];
 
+        // The totals of the agents that finished stay in the result, also when an exception ends the job (#679).
+        $res = ['op' => $o['op'] === self::OP_BACK ? self::OP_BACK : self::OP_MOVE, 'status' => 'ok', 'message' => '',
+            'moved' => 0, 'bytes' => 0, 'skipped' => [], 'not_reached' => []];
+        $at = -1;   // the index in $agents of the agent that is running
         try {
             if ($o['op'] === self::OP_BACK) {
                 $res = HistoryMoveService::bringBack((string)$o['home'], (string)$o['user'], (string)($o['agent'] ?: 'all'), (string)$o['dest'], $seams);
                 $res['op'] = self::OP_BACK;
             } else {
-                $res = ['op' => self::OP_MOVE, 'status' => 'ok', 'message' => '', 'moved' => 0, 'bytes' => 0, 'skipped' => []];
-                foreach ($agents as $agentId) {
+                foreach ($agents as $at => $agentId) {
                     $r = HistoryMoveService::move((string)$o['home'], (string)$o['user'], $agentId, (int)$o['days'], (string)$o['dest'], $seams);
-                    if ($r['status'] !== 'ok') { $res['status'] = 'error'; $res['message'] = $r['message']; break; }
+                    if ($r['status'] !== 'ok') {
+                        $res['status'] = 'error';
+                        $res['message'] = $r['message'];
+                        // The agents after the failed one were not tried. Their sessions stay in the home (#678).
+                        $res['not_reached'] = array_slice($agents, $at + 1);
+                        break;
+                    }
                     $res['moved'] += $r['moved'];
                     $res['bytes'] += $r['bytes'];
                     $res['skipped'] = array_merge($res['skipped'], $r['skipped']);
@@ -166,7 +189,11 @@ class HistoryJobService
             }
         } catch (\Throwable $e) {
             LogService::log('Job ' . $jobId . ' stopped: ' . $e->getMessage(), LogService::LOG_ERROR, 'HistoryJob');
-            $res = ['op' => (string)$o['op'], 'status' => 'error', 'message' => 'The job stopped with an error. Details are in the Debug Console.', 'skipped' => []];
+            // Keep the totals and the skipped files of the agents that finished (#679). The agent
+            // that was running has no outcome, so the agents after it are the ones not reached (#678).
+            $res['status'] = 'error';
+            $res['message'] = 'The job stopped with an error. Details are in the Debug Console.';
+            if ($o['op'] !== self::OP_BACK) $res['not_reached'] = array_slice($agents, $at + 1);
         }
         self::writeResult($jobId, $res);
         return $res['status'] === 'ok' ? 0 : 1;

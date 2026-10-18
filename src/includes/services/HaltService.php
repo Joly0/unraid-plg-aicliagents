@@ -19,6 +19,15 @@ class HaltService {
 
     private const COMPONENT = 'HaltService';
 
+    /**
+     * The name of a temporary file of an atomic write: `<name>.tmp.<pid>.<digits>`.
+     * AtomicWriteService and setHalt() both write one before the rename.
+     */
+    private const TEMP_NAME = '/\.tmp\.\d+\.\d+$/';
+
+    /** A temporary file older than this was left by an interrupted save; a write takes milliseconds. */
+    private const TEMP_STALE_SECONDS = 600;
+
     /** The state directory for halt markers; production keeps the historical path. */
     public static function directory(): string {
         return rtrim(SecretPaths::stateRoot(), '/') . '/supervisor/halts';
@@ -91,6 +100,14 @@ class HaltService {
                 continue;
             }
             foreach ($files as $f) {
+                // A temporary file of an interrupted save is not a halt. Remove it once it is stale
+                // (#681); a fresh one may belong to a save that is still running.
+                if (preg_match(self::TEMP_NAME, basename($f)) === 1) {
+                    if ((@filemtime($f) ?: 0) < time() - self::TEMP_STALE_SECONDS) {
+                        @unlink($f);
+                    }
+                    continue;
+                }
                 // Skip sidecar .json files — we read those via getHalt()
                 if (substr($f, -5) === '.json') {
                     continue;

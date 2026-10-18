@@ -296,19 +296,28 @@ class StorageMetricsService {
 
     /**
      * Pure: the size and use of the root file system from the last line of `df -m /`.
-     * The line holds four numbers and a percent: size, used, available, use%. The device
-     * name before them may hold digits and spaces, so the match needs all four numbers
-     * and the percent sign together. A line with no match (empty output, a missing
-     * column, a use% of "-") gives zero for both values.
+     * The line holds the device name, then size, used, available, use% and the mount point.
+     * The four values are counted from the END of the line, so the device name may hold
+     * digits and spaces without shifting them. A line with a missing column (for example a
+     * device "rootfs2" and no "available" column), empty output, or a use% of "-" gives zero
+     * for both values.
      *
      * @return array{total_mb:int,used_mb:int}
      */
     public static function parseRootDf(string $dfLine): array
     {
-        if (preg_match('/(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%/', $dfLine, $matches) !== 1) {
-            return ['total_mb' => 0, 'used_mb' => 0];
+        $zero = ['total_mb' => 0, 'used_mb' => 0];
+        $fields = preg_split('/\s+/', trim($dfLine), -1, PREG_SPLIT_NO_EMPTY);
+        if ($fields === false) return $zero;
+        // Fields from the end: mount point, use%, available, used, size.
+        $n = count($fields);
+        if ($n < 5) return $zero;
+        [$size, $used, $avail, $pct] = [$fields[$n - 5], $fields[$n - 4], $fields[$n - 3], $fields[$n - 2]];
+        if (preg_match('/^\d+$/', $size) !== 1 || preg_match('/^\d+$/', $used) !== 1
+            || preg_match('/^\d+$/', $avail) !== 1 || preg_match('/^\d+%$/', $pct) !== 1) {
+            return $zero;
         }
-        return ['total_mb' => (int)$matches[1], 'used_mb' => (int)$matches[2]];
+        return ['total_mb' => (int)$size, 'used_mb' => (int)$used];
     }
 
     /**
