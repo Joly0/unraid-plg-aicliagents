@@ -270,7 +270,7 @@ class HistoryMoveService
         // The file must not change or open while we copy. Check again before the source goes.
         clearstatcache(true, $src);
         $st2 = @stat($src);
-        if ($st2 === false && !file_exists($src) && !is_link($src)) {
+        if ($st2 === false && @lstat($src) === false) {
             // #587: the source is gone and the checked copy is now the only one. Keep it.
             // Removing it here lost the file when another job had already finished the move.
             self::walWrite($log, ['t' => 'removed', 'file' => $rel]);

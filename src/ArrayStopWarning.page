@@ -145,7 +145,7 @@ if (file_exists($cfgFile)) {
                             document.body.classList.remove('aicli-array-stop-swal');
                             if (confirmed) {
                                 // #592/#650: no pre-stop eviction call. The action it
-                                // used (evict_all) has no handler. The sessions are
+                                // used had no handler. The sessions are
                                 // closed by the stopping_array event hook, after it
                                 // captures their resume ids.
                                 if (!$(form).find('input[name="cmdStop"]').length) {

@@ -126,7 +126,8 @@ class StorageMigrationService {
 
         // #585: the layers are gone, so the manifest must not still list them
         // (the next boot sweep would report total_loss).
-        LayerManifestService::removeEntity("$type/$id");
+        require_once __DIR__ . '/FileStorage.php';
+        FileStorage::dropManifestEntry("$type/$id");
 
         $flashMB = round($flashOld / 1024 / 1024, 2);
         LogService::log("Successfully wiped all storage for $id. Reclaimed $flashMB MB of Flash space and $ramOld MB of RAM.", LogService::LOG_INFO, "StorageMigrationService");
