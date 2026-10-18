@@ -729,7 +729,8 @@ class StorageHandler {
         if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
             return ['status' => 'error', 'message' => 'invalid_id'];
         }
-        $mapped = self::listHomeSessions($id);
+        // #617: a read endpoint does not reap sessions. The sweep runs from actions and the supervisor.
+        $mapped = self::listHomeSessions($id, false);
         return ['status' => 'ok', 'sessions' => array_values($mapped)];
     }
 
@@ -739,15 +740,16 @@ class StorageHandler {
      * the description a human approves names the same sessions the Storage
      * tab's dialog shows. Read-only.
      *
+     * @param bool $sweep false from a read endpoint (#617: no orphan reap on a read)
      * @return list<array{id:string,agentId:string,name:string,icon:string,path:string,workspace:string}>
      */
-    public static function listHomeSessions(string $id): array {
+    public static function listHomeSessions(string $id, bool $sweep = true): array {
         if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
             return [];
         }
         require_once __DIR__ . '/../services/AgentRegistry.php';
         $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
-        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id);
+        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id, $sweep);
         $mapped = array_map(function($s) use ($registry) {
             $agentId  = (string)($s['agentId'] ?? '');
             $path     = (string)($s['path']    ?? '');

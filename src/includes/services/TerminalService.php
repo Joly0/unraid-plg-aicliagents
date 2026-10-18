@@ -1138,11 +1138,13 @@ class TerminalService {
      * from the .user metadata file, then delegates filtering to
      * filterSessionsByHome (which handles legacy sessions transparently).
      *
+     * @param bool $sweep false for a read-only caller (no reaping of orphan sessions, #617)
      * @return array<int, array<string, mixed>>  Each entry has at least 'id' and 'user'.
      */
-    public static function listActiveSessionsForHome(string $user): array
+    public static function listActiveSessionsForHome(string $user, bool $sweep = true): array
     {
-        ProcessManager::sweepOrphanSessions();
+        // #617: a read endpoint passes $sweep = false, so a page read never reaps a session.
+        if ($sweep) ProcessManager::sweepOrphanSessions();
 
         $config      = ConfigService::getConfig();
         $configUser  = (string)($config['user'] ?? '');

@@ -1420,6 +1420,28 @@ while true; do
         if [ -s "$HOME_DIR/.kimi-code/session_index.jsonl" ]; then
             can_resume=1
         fi
+    elif [ "$AGENT_ID" == "codex-cli" ]; then
+        # #610: 'codex resume --last' picks the most recent session of the
+        # CURRENT folder. A store-wide rollout file offers the resume; if this
+        # folder has none, the speculative latest-resume falls through to a
+        # fresh launch (frozen_chat_id is empty here, see below).
+        if [ -d "$HOME_DIR/.codex/sessions" ] && [ -n "$(find "$HOME_DIR/.codex/sessions" -name 'rollout-*.jsonl' -type f 2>/dev/null)" ]; then
+            can_resume=1
+        fi
+    elif [ "$AGENT_ID" == "kilocode" ]; then
+        # #610: Kilo Code keeps every session in one SQLite file (kilo.db).
+        # 'kilo --continue' resumes the last session; same fall-through as codex.
+        if [ -s "$HOME_DIR/.local/share/kilo/kilo.db" ]; then
+            can_resume=1
+        fi
+    elif [ "$AGENT_ID" == "goose" ]; then
+        # #610: Goose keeps every session in sessions.db. 'session --resume'
+        # without a name is the registry's resume-latest form. The official docs do
+        # not state its default, and the goose binary is not installed on this
+        # host, so that default is unverified.
+        if [ -s "$HOME_DIR/.local/share/goose/sessions/sessions.db" ]; then
+            can_resume=1
+        fi
     fi
 
     # D-400: Safe command execution (no eval). Uses bash -c with validated commands.

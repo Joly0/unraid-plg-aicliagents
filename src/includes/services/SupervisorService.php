@@ -1226,7 +1226,9 @@ class SupervisorService {
                         ) {
                             $homeId = substr($entity, 5); // "home/root" → "root"
                             require_once __DIR__ . '/TerminalService.php';
-                            $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($homeId);
+                            // #617: this runs from list_activities and storage_job_status (read
+                            // endpoints) too. It only counts the open sessions, so it does not sweep.
+                            $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($homeId, false);
                             $dirtyMb  = self::zramUpperDirtyMb($homeId);
                             $step     = self::homeDoneStep($sessions, $dirtyMb);
                         }
