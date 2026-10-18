@@ -663,6 +663,26 @@ class SupervisorService {
      * @return array<int,array<string,mixed>>
      */
     /**
+     * The ONE rule for "this ledger entry is active" (Forgejo #586). The Storage card
+     * (activeJobFor) and the consolidate start guard (ConsolidateState) both call it.
+     * Active = queued or running, or deferred WHILE the supervisor holds a retry for it.
+     * Forgejo #454: a deferral that parks no retry (no_space: nothing is queued, the
+     * person must press the button again) is a finished attempt, not a wait. Counting it
+     * kept the card locked, and every workspace start refused, for the 24 h the ledger
+     * keeps the entry.
+     *
+     * @param array<string,mixed> $j
+     */
+    public static function isJobActive(array $j): bool {
+        $state = (string)($j['state'] ?? '');
+        if ($state === 'queued' || $state === 'running') return true;
+        if ($state !== 'deferred') return false;
+        $id = (string)($j['job_id'] ?? '');
+        if ($id === '') return false;
+        return is_file(dirname(self::jobsDir()) . '/jobs-retry/' . $id . '.retry');
+    }
+
+    /**
      * docs/specs/HOME_STORAGE_CARD_JOB_STATE.md (Forgejo #247): the ONE active
      * job of an entity, in the small shape the storage card renders, or null.
      * "Active" = queued, running or deferred (a deferred job will retry, so the
@@ -674,14 +694,7 @@ class SupervisorService {
     public static function activeJobFor(string $entity, ?array $jobs = null): ?array {
         foreach ($jobs ?? self::listJobs(true) as $j) {
             if ((string)($j['entity'] ?? '') !== $entity) continue;
-            // Forgejo #454: a deferred job is "waiting" only while the supervisor holds a retry
-            // for it. A deferral that parks no retry (no_space: nothing is queued, the person
-            // must press the button again) is a finished attempt, not a wait. Showing it as
-            // "Merging layers - waiting" kept the card locked for the 24 h the ledger keeps it.
-            if ((string)($j['state'] ?? '') === 'deferred'
-                && !is_file(dirname(self::jobsDir()) . '/jobs-retry/' . (string)$j['job_id'] . '.retry')) {
-                continue;
-            }
+            if (!self::isJobActive($j)) continue;
             return [
                 'jobId'        => (string)$j['job_id'],
                 'op'           => (string)($j['op'] ?? ''),

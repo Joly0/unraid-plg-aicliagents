@@ -111,7 +111,7 @@ class ConsolidateState {
      *
      * Staleness fallback (mirrors isInstallInProgress): if the flag is older than
      * HOME_CONSOLIDATE_STALE_SECS AND there is NO active consolidate-home job for
-     * this user in the supervisor jobs ledger (state in {queued,running,deferred}),
+     * this user in the supervisor jobs ledger (SupervisorService::isJobActive),
      * the marker is crash residue — best-effort unlink and return false so `start`
      * can never be wedged permanently. A fresh marker, or a stale marker with a
      * still-active job, reports in progress.
@@ -139,7 +139,7 @@ class ConsolidateState {
 
     /**
      * True if the supervisor jobs ledger holds a consolidate job for home/$user
-     * whose state is queued, running, or deferred. Best-effort: any read error
+     * that SupervisorService::isJobActive counts as active. Best-effort: any read error
      * → false (the caller then treats a stale marker as residue, never wedged).
      */
     private static function hasActiveConsolidateJob(string $user): bool {
@@ -155,8 +155,9 @@ class ConsolidateState {
             // workspace start in the middle of the copy (prod02, 2026-10-14).
             if ($op !== 'consolidate' && $op !== 'graduate') continue;
             if ((string)($job['entity'] ?? '') !== $entity) continue;
-            $state = (string)($job['state'] ?? '');
-            if (in_array($state, ['queued', 'running', 'deferred'], true)) {
+            // Forgejo #586: the same rule as the Storage card. A deferred job with no
+            // retry parked (no_space) is a finished attempt, not an active consolidate.
+            if (SupervisorService::isJobActive($job)) {
                 return true;
             }
         }

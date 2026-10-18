@@ -36,6 +36,39 @@ class HistoryMoveService
 {
     public const REFUSE_ARRAY_STOPPED = 'The array is stopped. Start the array, then try again.';
 
+    public const REFUSE_BUSY = 'Another move of old sessions is running. Wait until it ends, then try again.';
+
+    /** Seconds a second job polls for the run lock before it gives up. */
+    private const LOCK_WAIT_SECS = 3.0;
+
+    /**
+     * Take the run lock of one store (<base>/MOVED.lock) for a whole move, bring back or
+     * recovery. Non-blocking, polled to a deadline: a blocking flock can hang on a busy
+     * disk. The lock goes with the process, so a crashed job never leaves it held.
+     * $opts['lock_wait'] (seconds) is a test seam. Returns the handle, or null when busy.
+     *
+     * @return resource|null
+     */
+    private static function lockStore(string $base, array $opts)
+    {
+        $fh = @fopen($base . '/MOVED.lock', 'c');
+        if ($fh === false) return null;
+        $deadline = microtime(true) + (float)($opts['lock_wait'] ?? self::LOCK_WAIT_SECS);
+        do {
+            if (@flock($fh, LOCK_EX | LOCK_NB)) return $fh;
+            usleep(100000);
+        } while (microtime(true) < $deadline);
+        fclose($fh);
+        return null;
+    }
+
+    /** @param resource $fh */
+    private static function unlockStore($fh): void
+    {
+        @flock($fh, LOCK_UN);
+        fclose($fh);
+    }
+
     /** MOVED.json is rewritten after this many files, and at the end. */
     private const LEDGER_FLUSH_EVERY = 25;
 
@@ -141,6 +174,20 @@ class HistoryMoveService
         if (!is_dir($base) && !@mkdir($base, 0755, true) && !is_dir($base)) {
             return self::fail($res, 'The folder for moved sessions cannot be created.');
         }
+        // #587: one move or bring back at a time on one log. An orphaned job of a killed
+        // supervisor can still run; a second job would read its live log in recover().
+        $lock = self::lockStore($base, $opts);
+        if ($lock === null) return self::fail($res, self::REFUSE_BUSY);
+        try {
+            return self::moveLocked($homeDir, $agentId, $days, $base, $opts, $res);
+        } finally {
+            self::unlockStore($lock);
+        }
+    }
+
+    /** @param array<string,mixed> $res */
+    private static function moveLocked(string $homeDir, string $agentId, int $days, string $base, array $opts, array $res): array
+    {
         self::recover($homeDir, $base, $opts);
 
         $paths = $opts['files'] ?? HistoryStoreService::selectOld($homeDir, $agentId, $days, $opts['open'] ?? null, $opts['now'] ?? null);
@@ -223,6 +270,12 @@ class HistoryMoveService
         // The file must not change or open while we copy. Check again before the source goes.
         clearstatcache(true, $src);
         $st2 = @stat($src);
+        if ($st2 === false && !file_exists($src) && !is_link($src)) {
+            // #587: the source is gone and the checked copy is now the only one. Keep it.
+            // Removing it here lost the file when another job had already finished the move.
+            self::walWrite($log, ['t' => 'removed', 'file' => $rel]);
+            return null;
+        }
         $open = self::isOpenNow($src, $homeDir, $openProvider);
         if ($st2 === false || (int)$st2['size'] !== $size || (int)$st2['mtime'] !== $mtime || $open) {
             @unlink($dst);
@@ -275,6 +328,18 @@ class HistoryMoveService
         if (!$mounted($dest)) return self::fail($res, self::REFUSE_ARRAY_STOPPED);
         $base = rtrim($dest, '/') . '/' . $user;
         if (!is_dir($base)) return self::fail($res, 'No moved sessions are in this folder.');
+        $lock = self::lockStore($base, $opts);
+        if ($lock === null) return self::fail($res, self::REFUSE_BUSY);
+        try {
+            return self::bringBackLocked($homeDir, $agentId, $base, $opts, $res);
+        } finally {
+            self::unlockStore($lock);
+        }
+    }
+
+    /** @param array<string,mixed> $res */
+    private static function bringBackLocked(string $homeDir, string $agentId, string $base, array $opts, array $res): array
+    {
         self::recover($homeDir, $base, $opts);
 
         $state = self::readState($base);
