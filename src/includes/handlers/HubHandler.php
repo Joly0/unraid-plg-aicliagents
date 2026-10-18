@@ -162,7 +162,8 @@ class HubHandler
             'disabled' => !empty($def['disabled']),
             'command' => $def['command'] ?? '',
             'args' => $def['args'] ?? [],
-            'url' => $def['url'] ?? '',
+            // #588: a legacy URL can still hold a raw credential in its query part.
+            'url' => HubProjector::redactForBrowser((string)($def['url'] ?? '')),
             'enabledFor' => $def['enabledFor'] ?? [],
             'env' => [],
             'headers' => [],

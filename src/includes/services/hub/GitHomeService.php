@@ -51,6 +51,14 @@ class GitHomeService {
     const GI_FENCE_CLOSE = '# <<< aicli-hub <<<';
     /** Clean/smudge filter name (sanitizes resolved secrets <-> {KEY} placeholders). */
     const SECRET_FILTER = 'aicli-secrets';
+    /**
+     * Clean-only twin of the filter above, for the canonical store .aicli/hub/mcp.json (#590).
+     * That file keeps {KEY} placeholders in the working tree, so a checkout must not
+     * resolve them: smudge is `cat`.
+     */
+    const SECRET_FILTER_CLEAN_ONLY = 'aicli-secrets-clean';
+    /** Home-relative path of the canonical MCP store (guarded against raw secrets). */
+    const HUB_MCP_REL = '.aicli/hub/mcp.json';
     /** Plugin config dir on flash (overridable for tests via AICLI_PLUGIN_CFG_DIR). */
     const PLUGIN_CFG_DIR = '/boot/config/plugins/unraid-aicliagents';
     /** Where the snapshotted plugin settings live inside the managed home (home-relative). */
@@ -413,6 +421,8 @@ class GitHomeService {
             '# tree stays resolved). Filter defined in .git/config (filter.' . self::SECRET_FILTER . '.*).',
         ];
         foreach ($paths as $rel) $lines[] = $rel . ' filter=' . self::SECRET_FILTER;
+        $lines[] = '# The canonical MCP store: clean only, so a vault value that reached it is committed as {KEY}.';
+        $lines[] = self::HUB_MCP_REL . ' filter=' . self::SECRET_FILTER_CLEAN_ONLY;
         $lines[] = self::GI_FENCE_CLOSE;
         return implode("\n", $lines) . "\n";
     }
@@ -445,6 +455,29 @@ class GitHomeService {
         self::git(['config', 'filter.' . self::SECRET_FILTER . '.clean',  $cmd . ' clean']);
         self::git(['config', 'filter.' . self::SECRET_FILTER . '.smudge', $cmd . ' smudge']);
         self::git(['config', 'filter.' . self::SECRET_FILTER . '.required', 'true']);
+        self::git(['config', 'filter.' . self::SECRET_FILTER_CLEAN_ONLY . '.clean',  $cmd . ' clean']);
+        self::git(['config', 'filter.' . self::SECRET_FILTER_CLEAN_ONLY . '.smudge', 'cat']);
+        self::git(['config', 'filter.' . self::SECRET_FILTER_CLEAN_ONLY . '.required', 'true']);
+    }
+
+    /**
+     * Last line of defence for the canonical MCP store (#590). The clean filter turns a
+     * vault VALUE back into {KEY}; this guard catches the rest, a raw secret that is in
+     * no vault entry. It reads the STAGED blob, so it sees what would be committed. When
+     * the blob holds one, the file is unstaged for this commit (the rest of the backup
+     * goes on) and the reason is logged. Returns the problems found (names, no values).
+     * @return string[]
+     */
+    private static function unstageMcpStoreWithRawSecrets(): array {
+        $r = self::git(['show', ':' . self::HUB_MCP_REL]);
+        if ($r['rc'] !== 0 || $r['out'] === '') return []; // not staged: nothing to guard
+        $data = json_decode($r['out'], true);
+        $problems = is_array($data) ? \AICliAgents\Services\Hub\HubStore::rawSecretProblems((array)($data['servers'] ?? [])) : [];
+        if (empty($problems)) return [];
+        self::git(['reset', '-q', '--', self::HUB_MCP_REL]);
+        LogService::log('hub git: ' . self::HUB_MCP_REL . ' left out of the commit, it holds a raw secret ('
+            . implode('; ', $problems) . '). Move the value to Secrets and use {KEY}.', LogService::LOG_WARN, 'GitHomeService');
+        return $problems;
     }
 
     // ------------------------------------------------------------------
@@ -903,6 +936,7 @@ class GitHomeService {
             if (!empty($specs)) {
                 $add = self::git(array_merge(['add', '-A', '--'], $specs));
                 if ($add['rc'] !== 0) return self::fail('git add failed: ' . $add['err']);
+                self::unstageMcpStoreWithRawSecrets(); // #590
             }
             // R-11 (#211): ask whether anything is STAGED, not whether the whole tree is
             // clean. Now that the nested-repo gitlinks are gone (R-13) those directories

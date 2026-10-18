@@ -245,12 +245,18 @@ class EnvHandler {
         if (!$agentId) return ['status' => 'error', 'message' => 'Missing or invalid agentId'];
 
         $effective = EnvService::buildEffectiveEnv($path !== '' ? $path : null, $agentId);
-        // Mask values for any keys that match a known schema secret — UI shouldn't
-        // see those even via the effective endpoint.
-        $schemaKeys = self::collectAllSchemaSecretKeys();
+        // Mask the value of every key that is a secret (#588). A secret is a key that
+        // a registry schema declares OR a key held in the agent vault or the
+        // workspace vault. The vault test matters: a free-form secret that no agent
+        // declares is in no schema list, and its value must not leave the box.
+        $secretKeys = array_fill_keys(self::collectAllSchemaSecretKeys(), true);
+        foreach (array_keys(SecretService::getAgentSecrets()) as $k) $secretKeys[(string)$k] = true;
+        if ($path !== '') {
+            foreach (array_keys(SecretService::getWorkspaceSecrets($path, $agentId)) as $k) $secretKeys[(string)$k] = true;
+        }
         $masked = [];
         foreach ($effective as $k => $v) {
-            $masked[$k] = in_array($k, $schemaKeys, true) ? ['has_value' => ((string)$v !== '')] : ['value' => (string)$v];
+            $masked[$k] = isset($secretKeys[(string)$k]) ? ['has_value' => ((string)$v !== '')] : ['value' => (string)$v];
         }
         return ['status' => 'ok', 'effective' => $masked];
     }

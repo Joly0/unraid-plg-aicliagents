@@ -41,6 +41,8 @@ class HubStore {
      * vault {KEY} placeholders (see headerSecretProblem()); a raw secret is refused.
      */
     const SENSITIVE_HEADER_RE = '/^(authorization|proxy-authorization|cookie)$|token|secret|passw|credential|api[-_]?key|(^|-)key$|auth/i';
+    /** Env variable names and URL query names that carry a credential (#590). */
+    const SENSITIVE_NAME_RE = '/token|secret|passw|credential|api[-_]?key|apikey|(^|[_-])key$|auth(?!or)|bearer|cookie|private[_-]?key|(^|[_-])sig(nature)?$/i';
     /** One vault placeholder, the same shape HubProjector::resolvePlaceholders() resolves. */
     const PLACEHOLDER_RE = '/\{[A-Z][A-Z0-9_]{1,127}\}/';
     const TRANSPORTS = ['stdio', 'http', 'sse'];
@@ -125,6 +127,8 @@ class HubStore {
             $cleanEnv = [];
             foreach ($env as $k => $v) {
                 if (!preg_match(self::ENV_KEY_RE, (string)$k)) { $errors[] = "invalid env key '$k'"; continue; }
+                $problem = self::valueSecretProblem('env value', (string)$k, (string)$v);
+                if ($problem !== null) { $errors[] = $problem; continue; }
                 $cleanEnv[(string)$k] = (string)$v;
             }
             ksort($cleanEnv);
@@ -133,6 +137,8 @@ class HubStore {
             $url = trim((string)($def['url'] ?? ''));
             if ($url === '' || !preg_match('#^https?://#i', $url)) $errors[] = 'a http(s) url is required for http/sse transport';
             $out['url'] = $url;
+            $problem = self::urlSecretProblem($url);
+            if ($problem !== null) $errors[] = $problem;
             $headers = $def['headers'] ?? [];
             if (!is_array($headers)) { $errors[] = 'headers must be a map'; $headers = []; }
             $cleanHeaders = [];
@@ -184,6 +190,61 @@ class HubStore {
         if (!empty($def['disabled'])) $out['disabled'] = true;
 
         return empty($errors) ? $out : null;
+    }
+
+    /**
+     * A credential-named value (an env variable or a URL query parameter) must hold
+     * vault placeholders only (#590): mcp.json is plain text and the Hub git backup
+     * commits and pushes it. Returns an error text, or null when the value is fine.
+     * Never includes the value in the text.
+     */
+    public static function valueSecretProblem(string $what, string $name, string $value): ?string {
+        if (!preg_match(self::SENSITIVE_NAME_RE, $name)) return null;
+        if ($value === '') return null;
+        $rest = trim((string)preg_replace(self::PLACEHOLDER_RE, '', (string)preg_replace('/^(Bearer|Basic|Token)\s+/i', '', $value)));
+        if ($rest === '' && preg_match(self::PLACEHOLDER_RE, $value)) return null;
+        return "$what '$name' looks like a credential and must not hold a raw secret. "
+             . "Store the secret under Secrets, then write its key here in braces, for example '{MY_TOKEN}'.";
+    }
+
+    /** A URL must not carry a raw secret in its user-info part or in a credential-named query parameter (#590). */
+    public static function urlSecretProblem(string $url): ?string {
+        $parts = @parse_url($url);
+        if (!is_array($parts)) return null;
+        if (isset($parts['pass']) && $parts['pass'] !== '' && self::valueSecretProblem('url', 'password', rawurldecode($parts['pass'])) !== null) {
+            return 'the url holds a password in its user-info part. Use a header with a secret key in braces instead.';
+        }
+        if (!empty($parts['query'])) {
+            foreach (explode('&', $parts['query']) as $pair) {
+                [$qk, $qv] = array_pad(explode('=', $pair, 2), 2, '');
+                $qk = rawurldecode($qk);
+                if (self::valueSecretProblem('url parameter', $qk, rawurldecode($qv)) !== null) {
+                    return "the url parameter '$qk' looks like a credential and must not hold a raw secret. "
+                         . "Store the secret under Secrets, then write its key in braces, for example '{MY_TOKEN}'.";
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Raw secrets in a stored server list (used by the git backup guard). Each
+     * entry names a server and the field; never a value.
+     * @return string[]
+     */
+    public static function rawSecretProblems(array $servers): array {
+        $out = [];
+        foreach ($servers as $name => $def) {
+            if (!is_array($def)) continue;
+            foreach ((array)($def['env'] ?? []) as $k => $v) {
+                if (self::valueSecretProblem('env value', (string)$k, (string)$v) !== null) $out[] = "server '$name': env '$k'";
+            }
+            foreach ((array)($def['headers'] ?? []) as $k => $v) {
+                if (self::headerSecretProblem((string)$k, (string)$v) !== null) $out[] = "server '$name': header '$k'";
+            }
+            if (isset($def['url']) && self::urlSecretProblem((string)$def['url']) !== null) $out[] = "server '$name': url";
+        }
+        return $out;
     }
 
     /**

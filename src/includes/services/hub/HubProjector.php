@@ -614,7 +614,10 @@ class HubProjector {
         foreach (self::instructionVendors() as $projector) {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
             if (empty($serving)) continue;
-            $targeted = array_values(array_intersect($serving, $instructionTargets));
+            // #589: the fence is wanted when ANY installed reader of the file is
+            // targeted, not only a reader in this launch scope. A one-agent scope
+            // must never remove a fence that another agent still uses.
+            $targeted = array_values(array_intersect($projector->servedAgentIds(), $installed, $instructionTargets));
             $desired = empty($targeted) ? [] : $projector->desired(['content' => $content]);
             // Forgejo #245: a DEDICATED rules file (~/.claude/rules/aicli-hub-global.md,
             // ~/.kilo/rules/…) is owned whole by the hub — the user has no content in
@@ -695,7 +698,7 @@ class HubProjector {
 
         // Skills/commands tree pass (H-03) — same ledger/drift surface, third
         // set of vendor surfaces (mirrored file trees per agent dir).
-        $tree = self::reconcileTrees($home, $state, $targets, true);
+        $tree = self::reconcileTrees($home, $state, $targets, true, $installed);
         foreach ($tree['results'] as $k => $r) $results[$k] = $r;
         foreach ($tree['drift'] as $d) $driftAll[] = $d;
         foreach ($tree['writtenAgents'] as $id) {
@@ -874,8 +877,9 @@ class HubProjector {
      * $write=false this is a pure drift probe. Mutates $state ledger entries.
      * @return array{results:array<string,array>,drift:array[],writtenAgents:string[]}
      */
-    private static function reconcileTrees(string $home, array &$state, array $scope, bool $write): array {
+    private static function reconcileTrees(string $home, array &$state, array $scope, bool $write, ?array $installed = null): array {
         $results = []; $drift = []; $writtenAgents = [];
+        $installed = $installed ?? $scope; // every installed reader decides what is wanted (#589)
         $fileMaps = []; // surface => relPath=>content, built lazily
         foreach (self::treeVendors() as $projector) {
             // A shared dir (~/.agents/skills) lists several readers; reconcile it once
@@ -885,7 +889,7 @@ class HubProjector {
             if (empty($serving)) continue;
             $surface = $projector->surface();
             $surfaceTargets = $state[$surface . '_enabledFor'] ?? [];
-            $targeted = array_values(array_intersect($serving, $surfaceTargets));
+            $targeted = array_values(array_intersect($projector->servedAgentIds(), $installed, $surfaceTargets));
             $files = [];
             if (!empty($targeted)) {
                 if (!isset($fileMaps[$surface])) $fileMaps[$surface] = self::desiredTreeFiles($surface);
@@ -1303,6 +1307,10 @@ class HubProjector {
             if (!empty($def['headers']) && is_array($def['headers'])) {
                 $def['headers'] = self::resolvePlaceholders($def['headers']);
             }
+            // #590: a URL keeps its secret as {KEY} in the store, like env and headers.
+            if (!empty($def['url']) && is_string($def['url'])) {
+                $def['url'] = self::resolvePlaceholders([$def['url']])[0];
+            }
             $out[$name] = $def;
         }
         return $out;
@@ -1325,8 +1333,46 @@ class HubProjector {
     }
 
     private static function driftRec(string $file, string $key, string $agentId, string $kind, $theirs, $ours): array {
+        // A drift record goes to the browser. "ours" is the projected value, so it
+        // holds resolved vault secrets; "theirs" can hold them too (#588).
         return ['file' => $file, 'key' => $key, 'agentId' => $agentId, 'kind' => $kind,
-                'theirs' => $theirs, 'ours' => $ours];
+                'theirs' => self::redactForBrowser($theirs), 'ours' => self::redactForBrowser($ours)];
+    }
+
+    /** Map keys of a vendor MCP value whose values are secrets by nature. */
+    private const SECRET_MAP_KEYS = ['env', 'environment', 'headers', 'http_headers', 'envHttpHeaders'];
+
+    /**
+     * A copy of a vendor value that is safe to send to the browser (#588).
+     * A vault value inside any string goes back to its {KEY} placeholder. Each
+     * value in an env or header map that is not a bare placeholder becomes
+     * "[masked:<hash>]": the browser can still see that the value changed, but
+     * never the value. The shape of the value stays the same.
+     */
+    public static function redactForBrowser($value, ?array $vault = null, bool $secretMap = false) {
+        if ($vault === null) {
+            $vault = [];
+            foreach (SecretService::getAgentSecrets() as $k => $v) {
+                if (strlen((string)$v) >= 4) $vault[(string)$k] = (string)$v;
+            }
+            uasort($vault, static fn($a, $b) => strlen($b) <=> strlen($a));
+        }
+        if (is_array($value)) {
+            $out = [];
+            foreach ($value as $k => $v) {
+                $out[$k] = self::redactForBrowser($v, $vault, $secretMap || in_array((string)$k, self::SECRET_MAP_KEYS, true));
+            }
+            return $out;
+        }
+        if (!is_string($value)) return $value;
+        foreach ($vault as $name => $secret) {
+            $value = str_replace($secret, '{' . $name . '}', $value);
+        }
+        if ($secretMap && !preg_match('/^(?:Bearer |Basic )?\{[A-Z][A-Z0-9_]{1,127}\}$/', $value)) {
+            return '[masked:' . substr(hash('sha256', $value), 0, 8) . ']';
+        }
+        // A secret in a URL query part.
+        return preg_replace('/([?&][A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|auth|sig)[A-Za-z0-9_.-]*=)(?!\{[A-Z][A-Z0-9_]{1,127}\}(?:[&#\s]|$))[^&#\s]+/i', '$1[masked]', $value);
     }
 
     /** Server name behind a managed key (JSON vendors only; fence keys → null). */
@@ -1357,7 +1403,8 @@ class HubProjector {
      * @return string[] sorted unique key names
      */
     public static function unresolvedPlaceholders(array $def): array {
-        $values = array_merge(array_values((array)($def['env'] ?? [])), array_values((array)($def['headers'] ?? [])));
+        $values = array_merge(array_values((array)($def['env'] ?? [])), array_values((array)($def['headers'] ?? [])),
+                              isset($def['url']) ? [(string)$def['url']] : []);
         $missing = [];
         $secrets = null;
         foreach ($values as $v) {
@@ -1371,11 +1418,36 @@ class HubProjector {
     }
 
     /**
+     * Replace every vault value found in a string (or in the strings of an array)
+     * by its {KEY} placeholder. The reverse of resolvePlaceholders(). Values
+     * shorter than 6 characters are skipped, as the git clean filter does.
+     */
+    public static function unresolveVaultValues($value, ?array $pairs = null) {
+        if ($pairs === null) {
+            $pairs = [];
+            foreach (SecretService::getAgentSecrets() as $k => $v) {
+                if (strlen((string)$v) >= 6 && preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) $pairs[(string)$k] = (string)$v;
+            }
+            uasort($pairs, static fn($a, $b) => strlen($b) <=> strlen($a));
+        }
+        if (is_array($value)) {
+            foreach ($value as $k => $v) $value[$k] = self::unresolveVaultValues($v, $pairs);
+            return $value;
+        }
+        if (!is_string($value)) return $value;
+        foreach ($pairs as $name => $secret) $value = str_replace($secret, '{' . $name . '}', $value);
+        return $value;
+    }
+
+    /**
      * Map a vendor mcpServers value back to a canonical def (adopt path).
      * Preserves the existing enabledFor; returns null when the shape is not
      * recognisably stdio/http/sse.
      */
     private static function canonicalFromVendor($vendorValue, ?array $existing, string $agentId): ?array {
+        // #590: the vendor file holds RESOLVED secrets. The canonical store must keep
+        // the {KEY} form, so each value that equals a vault value goes back to its key.
+        $vendorValue = self::unresolveVaultValues($vendorValue);
         $v = VendorProjector::canonicalize($vendorValue);
         if (!is_array($v)) return null;
         $enabledFor = $existing['enabledFor'] ?? [$agentId];
