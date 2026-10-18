@@ -83,6 +83,10 @@
     // watchdog; once play() reports that playback has started, the clip may run
     // for its full duration.
     var AUDIO_START_TIMEOUT_MS = 12000;
+    // #670: a clip that started and then stops moving (the network stalls mid-clip, no ended
+    // or error event) must not hold the queue for ever. A playing clip reports `timeupdate`
+    // several times a second; this long without one ends it as heard.
+    var AUDIO_STALL_MS = 30000;
     // VOICE_SWITCHES.md: the confirmation sentence when voice is turned on. The
     // server picks the same fixed text for purpose=switch (VoiceHandler).
     var VOICE_CONFIRM_TEXT = 'Voice enabled.';
@@ -316,10 +320,12 @@
             var audio = new Audio(url);
             var settled = false;
             var started = false;
+            var stallTimer = null;
             var finish = function (outcome) {
                 if (settled) return;
                 settled = true;
                 clearTimeout(startupTimer);
+                if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
                 done(outcome);
             };
             var startupTimer = setTimeout(function () {
@@ -327,12 +333,23 @@
                 try { if (typeof audio.pause === 'function') audio.pause(); } catch (e) { /* noop */ }
                 finish('timeout');
             }, AUDIO_START_TIMEOUT_MS);
+            var armStall = function () {
+                if (settled) return;
+                if (stallTimer) clearTimeout(stallTimer);
+                stallTimer = setTimeout(function () {
+                    try { if (typeof audio.pause === 'function') audio.pause(); } catch (e) { /* noop */ }
+                    // It started, so the person heard it: end it as heard, as an error after the start does.
+                    finish('ended');
+                }, AUDIO_STALL_MS);
+            };
             var markStarted = function () {
                 if (started) return;
                 started = true;
                 clearTimeout(startupTimer);
+                armStall();
                 if (typeof onStart === 'function') { try { onStart(); } catch (e) { /* noop */ } }
             };
+            audio.ontimeupdate = armStall;
             audio.onended = function () { finish('ended'); };
             // An error AFTER the clip started means the person already heard it (a late network or
             // decode hiccup at the tail). Report that as ended, so the page does not repeat the same
