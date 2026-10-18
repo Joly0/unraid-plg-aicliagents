@@ -179,9 +179,7 @@ class AgentHandler {
                         $seen[$agentId] = true;
                         continue;
                     }
-                    $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
-                    exec($cmd, $ignored, $rc);
-                    if ($rc !== 0) {
+                    if (!\AICliAgents\Services\PendingAgentUpgradeService::backgroundInstallRunning($agentId)) {
                         continue;
                     }
                 }
@@ -245,10 +243,7 @@ class AgentHandler {
         }
 
         // Signal 2: a live install-bg.php process for this agent.
-        $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
-        $out = [];
-        exec($cmd, $out, $processRunning);
-        $processRunning = ($processRunning === 0);
+        $processRunning = \AICliAgents\Services\PendingAgentUpgradeService::backgroundInstallRunning((string)$agentId);
 
         if ($processRunning) {
             // A live install-bg process is authoritative — in progress regardless
@@ -364,10 +359,14 @@ class AgentHandler {
             return ['status' => 'error', 'message' => 'No Agent ID provided'];
         }
 
+        // #591: refuse an id that is not a registered agent BEFORE it reaches
+        // any shell string or path. install_agent used to trust the raw id.
+        if (!array_key_exists($agentId, \AICliAgents\Services\AgentRegistry::getDefaultAgents())) {
+            return ['status' => 'error', 'message' => 'Invalid agent id'];
+        }
+
         // Check if an installation is already active for this specific agent
-        $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
-        exec($cmd, $out, $res);
-        if ($res === 0) {
+        if (\AICliAgents\Services\PendingAgentUpgradeService::backgroundInstallRunning($agentId)) {
             return ['status' => 'error', 'message' => 'An installation is already in progress for this agent.'];
         }
 

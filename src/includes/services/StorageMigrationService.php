@@ -41,14 +41,53 @@ class StorageMigrationService {
         return self::consolidateEntity('home', $user);
     }
 
+    /**
+     * #585: the one rule for a wipe target. The type is agent or home. The id is
+     * one path-safe name: no slash, no glob character, not "." or "..". An agent
+     * id also has to match the agent id shape. Used by the handler AND by
+     * nuclearRebuild(), so a direct caller is refused as well.
+     */
+    public static function isValidWipeTarget($type, $id): bool {
+        if (!is_string($type) || !is_string($id)) return false;
+        if ($type === 'agent') return (bool)preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $id);
+        if ($type === 'home')  return (bool)preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/', $id);
+        return false;
+    }
+
+    /**
+     * #585: does this layer file belong to EXACTLY this entity? The old glob
+     * "{type}_{id}_*" also took the layers of a longer id that starts with the
+     * same text plus an underscore (home "a" matched "home_a_b_..."). The part
+     * after the id must start with a layer kind (consolidated, delta, vol, v<N>).
+     */
+    public static function layerFileBelongsTo(string $file, string $type, string $id): bool {
+        $name = basename($file);
+        $prefix = "{$type}_{$id}_";
+        if (strncmp($name, $prefix, strlen($prefix)) !== 0) return false;
+        return (bool)preg_match('/^(consolidated|delta|vol\d*|v\d+)([_.]|$)/', substr($name, strlen($prefix)));
+    }
+
+    /** @return string[] the layer files of exactly this entity under $persistPath */
+    private static function entityLayerFiles(string $persistPath, string $type, string $id): array {
+        $files = [];
+        foreach ((array)glob(rtrim($persistPath, '/') . "/{$type}_*.sqsh") as $f) {
+            if (self::layerFileBelongsTo($f, $type, $id)) $files[] = $f;
+        }
+        return $files;
+    }
+
     public static function nuclearRebuild($type, $id) {
+        if (!self::isValidWipeTarget($type, $id)) {
+            LogService::log("Wipe refused: invalid storage type or id.", LogService::LOG_WARN, "StorageMigrationService");
+            return false;
+        }
         $config = ConfigService::getConfig();
         $persistPath = ($type === 'home')
             ? ($config['home_storage_path']  ?? "/boot/config/plugins/unraid-aicliagents")
             : ($config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents");
-        
+
         $flashOld = 0;
-        foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $f) $flashOld += filesize($f);
+        foreach (self::entityLayerFiles($persistPath, $type, $id) as $f) $flashOld += (int)@filesize($f);
         
         $upperDir = "/tmp/unraid-aicliagents/zram_upper/{$type}s/{$id}/upper";
         $ramOld = 0;
@@ -75,12 +114,19 @@ class StorageMigrationService {
         }
 
         // 2. Wipe Flash
-        foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $f) @unlink($f);
+        foreach (self::entityLayerFiles($persistPath, $type, $id) as $f) @unlink($f);
 
         // 3. Wipe the upper(s): zram base plus, for a home, the live disk upper.
         foreach ($wipeDirs as $dir) {
+            // #585: defence in depth. A wipe dir must end in this entity's own
+            // name, so no odd input can point rm -rf at a parent folder.
+            if (basename($dir) !== (string)$id) continue;
             if (is_dir($dir)) exec("rm -rf " . escapeshellarg($dir));
         }
+
+        // #585: the layers are gone, so the manifest must not still list them
+        // (the next boot sweep would report total_loss).
+        LayerManifestService::removeEntity("$type/$id");
 
         $flashMB = round($flashOld / 1024 / 1024, 2);
         LogService::log("Successfully wiped all storage for $id. Reclaimed $flashMB MB of Flash space and $ramOld MB of RAM.", LogService::LOG_INFO, "StorageMigrationService");

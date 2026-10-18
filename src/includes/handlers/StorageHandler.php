@@ -2003,6 +2003,13 @@ class StorageHandler {
     private static function wipe() {
         $type = $_GET['type'] ?? 'agent';
         $id = $_GET['id'] ?? 'default';
+        // #585: type and id come straight from the request. Refuse anything that
+        // is not an agent or a home with a path-safe name (id=* or id=.. wiped
+        // every home layer or a whole upper tree).
+        if (!\AICliAgents\Services\StorageMigrationService::isValidWipeTarget($type, $id)) {
+            aicli_log("AJAX Request: Wipe storage refused: invalid type or id", AICLI_LOG_WARN);
+            return ['status' => 'error', 'message' => 'Invalid storage type or id.'];
+        }
         aicli_log("AJAX Request: Wipe storage for $type: $id", AICLI_LOG_WARN);
         $res = ($type === 'agent') ? aicli_nuclear_rebuild_agent_storage($id) : \AICliAgents\Services\StorageMigrationService::nuclearRebuild('home', $id);
         \AICliAgents\Services\LifecycleLogService::log($res ? \AICliAgents\Services\LifecycleLogService::LEVEL_WARN : \AICliAgents\Services\LifecycleLogService::LEVEL_ERROR, 'storage', 'storage_wiped', ['type' => $type, 'id' => $id, 'success' => $res]);

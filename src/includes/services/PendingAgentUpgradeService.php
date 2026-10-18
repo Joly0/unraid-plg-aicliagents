@@ -249,10 +249,23 @@ class PendingAgentUpgradeService
     }
 
     /** Public so the cancel handler can enforce the queued-only guard (#71 cancel). */
-    public static function backgroundInstallRunning(string $agentId): bool
+    public static function backgroundInstallRunning(string $agentId, string $procRoot = '/proc'): bool
     {
-        $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
-        exec($cmd, $out, $rc);
-        return $rc === 0;
+        // #591: no shell. The id was once placed inside a hand-written quoted
+        // grep string, where a quote in the id ran commands as root. The process
+        // list is read from /proc and compared in PHP. An id that is not an
+        // agent id shape cannot name a running install.
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        $self = (string)getmypid();
+        foreach ((array)@glob(rtrim($procRoot, '/') . '/[0-9]*/cmdline', GLOB_NOSORT) as $file) {
+            if (basename(dirname($file)) === $self) continue;
+            $raw = @file_get_contents($file);
+            if ($raw === false || $raw === '') continue;
+            $args = explode("\0", rtrim($raw, "\0"));
+            foreach ($args as $i => $arg) {
+                if (substr($arg, -14) === 'install-bg.php' && ($args[$i + 1] ?? null) === $agentId) return true;
+            }
+        }
+        return false;
     }
 }

@@ -270,10 +270,9 @@ class InitService {
             $mtime = filemtime($file);
             
             // Search for active background installer for this specific agent
-            $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
-            exec($cmd, $out, $res);
-            
-            if ($res !== 0 && ($now - $mtime) > 300) {
+            $running = PendingAgentUpgradeService::backgroundInstallRunning($agentId);
+
+            if (!$running && ($now - $mtime) > 300) {
                 @unlink($file);
             }
         }

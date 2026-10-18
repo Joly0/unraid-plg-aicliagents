@@ -434,6 +434,11 @@ class InstallerService {
 
     public static function uninstallAgent($agentId) {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+        // #591: refuse a bad id here, before any path or shell string. This no
+        // longer relies on agentPath() throwing a few lines below.
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', (string)$agentId)) {
+            return ['status' => 'error', 'message' => 'Invalid agent id'];
+        }
 
         $config = ConfigService::getConfig();
         $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
@@ -451,9 +456,11 @@ class InstallerService {
         // user sessions for this agent get killed too.
         foreach (\AICliAgents\Services\ProcessManager::tmuxSocketPaths() as $sock) {
             $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
-            exec("$tmuxBin ls -F '#S' 2>/dev/null | grep 'aicli-agent-.*$agentId' | xargs -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1");
+            // #591: each pattern is ONE escapeshellarg() word, never an id
+            // placed inside a hand-written quoted string.
+            exec("$tmuxBin ls -F '#S' 2>/dev/null | grep " . escapeshellarg("aicli-agent-.*$agentId") . " | xargs -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1");
         }
-        exec("pgrep -f 'ttyd.*$agentId' 2>/dev/null | xargs -r kill -15 > /dev/null 2>&1");
+        exec("pgrep -f " . escapeshellarg("ttyd.*$agentId") . " 2>/dev/null | xargs -r kill -15 > /dev/null 2>&1");
 
         // 2. Unmount the stack: the stable name AND every side-by-side
         //    generation mounted under agents/.versions/<id>/ (Forgejo #441).
