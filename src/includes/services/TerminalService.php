@@ -323,11 +323,13 @@ class TerminalService {
         // runs as $username after runuser, and otherwise has no way to mkdir under
         // a root-owned tmp tree. The OverlayFS upper for the home stack is chowned
         // by mount_stack.sh — this block handles only the non-overlay tmp paths.
-        @mkdir('/tmp/unraid-aicliagents', 01777, true);
-        @chmod('/tmp/unraid-aicliagents', 01777);
-        @mkdir('/tmp/unraid-aicliagents/work', 01777, true);
-        @chmod('/tmp/unraid-aicliagents/work', 01777);
-        $userWorkDir = '/tmp/unraid-aicliagents/work/' . $username;
+        $stateRoot = SecretPaths::stateRoot();
+        @mkdir($stateRoot, 01777, true);
+        @chmod($stateRoot, 01777);
+        $workRoot = $stateRoot . '/work';
+        @mkdir($workRoot, 01777, true);
+        @chmod($workRoot, 01777);
+        $userWorkDir = $workRoot . '/' . $username;
         if (!is_dir($userWorkDir)) {
             @mkdir($userWorkDir, 0755, true);
         }
@@ -846,7 +848,7 @@ class TerminalService {
             $user = $config['user'] ?? 'root';
             if (empty($user)) $user = 'root';
 
-            $home = "/tmp/unraid-aicliagents/work/$user/home";
+            $home = SecretPaths::stateRoot() . "/work/$user/home";
             $projectsFile = "$home/.gemini/projects.json";
             if (!file_exists($projectsFile)) return null;
 
@@ -886,7 +888,7 @@ class TerminalService {
             $config = ConfigService::getConfig();
             $user = $config['user'] ?? 'root';
             if (empty($user)) $user = 'root';
-            $home = "/tmp/unraid-aicliagents/work/$user/home";
+            $home = SecretPaths::stateRoot() . "/work/$user/home";
             return self::antigravityResumeId($home, $path);
         }
 
@@ -894,7 +896,7 @@ class TerminalService {
             $config = ConfigService::getConfig();
             $user = $config['user'] ?? 'root';
             if (empty($user)) $user = 'root';
-            $home = "/tmp/unraid-aicliagents/work/$user/home";
+            $home = SecretPaths::stateRoot() . "/work/$user/home";
             return self::kimiCodeResumeId($home, $path);
         }
 
@@ -902,7 +904,7 @@ class TerminalService {
             $config = ConfigService::getConfig();
             $user = $config['user'] ?? 'root';
             if (empty($user)) $user = 'root';
-            $home = "/tmp/unraid-aicliagents/work/$user/home";
+            $home = SecretPaths::stateRoot() . "/work/$user/home";
             return self::grokBuildResumeId($home, $path);
         }
 

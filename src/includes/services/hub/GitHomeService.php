@@ -138,15 +138,16 @@ class GitHomeService {
     private static function lockFile(): string {
         // MUST stay identical to TaskService::persistHome's lock path — this is
         // the interlock that keeps git from interleaving with a bake.
-        $user = preg_replace('/[^a-zA-Z0-9_-]/', '_', self::user());
-        @mkdir('/tmp/unraid-aicliagents', 0755, true);
-        return "/tmp/unraid-aicliagents/init_{$user}.lock";
+        $stateRoot = \AICliAgents\Services\SecretPaths::stateRoot();
+        @mkdir($stateRoot, 0755, true);
+        return \AICliAgents\Services\SecretPaths::homePersistLockPath(self::user());
     }
 
     private static function pendingMarker(): string {
         $user = preg_replace('/[^a-zA-Z0-9_-]/', '_', self::user());
-        @mkdir('/tmp/unraid-aicliagents', 0755, true);
-        return "/tmp/unraid-aicliagents/hub_git_pending_{$user}";
+        $stateRoot = \AICliAgents\Services\SecretPaths::stateRoot();
+        @mkdir($stateRoot, 0755, true);
+        return "$stateRoot/hub_git_pending_{$user}";
     }
 
     // ------------------------------------------------------------------
@@ -1012,8 +1013,9 @@ class GitHomeService {
     /** R-14 (#211): where the last commit failure is recorded for status() to surface. */
     private static function failureMarker(): string {
         $user = preg_replace('/[^a-zA-Z0-9_-]/', '_', self::user());
-        @mkdir('/tmp/unraid-aicliagents', 0755, true);
-        return "/tmp/unraid-aicliagents/hub_git_error_{$user}";
+        $stateRoot = \AICliAgents\Services\SecretPaths::stateRoot();
+        @mkdir($stateRoot, 0755, true);
+        return "$stateRoot/hub_git_error_{$user}";
     }
 
     /**

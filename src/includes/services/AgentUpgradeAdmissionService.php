@@ -15,7 +15,8 @@ class AgentUpgradeAdmissionService
     public static function acquire(string $agentId)
     {
         if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return null;
-        $base = rtrim(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents', '/');
+        $tmpBase = getenv('AICLI_TMP_BASE');
+        $base = rtrim($tmpBase !== false && $tmpBase !== '' ? $tmpBase : SecretPaths::stateRoot(), '/');
         @mkdir($base, 0755, true);
         $handle = @fopen("$base/agent-upgrade-admission-$agentId.lock", 'c');
         if ($handle === false || !@flock($handle, LOCK_EX | LOCK_NB)) {

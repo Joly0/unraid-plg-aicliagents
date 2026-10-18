@@ -498,7 +498,7 @@ class HubProjector {
         $config = ConfigService::getConfig();
         $user = (string)($config['user'] ?? 'root');
         if ($user === '') $user = 'root';
-        $home = "/tmp/unraid-aicliagents/work/$user/home";
+        $home = \AICliAgents\Services\SecretPaths::stateRoot() . "/work/$user/home";
         if (!StorageMountService::isMounted($home)) {
             return ['ok' => false, 'home' => $home, 'error' => 'home_unavailable'];
         }

@@ -97,6 +97,11 @@ class GithubReleaseSource implements AgentSource {
         if ($bin !== '' && file_exists($bin)) {
             $cmd = str_replace('{binary}', escapeshellarg($bin), $probe) . ' 2>&1';
             $out = @shell_exec($cmd) ?: '';
+            // Some probes print a tool dependency before the agent version
+            // (for example: "curl 8.5.0; agent 1.2.3"). Prefer the labelled
+            // agent version, then keep the first-version fallback for legacy
+            // output that has no label.
+            if (preg_match('/\bagent(?:\s+version)?\s*[:=]?\s*v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/i', $out, $m)) return $m[1];
             if (preg_match('/(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/', $out, $m)) return $m[1];
         }
         if (file_exists("$agentDir/VERSION")) {

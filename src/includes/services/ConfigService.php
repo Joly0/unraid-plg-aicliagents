@@ -42,8 +42,8 @@ class ConfigService {
             // Issue #471: the Logging Level select showed its first choice (Errors Only) when no level was stored,
             // and the next save then stored 0. LogService already uses 2 (Normal, Info) when nothing is stored.
             'log_level' => '2',
-            'home_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
-            'agent_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
+            'home_storage_path' => SecretPaths::flashRoot() . '/persistence',
+            'agent_storage_path' => SecretPaths::flashRoot() . '/persistence',
             // One global storage engine for all agents and homes.  SquashFS +
             // zram is the safe default on the boot device and removable media;
             // changing this setting runs an explicit all-entity migration.
@@ -453,10 +453,10 @@ class ConfigService {
         }
 
         $config = self::getConfig();
-        $oldAgentPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
+        $oldAgentPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
         $newAgentPath = $newConfig['agent_storage_path'] ?? $oldAgentPath;
         
-        $oldHomePath = $config['home_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents/persistence";
+        $oldHomePath = $config['home_storage_path'] ?? (SecretPaths::flashRoot() . '/persistence');
         $newHomePath = $newConfig['home_storage_path'] ?? $oldHomePath;
         $oldVersionSchedule = $config['version_check_schedule'] ?? '0 6 * * *';
         $oldHealthSchedule  = $config['health_check_schedule'] ?? '*/30 * * * *';
@@ -1540,7 +1540,7 @@ class ConfigService {
         $user = (self::getConfig()['user'] ?? 'root') ?: 'root';
         $workDir = class_exists('\AICliAgents\Services\UtilityService')
             ? \AICliAgents\Services\UtilityService::getWorkDir($user)
-            : "/tmp/unraid-aicliagents/work/$user";
+            : (SecretPaths::stateRoot() . "/work/$user");
         $script = "$workDir/aicli-run-$sid.sh";
         if (!is_file($script)) return '';
         if (!preg_match('/^export AICLI_CHAT_SESSION_ID=(\S*)$/m', (string)@file_get_contents($script), $m)) return '';

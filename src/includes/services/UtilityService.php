@@ -147,7 +147,7 @@ class UtilityService {
      */
     public static function getWorkDir($user) {
         if (empty($user)) $user = 'root';
-        return "/tmp/unraid-aicliagents/work/" . $user;
+        return rtrim(SecretPaths::stateRoot(), '/') . "/work/" . $user;
     }
 
     /**
@@ -214,7 +214,7 @@ class UtilityService {
      * Clears any existing installation status files for an agent or all agents.
      */
     public static function clearInstallStatus($agentId = '') {
-        $dir = "/tmp/unraid-aicliagents";
+        $dir = SecretPaths::stateRoot();
         if (empty($agentId)) {
             foreach (glob("$dir/install-status*") as $file) {
                 @unlink($file);
@@ -228,7 +228,7 @@ class UtilityService {
      * Updates the installation status file for frontend polling.
      */
     public static function setInstallStatus($message, $progress, $agentId = '', $reason = '') {
-        $dir = "/tmp/unraid-aicliagents";
+        $dir = SecretPaths::stateRoot();
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
         $file = empty($agentId) ? "$dir/install-status" : "$dir/install-status-$agentId";
         $status = [

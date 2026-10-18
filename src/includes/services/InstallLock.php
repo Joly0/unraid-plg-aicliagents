@@ -28,8 +28,8 @@ class InstallLock
      * handle referenced for the whole critical section — the lock releases on
      * release()/fclose or when the process exits (so a crashed holder never wedges
      * the queue). If the lock can't be taken within $deadlineSec we return
-     * held=false and let the caller PROCEED rather than hang forever (the activity
-     * watchdog already fails a stalled install at 20 min). $onWait fires the first
+     * held=false and queued=true; the caller must stop this install rather than
+     * write to flash beside the holder. $onWait fires the first
      * time we have to queue, then again every $repeatSec seconds, so the caller can
      * keep its tray row fresh while it waits (#619: one call let a healthy queued
      * install show as stalled after 2 minutes and failed after 20).
@@ -56,11 +56,17 @@ class InstallLock
                 $nextWait = time() + max(1, $repeatSec);
             }
             if (time() >= $deadline) {
-                // Proceed unlocked rather than block indefinitely behind a wedged holder.
+                // Return control so the caller can fail this install safely.
                 return ['fh' => $fh, 'held' => false, 'queued' => $queued];
             }
             usleep($pollUs);
         }
+    }
+
+    /** A queued install that reached its deadline must not enter the write phase. */
+    public static function timedOutWaiting(array $lock): bool
+    {
+        return !empty($lock['queued']) && empty($lock['held']);
     }
 
     /** Release a lock returned by acquire(). Safe to call with a non-held/failed result. */

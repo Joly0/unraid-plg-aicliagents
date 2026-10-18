@@ -11,8 +11,6 @@
 namespace AICliAgents\Services;
 
 class VersionCheckService {
-    const CACHE_FILE = '/tmp/unraid-aicliagents/version-cache.json';
-    const LOCK_FILE  = '/tmp/unraid-aicliagents/.version-check.lock';
     const LOCK_MAX_AGE = 600; // 10 minutes — stale lock threshold
     const PER_AGENT_TIMEOUT = 15; // seconds per npm view call
     const TOTAL_TIMEOUT = 120; // seconds total for all agents
@@ -72,9 +70,10 @@ class VersionCheckService {
      * @param bool $force Skip cache freshness check
      * @return array Version data keyed by agent ID
      */
-    public static function checkAllAgents(bool $force = false): array {
+    public static function checkAllAgents(bool $force = false, array $seams = []): array {
         $config = ConfigService::getConfig();
         $maxAge = 3600; // 1 hour default TTL
+        $now = $seams['now'] ?? static fn(): int => time();
 
         // Return cache if fresh and not forced
         if (!$force && self::isCacheFresh($maxAge)) {
@@ -83,10 +82,11 @@ class VersionCheckService {
 
         // Acquire lock (non-blocking)
         self::recoverStaleLock();
-        $lockDir = dirname(self::LOCK_FILE);
+        $lockPath = self::lockPath();
+        $lockDir = dirname($lockPath);
         if (!is_dir($lockDir)) @mkdir($lockDir, 0755, true);
 
-        $fp = @fopen(self::LOCK_FILE, 'c+');
+        $fp = @fopen($lockPath, 'c+');
         if (!$fp || !flock($fp, LOCK_EX | LOCK_NB)) {
             // Another check is running — return cached results
             LogService::log("Version check skipped: another check is in progress.", LogService::LOG_DEBUG, "VersionCheck");
@@ -99,7 +99,7 @@ class VersionCheckService {
         fwrite($fp, getmypid() . ':' . time());
         fflush($fp);
 
-        $startTime = time();
+        $startTime = $now();
         // Forgejo #447: the check is visible while it runs (Activity tray entry
         // `version_check`), and its end reaches every open Store page on the event
         // stream, so the cards refresh the moment the figures are real. Best effort.
@@ -117,8 +117,8 @@ class VersionCheckService {
         LogService::log("Starting version check for all agents...", LogService::LOG_INFO, "VersionCheck");
 
         try {
-            $registry = AgentRegistry::getRegistry();
-            $pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
+            $registry = isset($seams['registry']) ? $seams['registry']() : AgentRegistry::getRegistry();
+            $pluginDir = $seams['plugin_dir'] ?? "/usr/local/emhttp/plugins/unraid-aicliagents";
             $cache = self::getCachedResults();
             $updated = false;
 
@@ -137,7 +137,7 @@ class VersionCheckService {
                 $checkable++; $checkIds[] = (string)$id;
 
                 // Total timeout guard: an agent left unasked is counted, not forgotten.
-                if ($timedOut || (time() - $startTime) > self::TOTAL_TIMEOUT) {
+                if ($timedOut || ($now() - $startTime) > self::TOTAL_TIMEOUT) {
                     if (!$timedOut) {
                         $timedOut = true;
                         LogService::log("Version check total timeout reached (" . self::TOTAL_TIMEOUT . "s). Remaining agents skipped.", LogService::LOG_WARN, "VersionCheck");
@@ -149,11 +149,14 @@ class VersionCheckService {
                 LogService::log("Checking versions for $id ($pkg)...", LogService::LOG_DEBUG, "VersionCheck");
 
                 // #549: a cache folder of its own, removed after the call (not ~/.npm in RAM).
-                $npmCache = UtilityService::npmCacheDir("view-$id");
+                $npmCache = isset($seams['npm_cache_dir'])
+                    ? $seams['npm_cache_dir']((string)$id)
+                    : UtilityService::npmCacheDir("view-$id");
                 $cmd = "export PATH=$pluginDir/bin:\$PATH; timeout " . self::PER_AGENT_TIMEOUT
                      . " npm view " . escapeshellarg($pkg) . " --json --cache " . escapeshellarg($npmCache) . " 2>/dev/null";
-                $output = shell_exec($cmd);
-                UtilityService::removeNpmCacheDir($npmCache);
+                $output = isset($seams['npm_view']) ? $seams['npm_view']((string)$id, $pkg, $cmd) : shell_exec($cmd);
+                if (isset($seams['remove_npm_cache'])) $seams['remove_npm_cache']($npmCache);
+                else UtilityService::removeNpmCacheDir($npmCache);
 
                 if (empty($output)) {
                     LogService::log("Version check failed for $id: npm returned empty (timeout or registry unreachable).", LogService::LOG_WARN, "VersionCheck");
@@ -224,7 +227,7 @@ class VersionCheckService {
                 $source = \AICliAgents\Services\Sources\SourceResolver::resolve($agent);
                 if ($source === null || !method_exists($source, 'populateCache')) continue;
                 $checkable++; $checkIds[] = (string)$id;
-                if ($timedOut || (time() - $startTime) > self::TOTAL_TIMEOUT) {
+                if ($timedOut || ($now() - $startTime) > self::TOTAL_TIMEOUT) {
                     $timedOut = true;
                     $skipped++;
                     continue;
@@ -283,7 +286,7 @@ class VersionCheckService {
             }
             flock($fp, LOCK_UN);
             fclose($fp);
-            @unlink(self::LOCK_FILE);
+            @unlink($lockPath);
         }
     }
 
@@ -686,8 +689,9 @@ class VersionCheckService {
      * Returns true if a check is currently running.
      */
     public static function isCheckRunning(): bool {
-        if (!file_exists(self::LOCK_FILE)) return false;
-        $content = @file_get_contents(self::LOCK_FILE);
+        $lockPath = self::lockPath();
+        if (!file_exists($lockPath)) return false;
+        $content = @file_get_contents($lockPath);
         if (empty($content)) return false;
         [$pid, $ts] = explode(':', $content, 2) + [0, 0];
         return UtilityService::isPidRunning((int)$pid);
@@ -700,7 +704,11 @@ class VersionCheckService {
      * isolated path so their fixtures never overwrite the Manager's live data.
      */
     private static function cachePath(): string {
-        return getenv('AICLI_VERSION_CACHE_FILE') ?: self::CACHE_FILE;
+        return getenv('AICLI_VERSION_CACHE_FILE') ?: (SecretPaths::stateRoot() . '/version-cache.json');
+    }
+
+    private static function lockPath(): string {
+        return getenv('AICLI_VERSION_LOCK_FILE') ?: (SecretPaths::stateRoot() . '/.version-check.lock');
     }
 
     public static function getCachedResults(): array {
@@ -736,10 +744,13 @@ class VersionCheckService {
         }
     }
 
-    private static function recoverStaleLock(): void {
-        if (!file_exists(self::LOCK_FILE)) return;
-        $content = @file_get_contents(self::LOCK_FILE);
-        if (empty($content)) { @unlink(self::LOCK_FILE); return; }
+    public static function recoverStaleLock(?string $lockPath = null, ?callable $pidRunning = null, ?callable $now = null): bool {
+        $lockPath = $lockPath ?? self::lockPath();
+        $pidRunning = $pidRunning ?? [UtilityService::class, 'isPidRunning'];
+        $now = $now ?? static fn(): int => time();
+        if (!file_exists($lockPath)) return false;
+        $content = @file_get_contents($lockPath);
+        if (empty($content)) { @unlink($lockPath); return true; }
 
         $parts = explode(':', $content, 2);
         // explode always returns a non-empty list for a non-empty input, so
@@ -748,12 +759,14 @@ class VersionCheckService {
         $ts = (int)($parts[1] ?? 0);
 
         // Stale if PID is dead or lock is older than threshold
-        $pidDead = ($pid > 0 && !UtilityService::isPidRunning($pid));
-        $tooOld = ($ts > 0 && (time() - $ts) > self::LOCK_MAX_AGE);
+        $pidDead = ($pid > 0 && !$pidRunning($pid));
+        $tooOld = ($ts > 0 && ($now() - $ts) > self::LOCK_MAX_AGE);
 
         if ($pidDead || $tooOld) {
-            LogService::log("Recovering stale version check lock (PID=$pid, age=" . (time() - $ts) . "s).", LogService::LOG_WARN, "VersionCheck");
-            @unlink(self::LOCK_FILE);
+            LogService::log("Recovering stale version check lock (PID=$pid, age=" . ($now() - $ts) . "s).", LogService::LOG_WARN, "VersionCheck");
+            @unlink($lockPath);
+            return true;
         }
+        return false;
     }
 }

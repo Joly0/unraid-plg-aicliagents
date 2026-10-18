@@ -496,9 +496,10 @@ class AutoLaunchService
     private static function upgradeOwnsRelaunch(string $agentId): bool
     {
         $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
-        if (is_file("/tmp/unraid-aicliagents/pending-agent-upgrade-$safe.json")) return true;
-        if (is_file("/tmp/unraid-aicliagents/queued-agent-upgrade-$safe.json")) return true;
-        $statusFile = "/tmp/unraid-aicliagents/install-status-$safe";
+        $stateRoot = SecretPaths::stateRoot();
+        if (is_file("$stateRoot/pending-agent-upgrade-$safe.json")) return true;
+        if (is_file("$stateRoot/queued-agent-upgrade-$safe.json")) return true;
+        $statusFile = "$stateRoot/install-status-$safe";
         if (!is_file($statusFile)) return false;
         $status = json_decode((string)@file_get_contents($statusFile), true);
         return is_array($status) && empty($status['completed']);

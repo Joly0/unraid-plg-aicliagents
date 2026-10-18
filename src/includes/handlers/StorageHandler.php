@@ -270,8 +270,12 @@ class StorageHandler {
      * effect; only a caller that PUBLISHES the result (the AJAX handler's own
      * mutating-action tail, or the supervisor script) makes it visible on the
      * wire.
+     *
+     * Test seams: AICLI_TMP_BASE moves the folder that holds supervisor/escalation (the
+     * same variable ConsolidateState uses), and $canConvert replaces the conversion probe
+     * (fn(user): bool). Production sets neither.
      */
-    public static function forceReclaimState(): array {
+    public static function forceReclaimState(?callable $canConvert = null): array {
         $config = getAICliConfig();
         $user   = (string)($config['user'] ?? 'root');
         if (empty($user)) $user = 'root';
@@ -285,7 +289,9 @@ class StorageHandler {
         $extra = ['consolidating' => $consolidating, 'consolidating_user' => $consolidating ? $user : ''];
 
         $safeId = str_replace(['/', ' '], '_', $user);
-        $path   = "/tmp/unraid-aicliagents/supervisor/escalation/home_{$safeId}.json";
+        $tmpBase = (string)getenv('AICLI_TMP_BASE');
+        if ($tmpBase === '') $tmpBase = '/tmp/unraid-aicliagents';
+        $path   = "$tmpBase/supervisor/escalation/home_{$safeId}.json";
 
         $none = array_merge(['status' => 'ok', 'state' => 'none', 'now' => time()], $extra);
         if (!file_exists($path)) return $none;
@@ -300,7 +306,9 @@ class StorageHandler {
         // a wait is open, so the common no-wait read runs no probe.
         if (($decoded['state'] ?? '') === 'waiting') {
             require_once __DIR__ . '/../services/FileStorage.php';
-            $extra['can_convert'] = \AICliAgents\Services\FileStorage::canConvertHome($user);
+            $extra['can_convert'] = $canConvert !== null
+                ? (bool)$canConvert($user)
+                : \AICliAgents\Services\FileStorage::canConvertHome($user);
         }
 
         return array_merge(['status' => 'ok', 'now' => time()], $decoded, $extra);
@@ -725,12 +733,22 @@ class StorageHandler {
      * registry, plus an explicit 'workspace' alias for the workspace path.
      */
     private static function getHomeSessions(): array {
-        $id = $_GET['id'] ?? '';
+        return self::homeSessionsResponse();
+    }
+
+    /**
+     * The `get_home_sessions` answer. $sessions and $registry are test seams with the shape of
+     * TerminalService::listActiveSessionsForHome (fn(id): array) and AgentRegistry::getRegistry().
+     *
+     * @return array{status:string,message?:string,sessions?:list<array<string,string>>}
+     */
+    public static function homeSessionsResponse(?callable $sessions = null, ?array $registry = null): array {
+        $id = (string)($_GET['id'] ?? '');
         if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
             return ['status' => 'error', 'message' => 'invalid_id'];
         }
         // #617: a read endpoint does not reap sessions. The sweep runs from actions and the supervisor.
-        $mapped = self::listHomeSessions($id, false);
+        $mapped = self::listHomeSessions($id, false, $sessions, $registry);
         return ['status' => 'ok', 'sessions' => array_values($mapped)];
     }
 
@@ -741,15 +759,21 @@ class StorageHandler {
      * tab's dialog shows. Read-only.
      *
      * @param bool $sweep false from a read endpoint (#617: no orphan reap on a read)
+     * $listSessions and $registry are test seams (see homeSessionsResponse()).
+     *
      * @return list<array{id:string,agentId:string,name:string,icon:string,path:string,workspace:string}>
      */
-    public static function listHomeSessions(string $id, bool $sweep = true): array {
+    public static function listHomeSessions(string $id, bool $sweep = true, ?callable $listSessions = null, ?array $registry = null): array {
         if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
             return [];
         }
-        require_once __DIR__ . '/../services/AgentRegistry.php';
-        $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
-        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id, $sweep);
+        if ($registry === null) {
+            require_once __DIR__ . '/../services/AgentRegistry.php';
+            $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
+        }
+        $sessions = $listSessions !== null
+            ? $listSessions($id)
+            : \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id, $sweep);
         $mapped = array_map(function($s) use ($registry) {
             $agentId  = (string)($s['agentId'] ?? '');
             $path     = (string)($s['path']    ?? '');
@@ -1476,8 +1500,14 @@ class StorageHandler {
      * 2026-09-17, which passes them explicitly) — the ONE code path that queues
      * a consolidate, so approval never re-implements the
      * writeHomeManifest → markHomeConsolidating → enqueue → wake order below.
+     *
+     * @param array<string,callable> $seams test seams; production passes none. Keys:
+     *        find_active_job (fn(type, id, op): ?array), sessions (fn(id): array),
+     *        enqueue (fn(type, id, op, reason, prio, epoch): ?string, replaces the job-ledger enqueue),
+     *        wake (fn(): void), announce (fn(type, id, jobId): void, replaces the tray row,
+     *        the lifecycle log line and the reclaim notice sync).
      */
-    public static function consolidate(string $type = '', string $id = '', array $relaunchSet = [], ?bool $continueAfter = null): array {
+    public static function consolidate(string $type = '', string $id = '', array $relaunchSet = [], ?bool $continueAfter = null, array $seams = []): array {
         // CONSOLIDATE_CONTINUE_OPTION.md: the Storage tab sends continue_after=0 when the person
         // unticks "Send Continue ...". A caller that passes nothing keeps today's behaviour (Continue).
         if ($continueAfter === null) $continueAfter = (string)($_GET['continue_after'] ?? '1') !== '0';
@@ -1496,7 +1526,7 @@ class StorageHandler {
         }
         aicli_log("AJAX Request: Consolidate storage for $type: $id", AICLI_LOG_INFO);
         // R-174: before the relaunch manifest and the consolidating marker, so a repeat click changes nothing.
-        if (($dup = self::duplicateJobRefusal($type, $id, 'consolidate', "A consolidation of $type $id")) !== null) return $dup;
+        if (($dup = self::duplicateJobRefusal($type, $id, 'consolidate', "A consolidation of $type $id", $seams['find_active_job'] ?? null)) !== null) return $dup;
 
         // R2.1: home consolidate — write relaunch manifest then mark as in-progress
         // and enqueue immediately. The slow close (forceCloseHome) is deferred to the
@@ -1515,7 +1545,9 @@ class StorageHandler {
             // so the post-consolidate relaunch sends one Continue (the same
             // auto-continue-on-restart behaviour an upgrade/reload already gives),
             // gated on the auto_continue_on_restart setting in the supervisor bridge.
-            $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id);
+            $sessions = isset($seams['sessions'])
+                ? $seams['sessions']($id)
+                : \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id);
             $manifest = [];
             $seen = [];
             foreach ($sessions as $s) {
@@ -1568,27 +1600,42 @@ class StorageHandler {
         // S-08 (#1353): tracked — job_id in the response.
         // H1 fix: pass $epoch to enqueueJob so it is stored in the ledger entry (keyed
         // by job_id) rather than a per-entity sidecar (last-writer-wins race removed).
-        $jobId = \AICliAgents\Services\SupervisorService::enqueueJob($type, $id, 'consolidate', 'user_consolidate', 5, $epoch);
-        if ($jobId === null) {
-            \AICliAgents\Services\SupervisorService::enqueue($type, $id, 'consolidate', 'user_consolidate', 5, null, false, $epoch);
+        if (isset($seams['enqueue'])) {
+            $jobId = $seams['enqueue']($type, $id, 'consolidate', 'user_consolidate', 5, $epoch);
+        } else {
+            $jobId = \AICliAgents\Services\SupervisorService::enqueueJob($type, $id, 'consolidate', 'user_consolidate', 5, $epoch);
+            if ($jobId === null) {
+                \AICliAgents\Services\SupervisorService::enqueue($type, $id, 'consolidate', 'user_consolidate', 5, null, false, $epoch);
+            }
         }
-        self::trackJobActivity($jobId, $type === 'agent'
-            ? "Merging layers of agent " . self::trayAgentName((string)$id)
-            : "Merging layers of home $id");
+
+        if (!isset($seams['announce'])) {
+            self::trackJobActivity($jobId, $type === 'agent'
+                ? "Merging layers of agent " . self::trayAgentName((string)$id)
+                : "Merging layers of home $id");
+        }
 
         // R2.1: wake the supervisor so the job starts immediately.
-        \AICliAgents\Services\SupervisorService::wake();
+        if (isset($seams['wake'])) {
+            $seams['wake']();
+        } else {
+            \AICliAgents\Services\SupervisorService::wake();
+        }
 
-        \AICliAgents\Services\LifecycleLogService::log(
-            \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
-            'storage', 'storage_consolidate_queued',
-            ['type' => $type, 'id' => $id, 'job_id' => $jobId]
-        );
+        if (isset($seams['announce'])) {
+            $seams['announce']($type, $id, $jobId);
+        } else {
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+                'storage', 'storage_consolidate_queued',
+                ['type' => $type, 'id' => $id, 'job_id' => $jobId]
+            );
 
-        // STORAGE_RECLAIM_NOTICE.md: the ask in the tray hands over to this job's own entry now,
-        // not at the next supervisor publish.
-        if ($type === 'home') {
-            \AICliAgents\Services\StorageReclaimNoticeService::sync(self::forceReclaimState(), $id);
+            // STORAGE_RECLAIM_NOTICE.md: the ask in the tray hands over to this job's own entry now,
+            // not at the next supervisor publish.
+            if ($type === 'home') {
+                \AICliAgents\Services\StorageReclaimNoticeService::sync(self::forceReclaimState(), $id);
+            }
         }
 
         $msg = $type === 'home'
@@ -2010,7 +2057,8 @@ class StorageHandler {
     }
 
     private static function deleteConfirmPath(string $id): string {
-        $base = rtrim(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents', '/');
+        $tmpBase = getenv('AICLI_TMP_BASE');
+        $base = rtrim($tmpBase !== false && $tmpBase !== '' ? $tmpBase : \AICliAgents\Services\SecretPaths::stateRoot(), '/');
         return $base . '/.delete_home_confirm_' . preg_replace('/[^A-Za-z0-9._-]/', '_', $id) . '.json';
     }
 

@@ -45,8 +45,7 @@ aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmy
 // #150: run this whole install job — the npm fetch + flash consolidation and its
 // child processes (npm, mksquashfs) — at idle IO + low CPU priority so it can't
 // starve interactive IO on a slow USB flash. Children spawned after this inherit it.
-@exec('ionice -c3 -p ' . (int)getmypid() . ' 2>/dev/null');
-@exec('renice -n 19 -p ' . (int)getmypid() . ' 2>/dev/null');
+\AICliAgents\Services\InstallerService::lowerInstallPriority((int)getmypid());
 
 // T-08 (ACTIVITY_TRAY.md): (re-)register the install activity with this worker's
 // pid/pgid so cancel_activity can kill the whole process group (npm children
@@ -83,24 +82,13 @@ if ($isUpgrade && $upgradeTo === null) {
 // one-at-a-time; the rest queue here (the UI shows the "upgrading" chip meanwhile).
 // Non-blocking with a deadline: a wedged holder can never hang every other install.
 require_once dirname(__DIR__) . '/includes/services/InstallLock.php';
-$installLock = \AICliAgents\Services\InstallLock::acquire(
-    function () use ($agentId) {
-        // #619: InstallLock calls this every 30 s while we queue. The status write
-        // keeps the Store card text; ActivityService::wait parks the tray row, which
-        // the stall and 20-minute watchdog skip (a healthy queue can run 25 minutes).
-        setInstallStatus("Queued — waiting for another agent upgrade to finish...", 5, $agentId);
-        \AICliAgents\Services\ActivityService::wait(
-            "install_$agentId", "Queued — waiting for another agent upgrade to finish", 5);
-    }
-);
-if ($installLock['queued'] ?? false) {
-    // The row was parked while we queued. This progress write revives it to running.
-    setInstallStatus("Starting install...", 5, $agentId);
-}
-if (($installLock['queued'] ?? false) && !($installLock['held'] ?? false)) {
-    aicli_log("Install lock deadline hit for $agentId — proceeding unlocked to avoid an indefinite queue", AICLI_LOG_WARN, "InstallBG");
-} elseif ($installLock['queued'] ?? false) {
-    aicli_log("Install for $agentId queued behind another install; lock acquired, proceeding", AICLI_LOG_INFO, "InstallBG");
+// #619: a queued install that reaches the lock deadline stops here, with a plain message
+// in the tray, its closed sessions reopened and its lock handle released. The queue wait,
+// the tray parking and this stop are InstallerService::takeInstallSlot (tested in InstallLockTest).
+$slot = \AICliAgents\Services\InstallerService::takeInstallSlot($agentId);
+$installLock = $slot['lock'];
+if (!$slot['ok']) {
+    exit(1);
 }
 
 // WP #859: gate the binary swap on the pre-install home bake completing.
@@ -179,7 +167,7 @@ try {
         // $layerLive stays true when there is no layer file to check (fresh
         // install with no persistence layer) so that normal relaunch proceeds.
         $layerLive = true;
-        $persistDir = '/boot/config/plugins/unraid-aicliagents/persistence';
+        $persistDir = \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
         $newest = \AICliAgents\Services\InstallerService::newestAgentLayer($agentId, $persistDir);
         if ($newest !== null) {
             $mounts = (string)@file_get_contents('/proc/mounts');
@@ -290,8 +278,11 @@ try {
             // BEFORE enqueueing the job that consumes it, and park the tray entry
             // (no worker heartbeats from here; the wait has no upper bound — the
             // 20-minute cap turned a healthy install into "FAILED: timeout").
-            $statusFile = rtrim(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents', '/')
-                . '/install-status-' . $agentId;
+            $tmpBase = getenv('AICLI_TMP_BASE');
+            $statusDir = $tmpBase !== false && $tmpBase !== ''
+                ? rtrim($tmpBase, '/')
+                : \AICliAgents\Services\SecretPaths::stateRoot();
+            $statusFile = $statusDir . '/install-status-' . $agentId;
             $statusJson = json_decode((string)@file_get_contents($statusFile), true);
             if (is_array($statusJson)) {
                 $statusJson['phase'] = 'awaiting_activation';

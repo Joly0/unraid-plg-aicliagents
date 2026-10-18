@@ -853,17 +853,22 @@ class StorageTargetService {
      * Legacy #341 verdict — findmnt fstype check, used ONLY when the capability
      * probe itself is unavailable (probe_failed). Mirrors the pre-S-11 inline
      * preflightMigrate logic byte-for-byte in behaviour.
+     * $fstypeOverride is the test seam: a string replaces the findmnt answer. Production passes none.
      * @return array{ok:bool, message:string, warnings:array<int,string>, resolved_path:?string}
      */
-    private static function legacyFstypeVerdict(string $path): array {
-        $proc = @proc_open( // nosemgrep: php.lang.security.tainted-exec.tainted-exec — array-form proc_open, no shell interpolation
-            ['findmnt', '--noheadings', '--output', 'FSTYPE', '--target', $path],
-            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes
-        );
+    public static function legacyFstypeVerdict(string $path, ?string $fstypeOverride = null): array {
         $fstype = '';
-        if (is_resource($proc)) {
-            $fstype = trim((string)stream_get_contents($pipes[1]));
-            fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+        if ($fstypeOverride !== null) {
+            $fstype = $fstypeOverride;
+        } else {
+            $proc = @proc_open( // nosemgrep: php.lang.security.tainted-exec.tainted-exec — array-form proc_open, no shell interpolation
+                ['findmnt', '--noheadings', '--output', 'FSTYPE', '--target', $path],
+                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes
+            );
+            if (is_resource($proc)) {
+                $fstype = trim((string)stream_get_contents($pipes[1]));
+                fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+            }
         }
         $blocked = ['tmpfs', 'ramfs', 'devtmpfs', 'overlay', 'zram', 'squashfs'];
         if (in_array($fstype, $blocked, true)) {

@@ -64,6 +64,72 @@ class InstallerService {
         return ['status' => 'error', 'message' => $reason];
     }
 
+    /**
+     * #150: put the install worker at idle IO priority and the lowest CPU priority, so a
+     * slow USB flash is not starved of interactive IO. Children started after this inherit it.
+     * install-bg.php calls it once at the start.
+     *
+     * @param callable|null $run seam: fn(string $command): void. Production runs the command.
+     * @return string[] the commands, in the order they ran
+     */
+    public static function lowerInstallPriority(int $pid, ?callable $run = null): array {
+        $commands = ['ionice -c3 -p ' . $pid . ' 2>/dev/null', 'renice -n 19 -p ' . $pid . ' 2>/dev/null'];
+        foreach ($commands as $cmd) {
+            if ($run !== null) { $run($cmd); } else { @exec($cmd); }
+        }
+        return $commands;
+    }
+
+    /**
+     * #150, #619: take the global install lock for install-bg.php, or stop this install.
+     *
+     * The heavy install phase runs one at a time. A queued install shows "Queued" in the
+     * Store card and parks its tray row while it waits (the stall and 20-minute watchdog skip
+     * a parked row). When the deadline passes before the lock is free, this install must not
+     * write to flash beside the holder: it marks itself failed with a plain message, reopens
+     * the sessions it closed for the upgrade, releases its lock handle, and returns ok=false.
+     * The caller then exits.
+     *
+     * @param array{lockFile?:string,deadlineSec?:int,pollUs?:int,repeatSec?:int,onQueued?:callable,relaunch?:callable} $seams
+     *        Test seams. Production passes none. onQueued runs at the end of each queue wait
+     *        callback. relaunch replaces UpgradeRelaunchService::relaunchClosedSet.
+     * @return array{ok:bool,lock:array}
+     */
+    public static function takeInstallSlot(string $agentId, array $seams = []): array {
+        require_once __DIR__ . '/InstallLock.php';
+        $opId = "install_$agentId";
+        $lock = InstallLock::acquire(
+            function () use ($agentId, $opId, $seams) {
+                // InstallLock calls this every 30 s while we queue. The status write keeps
+                // the Store card text. ActivityService::wait parks the tray row.
+                UtilityService::setInstallStatus("Queued — waiting for another agent upgrade to finish...", 5, $agentId);
+                ActivityService::wait($opId, "Queued — waiting for another agent upgrade to finish", 5);
+                if (isset($seams['onQueued'])) $seams['onQueued']();
+            },
+            (int)($seams['deadlineSec'] ?? 1500),
+            $seams['lockFile'] ?? null,
+            (int)($seams['pollUs'] ?? 400000),
+            (int)($seams['repeatSec'] ?? 30)
+        );
+        if ($lock['queued'] ?? false) {
+            // The row was parked while we queued. This progress write revives it to running.
+            UtilityService::setInstallStatus("Starting install...", 5, $agentId);
+        }
+        if (InstallLock::timedOutWaiting($lock)) {
+            $message = 'Another agent upgrade is still running. Try again after it finishes.';
+            LogService::log("Install lock deadline reached for $agentId — this install stopped to protect agent storage", LogService::LOG_WARN, "InstallBG");
+            UtilityService::setInstallStatus("Install queue timed out", 0, $agentId, $message);
+            ActivityService::fail($opId, $message, 'Try the install again after the other agent upgrade finishes.');
+            UpgradeRelaunchService::reopenAfterFailedInstall($agentId, $seams['relaunch'] ?? null);
+            InstallLock::release($lock);
+            return ['ok' => false, 'lock' => $lock];
+        }
+        if ($lock['queued'] ?? false) {
+            LogService::log("Install for $agentId queued behind another install; lock acquired, proceeding", LogService::LOG_INFO, "InstallBG");
+        }
+        return ['ok' => true, 'lock' => $lock];
+    }
+
     public static function installAgent($agentId, $targetVersion = null) {
         @set_time_limit(900);
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
@@ -366,11 +432,11 @@ class InstallerService {
      * Used when agent storage is unavailable (e.g., array stopped).
      * The installed agent is volatile — lost on reboot or when real storage returns.
      */
-    public static function emergencyInstallAgent($agentId) {
+    public static function emergencyInstallAgent($agentId, array $seams = []) {
         @set_time_limit(600);
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
 
-        $registry = AgentRegistry::getRegistry();
+        $registry = $seams['registry'] ?? AgentRegistry::getRegistry();
         $agent = $registry[$agentId] ?? null;
         if (!$agent) return ['status' => 'error', 'message' => 'Agent not found in registry'];
 
@@ -384,9 +450,9 @@ class InstallerService {
         }
 
         $package = $agent['npm_package'];
-        $agentDir = AgentRegistry::agentPath($agentId);
-        $pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
-        $flagFile = "/tmp/unraid-aicliagents/.emergency_agent_$agentId";
+        $agentDir = $seams['agent_dir'] ?? AgentRegistry::agentPath($agentId);
+        $pluginDir = $seams['plugin_dir'] ?? "/usr/local/emhttp/plugins/unraid-aicliagents";
+        $flagFile = $seams['flag_file'] ?? SecretPaths::stateRoot() . "/.emergency_agent_$agentId";
 
         LogService::log("EMERGENCY INSTALL: Starting RAM-only install for $agentId ($package)", LogService::LOG_WARN, "InstallerService");
         setInstallStatus("Preparing emergency install...", 10, $agentId);
@@ -398,7 +464,9 @@ class InstallerService {
 
         setInstallStatus("Installing $package to RAM...", 20, $agentId);
 
-        $resolution = VersionCheckService::resolveInstallTarget($agentId, null);
+        $resolution = isset($seams['resolve_target'])
+            ? $seams['resolve_target']($agentId)
+            : VersionCheckService::resolveInstallTarget($agentId, null);
         if ($resolution['target'] === null || $resolution['error'] !== null) {
             $reason = $resolution['error'] ?? 'unresolved_channel_target';
             LogService::log("Emergency install target resolution failed for $agentId: $reason", LogService::LOG_ERROR, "InstallerService");
@@ -416,11 +484,13 @@ class InstallerService {
 
         // Direct npm install — no SquashFS, no ZRAM overlay
         // #549: a cache folder of its own, removed after the install (not ~/.npm in RAM).
-        $npmCache = UtilityService::npmCacheDir("emergency-$agentId");
+        $npmCache = isset($seams['npm_cache_dir'])
+            ? $seams['npm_cache_dir']($agentId)
+            : UtilityService::npmCacheDir("emergency-$agentId");
         $cmd = "export PATH=$pluginDir/bin:\$PATH; cd " . escapeshellarg($agentDir) . " && npm install " . escapeshellarg($package . "@$targetVersion") . " --no-audit --no-fund --loglevel info --cache " . escapeshellarg($npmCache) . " 2>&1";
 
         $currentProgress = 20;
-        $res = UtilityService::execStreaming($cmd, function($line, $isError) use ($agentId, &$currentProgress) {
+        $onLine = function($line, $isError) use ($agentId, &$currentProgress) {
             LogService::log("[NPM-Emergency] $line", LogService::LOG_DEBUG, "InstallerService");
             if ($currentProgress < 85) {
                 $currentProgress += 0.5;
@@ -429,8 +499,12 @@ class InstallerService {
                 setInstallStatus($msg, (int)$currentProgress, $agentId);
                 usleep(100000);
             }
-        });
-        UtilityService::removeNpmCacheDir($npmCache);
+        };
+        $res = isset($seams['exec_streaming'])
+            ? $seams['exec_streaming']($cmd, $onLine)
+            : UtilityService::execStreaming($cmd, $onLine);
+        if (isset($seams['remove_npm_cache'])) $seams['remove_npm_cache']($npmCache);
+        else UtilityService::removeNpmCacheDir($npmCache);
 
         if ($res !== 0) {
             LogService::log("EMERGENCY INSTALL FAILED for $agentId (Exit: $res)", LogService::LOG_ERROR, "InstallerService");
@@ -440,14 +514,18 @@ class InstallerService {
 
         // Set permissions
         setInstallStatus("Setting permissions...", 90, $agentId);
-        exec("chmod -R 755 " . escapeshellarg($agentDir));
+        if (isset($seams['chmod'])) $seams['chmod']($agentDir);
+        else exec("chmod -R 755 " . escapeshellarg($agentDir));
 
         // Mark as emergency-installed (so cleanup knows to remove it later)
         @touch($flagFile);
 
         // Save version
         $installedVer = AgentRegistry::discoverVersion($agentId, $agent['binary'], $agent['binary_fallback'] ?? '');
-        if ($installedVer) AgentRegistry::saveVersion($agentId, $installedVer);
+        if ($installedVer) {
+            if (isset($seams['save_version'])) $seams['save_version']($agentId, $installedVer);
+            else AgentRegistry::saveVersion($agentId, $installedVer);
+        }
 
         setInstallStatus("Emergency install complete", 100, $agentId);
         LogService::log("EMERGENCY INSTALL COMPLETE: $agentId installed to RAM at $agentDir", LogService::LOG_WARN, "InstallerService");
@@ -455,7 +533,8 @@ class InstallerService {
         return ['status' => 'ok', 'emergency' => true];
     }
 
-    public static function uninstallAgent($agentId) {
+    /** @param array<string,mixed> $seams */
+    public static function uninstallAgent($agentId, array $seams = []) {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
         // #591: refuse a bad id here, before any path or shell string. This no
         // longer relies on agentPath() throwing a few lines below.
@@ -463,9 +542,9 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Invalid agent id'];
         }
 
-        $config = ConfigService::getConfig();
+        $config = $seams['config'] ?? ConfigService::getConfig();
         $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
-        $mnt = AgentRegistry::agentPath($agentId);
+        $mnt = $seams['agent_path'] ?? AgentRegistry::agentPath($agentId);
 
         $oldSize = 0;
         foreach (glob("$persistPath/agent_{$agentId}_*.sqsh") as $f) $oldSize += filesize($f);
@@ -477,22 +556,28 @@ class InstallerService {
         $safeId = escapeshellarg($agentId);
         // Non-root audit: iterate every per-uid tmux server so non-root
         // user sessions for this agent get killed too.
-        foreach (\AICliAgents\Services\ProcessManager::tmuxSocketPaths() as $sock) {
+        $socketPaths = isset($seams['tmux_socket_paths'])
+            ? $seams['tmux_socket_paths']()
+            : \AICliAgents\Services\ProcessManager::tmuxSocketPaths();
+        $runCommand = $seams['exec'] ?? static function (string $command): void { exec($command); };
+        foreach ($socketPaths as $sock) {
             $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
             // #591: each pattern is ONE escapeshellarg() word, never an id
             // placed inside a hand-written quoted string.
-            exec("$tmuxBin ls -F '#S' 2>/dev/null | grep " . escapeshellarg("aicli-agent-.*$agentId") . " | xargs -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1");
+            $runCommand("$tmuxBin ls -F '#S' 2>/dev/null | grep " . escapeshellarg("aicli-agent-.*$agentId") . " | xargs -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1");
         }
-        exec("pgrep -f " . escapeshellarg("ttyd.*$agentId") . " 2>/dev/null | xargs -r kill -15 > /dev/null 2>&1");
+        $runCommand("pgrep -f " . escapeshellarg("ttyd.*$agentId") . " 2>/dev/null | xargs -r kill -15 > /dev/null 2>&1");
 
         // 2. Unmount the stack: the stable name AND every side-by-side
         //    generation mounted under agents/.versions/<id>/ (Forgejo #441).
         // #512: a real unmount only. A busy agent mount stops the uninstall:
         // deleting its layers would leave their space held until a reboot.
-        if (!StorageMountService::unmountReal($mnt)) {
+        $unmount = $seams['unmount_real'] ?? [StorageMountService::class, 'unmountReal'];
+        if (!$unmount($mnt)) {
             return ['status' => 'error', 'message' => "The $agentId agent is still in use. Close its sessions, then try again."];
         }
-        self::unmountAgentGenerations($agentId);
+        if (isset($seams['unmount_generations'])) $seams['unmount_generations']($agentId);
+        else self::unmountAgentGenerations($agentId);
 
         // 3 + 4. Delete every version of the agent from the storage location
         //    (Forgejo #441, John 2026-10-07: "when an agent is uninstalled all
@@ -500,7 +585,9 @@ class InstallerService {
         //    the SquashFS layers, the disk and RAM writable layers of every
         //    generation, the passthrough version folders and stable folder,
         //    and the rollback copies under the storage location.
-        $purge = self::purgeAgentStorage($agentId, $persistPath);
+        $purge = isset($seams['purge'])
+            ? $seams['purge']($agentId, $persistPath)
+            : self::purgeAgentStorage($agentId, $persistPath);
         $oldSizeMB = round(($oldSize + $purge['bytes']) / 1024 / 1024, 2);
         if ($purge['removed'] !== []) {
             LogService::log("Removed " . count($purge['removed']) . " storage item(s) of $agentId: " . implode(', ', array_slice($purge['removed'], 0, 8)) . (count($purge['removed']) > 8 ? ', …' : ''), LogService::LOG_INFO, "InstallerService");
@@ -510,17 +597,18 @@ class InstallerService {
         }
 
         // 5. Remove empty mount point directory (will be recreated on reinstall)
-        if (is_dir($mnt) && !StorageMountService::isMounted($mnt)) {
+        $isMounted = $seams['is_mounted'] ?? [StorageMountService::class, 'isMounted'];
+        if (is_dir($mnt) && !$isMounted($mnt)) {
             @rmdir($mnt);
         }
 
         // 6. Clean up runtime files
-        @unlink("/tmp/unraid-aicliagents/install-status-$agentId");
-        @unlink("/tmp/unraid-aicliagents/task-status-agents");
+        @unlink(SecretPaths::stateRoot() . "/install-status-$agentId");
+        @unlink(SecretPaths::stateRoot() . "/task-status-agents");
 
         // 7. Remove workspace sessions that used this agent (keep home data intact)
         try {
-            $ws = ConfigService::getWorkspaces();
+            $ws = isset($seams['workspaces']) ? $seams['workspaces']() : ConfigService::getWorkspaces();
             $removedIds = array_values(array_map(
                 static fn($s) => (string)($s['id'] ?? ''),
                 array_filter($ws['sessions'] ?? [], static fn($s) => ($s['agentId'] ?? '') === $agentId)
@@ -539,7 +627,8 @@ class InstallerService {
                     }
                     if (!$activeStillExists) $ws['activeId'] = !empty($ws['sessions']) ? $ws['sessions'][0]['id'] : null;
                 }
-                ConfigService::saveWorkspaces($ws, $removedIds);
+                if (isset($seams['save_workspaces'])) $seams['save_workspaces']($ws, $removedIds);
+                else ConfigService::saveWorkspaces($ws, $removedIds);
                 LogService::log("Removed $removed workspace session(s) for $agentId.", LogService::LOG_INFO, "InstallerService");
             }
         } catch (\Throwable $e) {
@@ -547,19 +636,22 @@ class InstallerService {
         }
 
         // 8. Remove version registration (R4: clearVersion also purges passthrough-only entries)
-        AgentRegistry::clearVersion($agentId);
+        if (isset($seams['clear_version'])) $seams['clear_version']($agentId);
+        else AgentRegistry::clearVersion($agentId);
 
         // 9. Remove the agent's manifest entry (WP #916). Without this, the
         // boot-integrity sweep on the next reboot finds `expected_layers > 0,
         // active_count == 0` and creates a total_loss halt for an agent the
         // user just deliberately uninstalled — surfacing a scary "Storage
         // Unavailable / drive may be disconnected" overlay for a ghost.
-        @\AICliAgents\Services\FileStorage::dropManifestEntry("agent/$agentId");   // Epic #1310 facade intent
+        if (isset($seams['drop_manifest_entry'])) $seams['drop_manifest_entry']("agent/$agentId");
+        else @\AICliAgents\Services\FileStorage::dropManifestEntry("agent/$agentId");   // Epic #1310 facade intent
 
         // 10. Clear any pending halt for the agent. If uninstall is happening
         // BECAUSE the agent was halted, the halt sentinel survives the
         // uninstall and would gate the next page load.
-        @\AICliAgents\Services\HaltService::clearHalt('agent', $agentId, 'agent_uninstalled');
+        if (isset($seams['clear_halt'])) $seams['clear_halt']('agent', $agentId, 'agent_uninstalled');
+        else @\AICliAgents\Services\HaltService::clearHalt('agent', $agentId, 'agent_uninstalled');
 
         LogService::log("Successfully uninstalled $agentId and purged $oldSizeMB MB of associated storage.", LogService::LOG_INFO, "InstallerService");
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_uninstalled', ['agent' => $agentId, 'purged_mb' => $oldSizeMB, 'removed' => count($purge['removed']), 'failed' => count($purge['failed'])]);
@@ -614,7 +706,7 @@ class InstallerService {
         // The SquashFS layers (delta and consolidated).
         foreach (glob("$persist/agent_{$agentId}_*.sqsh") ?: [] as $f) $files[] = $f;
         // Disk and RAM writable layers and work dirs: <id> and <id>@<generation>.
-        foreach (["$persist/_upper/agents", "$persist/_work/agents", "/tmp/unraid-aicliagents/zram_upper/agents"] as $parent) {
+        foreach (["$persist/_upper/agents", "$persist/_work/agents", StoragePathResolver::zramBase() . "/agents"] as $parent) {
             foreach (glob("$parent/" . $agentId . "*") ?: [] as $d) {
                 $name = basename($d);
                 if ($name === $agentId || preg_match('/^' . $q . '@/', $name)) $dirs[] = $d;
@@ -1003,7 +1095,7 @@ class InstallerService {
      * retained layer becomes the active layer. Runs under the per-entity
      * storage lock (WP #966) so it cannot race a bake / consolidate / reconcile.
      */
-    public static function restoreAgentVersion(string $agentId, string $backupDir): array {
+    public static function restoreAgentVersion(string $agentId, string $backupDir, ?string $lockFile = null): array {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
         // A NUL byte in either value makes realpath() throw; refuse it as a bad backup.
         if (ValidationService::containsNulByte($agentId) || ValidationService::containsNulByte($backupDir)) {
@@ -1034,7 +1126,7 @@ class InstallerService {
         // Per-entity storage lock (WP #966) — non-blocking: if a bake or
         // consolidate is in flight, ask the user to retry rather than hang.
         $lockId = preg_replace('/[^a-zA-Z0-9_-]/', '_', $agentId);
-        $lockFh = @fopen("/var/run/aicli-bake-agent-$lockId.lock", 'c');
+        $lockFh = @fopen($lockFile ?? "/var/run/aicli-bake-agent-$lockId.lock", 'c');
         if (!$lockFh || !flock($lockFh, LOCK_EX | LOCK_NB)) {
             if ($lockFh) fclose($lockFh);
             return ['status' => 'error', 'message' => 'A storage operation is in progress — try the restore again in a moment'];
@@ -1143,7 +1235,7 @@ class InstallerService {
 
             // 5. Wipe the agent's ZRAM upper so the merged view is exactly the
             //    restored layer (the agent overlay upper is not user data).
-            self::rmdirContents("/tmp/unraid-aicliagents/zram_upper/agents/$agentId/upper");
+            self::rmdirContents(StoragePathResolver::zramBase() . "/agents/$agentId/upper");
 
             // 6. Remount the agent stack to pick up the restored lower layer.
             $mnt = AgentRegistry::agentPath($agentId);

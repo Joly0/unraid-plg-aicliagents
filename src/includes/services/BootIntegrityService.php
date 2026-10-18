@@ -37,7 +37,6 @@ class BootIntegrityService {
     public const STATE_UNAVAILABLE      = 'unavailable';
 
     private const COMPONENT      = 'BootIntegrityService';
-    private const NOTIFIED_FILE  = '/tmp/unraid-aicliagents/.boot_integrity_notified';
     private const NOTIFY_SCRIPT  = '/usr/local/emhttp/plugins/dynamix/scripts/notify';
 
     /** States that map to Unraid "critical" severity. */
@@ -57,6 +56,10 @@ class BootIntegrityService {
         self::STATE_CORRUPT_LAYERS,
         self::STATE_HOST_MISMATCH,
     ];
+
+    private static function notifiedFile(): string {
+        return rtrim(SecretPaths::stateRoot(), '/') . '/.boot_integrity_notified';
+    }
 
     /**
      * Map each halt state to its recommended recovery action.
@@ -559,7 +562,7 @@ class BootIntegrityService {
      * @return array<string, mixed>|null
      */
     public static function readCachedSweep(): ?array {
-        $cachePath = '/tmp/unraid-aicliagents/.boot_integrity_cache.json';
+        $cachePath = rtrim(SecretPaths::stateRoot(), '/') . '/.boot_integrity_cache.json';
         if (!file_exists($cachePath)) {
             return null;
         }
@@ -701,8 +704,9 @@ class BootIntegrityService {
     private static function notifyIfNotAlreadyFired(string $entity, string $state, array $evidence): void {
         $key = $entity . ':' . $state;
 
-        if (file_exists(self::NOTIFIED_FILE)) {
-            $lines = @file(self::NOTIFIED_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $notifiedFile = self::notifiedFile();
+        if (file_exists($notifiedFile)) {
+            $lines = @file($notifiedFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
             if (is_array($lines) && in_array($key, $lines, true)) {
                 return;
             }
@@ -714,11 +718,12 @@ class BootIntegrityService {
 
         self::fireNotification($subject, $desc, $severity);
 
-        $dir = dirname(self::NOTIFIED_FILE);
+        $notifiedFile = self::notifiedFile();
+        $dir = dirname($notifiedFile);
         if (!is_dir($dir)) {
             @mkdir($dir, 0755, true);
         }
-        @file_put_contents(self::NOTIFIED_FILE, $key . "\n", FILE_APPEND | LOCK_EX);
+        @file_put_contents($notifiedFile, $key . "\n", FILE_APPEND | LOCK_EX);
     }
 
     private static function buildNotificationDescription(string $entity, string $state, array $evidence): string {
@@ -785,7 +790,7 @@ class BootIntegrityService {
             'any_warning'  => $anyWarning,
             'swept_at'     => date('Y-m-d\TH:i:s\Z', time()),
         ];
-        $cachePath = '/tmp/unraid-aicliagents/.boot_integrity_cache.json';
+        $cachePath = rtrim(SecretPaths::stateRoot(), '/') . '/.boot_integrity_cache.json';
         $tmpPath   = $cachePath . '.tmp.' . getmypid() . '.' . time();
         $json      = json_encode($cache, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if ($json === false) {
@@ -1058,7 +1063,7 @@ class BootIntegrityService {
     /** Folder of the busy-snapshot marker files. Tests may override it. */
     private static function busySnapshotDir(): string {
         $e = getenv('AICLI_BUSY_SNAPSHOT_DIR');
-        return ($e !== false && $e !== '') ? rtrim($e, '/') : '/tmp/unraid-aicliagents';
+        return ($e !== false && $e !== '') ? rtrim($e, '/') : SecretPaths::stateRoot();
     }
 
     /** Folder of the mount-operation lock files. Tests may override it. */

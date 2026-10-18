@@ -729,7 +729,7 @@ final class FileStorage
     private static function peekDeferReason(string $type, string $id): ?string
     {
         $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
-        $marker = "/tmp/unraid-aicliagents/.bake_defer_reason_{$type}_{$safe}";
+        $marker = SecretPaths::stateRoot() . "/.bake_defer_reason_{$type}_{$safe}";
         if (is_file($marker)) {
             $mtime = @filemtime($marker);
             if ($mtime !== false && (time() - $mtime) >= self::deferMarkerTtlH() * 3600) {
@@ -966,7 +966,7 @@ final class FileStorage
         }
 
         // Refuse if merge mount is busy (a live terminal session is open).
-        $mnt = "/tmp/unraid-aicliagents/work/{$id}/home";
+        $mnt = SecretPaths::stateRoot() . "/work/{$id}/home";
         if (is_dir($mnt) && self::_mountIsBusy($mnt)) {
             return ['ok' => false, 'reason' => 'entity_in_use',
                     'message' => "Home $id has an active session — close all terminals for this user first."];
@@ -980,16 +980,17 @@ final class FileStorage
         }
 
         // Best-effort residue cleanup (storagectl wipe may not remove all markers).
-        @unlink("/tmp/unraid-aicliagents/.bake_defer_reason_home_{$safeId}");
-        @unlink("/tmp/unraid-aicliagents/.bake_defer_reason_home_{$id}");
-        @unlink("/tmp/unraid-aicliagents/.commit_marker_home_{$id}");
-        @unlink("/tmp/unraid-aicliagents/.consolidate_marker_home_{$id}");
+        $stateRoot = SecretPaths::stateRoot();
+        @unlink("$stateRoot/.bake_defer_reason_home_{$safeId}");
+        @unlink("$stateRoot/.bake_defer_reason_home_{$id}");
+        @unlink("$stateRoot/.commit_marker_home_{$id}");
+        @unlink("$stateRoot/.consolidate_marker_home_{$id}");
         @unlink("/var/run/aicli-bake-home-{$safeId}.lock");
         @unlink("/var/run/aicli-bake-home-{$id}.lock");
         // #357: the lock owner record next to the lock.
         @unlink("/var/run/aicli-bake-home-{$safeId}.lock.owner");
         // Work dir (contains merge mountpoint, upper, work subdirs when not in use).
-        $workDir = "/tmp/unraid-aicliagents/work/{$id}";
+        $workDir = "$stateRoot/work/{$id}";
         if (is_dir($workDir)) {
             // nosemgrep: php.lang.security.exec-use.exec-use — workDir derived from validated id
             @shell_exec('rm -rf ' . escapeshellarg($workDir) . ' 2>/dev/null');
@@ -1001,7 +1002,7 @@ final class FileStorage
         self::clearEntityHalts('home', $id);
 
         // Invalidate boot integrity cache so next fetch reflects the deletion.
-        @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+        @unlink($stateRoot . '/.boot_integrity_cache.json');
 
         // Lifecycle event.
         require_once __DIR__ . '/LifecycleLogService.php';
@@ -1035,7 +1036,7 @@ final class FileStorage
     private static function clearEntityHalts(string $type, string $id): void
     {
         require_once __DIR__ . '/HaltService.php';
-        $base = HaltService::HALT_DIR;
+        $base = HaltService::directory();
         @unlink("$base/$type/$id");
         @unlink("$base/$type/$id.json");
         @unlink("$base/{$type}_{$id}");

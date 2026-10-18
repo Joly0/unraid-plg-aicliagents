@@ -41,6 +41,12 @@ class SecretPaths {
         return ($e !== false && $e !== '') ? rtrim($e, '/') : self::LIVE_STATE_ROOT;
     }
 
+    /** The lock shared by home persistence and Config Hub git saves. */
+    public static function homePersistLockPath(string $user): string {
+        $safeUser = preg_replace('/[^a-zA-Z0-9_-]/', '_', $user);
+        return rtrim(self::stateRoot(), '/') . "/init_{$safeUser}.lock";
+    }
+
     /**
      * Resolve $path as far as the file system allows: the deepest existing ancestor goes
      * through realpath (so a symlink or a ".." cannot hide a live path), and the rest is

@@ -104,10 +104,9 @@ class StorageMetricsService {
         // Phase-5 seq-keyed form: agent_<id>_<kind>_<seq10>_<dt>.sqsh (WP D01-D03).
         // The (?:\d+_)? group makes the 10-digit sequence before the timestamp optional
         // so both the current seq-keyed names AND legacy no-seq names are matched.
-        $agentKindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_(?:\d+_)?\d{8}T\d{6}Z|consolidated_(?:\d+_)?\d{8}T\d{6}Z)';
         foreach (glob("$agentPath/agent_*.sqsh") as $file) {
-            if (preg_match("/^agent_(.*?)_{$agentKindAlt}\.sqsh\$/", basename($file), $m)) {
-                $id = $m[1];
+            $id = self::agentIdFromLayerFilename(basename($file));
+            if ($id !== null) {
                 if (isset($agents[$id])) continue;
                 // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): the old
                 // StorageMountService::AGENT_MNT_BASE was a second constant
@@ -131,7 +130,7 @@ class StorageMetricsService {
         // (Sections 2 and 3 of the old code live in homeUserIds(), so BackupCronService
         // can list the homes without the du/df work of getEntityStats.)
         foreach (self::homeUserIds($homePath) as $user) {
-            $homes[$user] = self::getEntityStats('home', $user, $homePath, "/tmp/unraid-aicliagents/work/$user/home");
+            $homes[$user] = self::getEntityStats('home', $user, $homePath, SecretPaths::stateRoot() . "/work/$user/home");
         }
 
         // 4. Identify Migration Artifacts (Leftovers)
@@ -270,14 +269,10 @@ class StorageMetricsService {
         }
 
         // Rootfs (RAM Disk) stats
-        $rootUsage = 0;
-        $rootTotal = 0;
-        $rootOut = shell_exec("df -m / | tail -n 1");
-        if (preg_match('/(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%/', $rootOut, $matches)) {
-            $rootTotal = (int)$matches[1];
-            $rootUsage = (int)$matches[2];
-        }
-        
+        $rootDf = self::parseRootDf((string)shell_exec("df -m / | tail -n 1"));
+        $rootTotal = $rootDf['total_mb'];
+        $rootUsage = $rootDf['used_mb'];
+
         return [
             'migration_in_progress' => StorageMountService::isMigrationInProgress(),
             'migration_progress' => self::getMigrationProgress($agentPath),
@@ -297,6 +292,23 @@ class StorageMetricsService {
                 'percent'  => $rootTotal > 0 ? round(($rootUsage / $rootTotal) * 100) : 0
             ]
         ];
+    }
+
+    /**
+     * Pure: the size and use of the root file system from the last line of `df -m /`.
+     * The line holds four numbers and a percent: size, used, available, use%. The device
+     * name before them may hold digits and spaces, so the match needs all four numbers
+     * and the percent sign together. A line with no match (empty output, a missing
+     * column, a use% of "-") gives zero for both values.
+     *
+     * @return array{total_mb:int,used_mb:int}
+     */
+    public static function parseRootDf(string $dfLine): array
+    {
+        if (preg_match('/(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%/', $dfLine, $matches) !== 1) {
+            return ['total_mb' => 0, 'used_mb' => 0];
+        }
+        return ['total_mb' => (int)$matches[1], 'used_mb' => (int)$matches[2]];
     }
 
     /**
@@ -365,7 +377,7 @@ class StorageMetricsService {
                 if ($upper !== null) return $upper;
             }
         }
-        $legacy = "/tmp/unraid-aicliagents/zram_upper/{$type}s/{$id}/upper";
+        $legacy = rtrim(SecretPaths::stateRoot(), '/') . "/zram_upper/{$type}s/{$id}/upper";
         return is_dir($legacy) ? $legacy : null;
     }
 
@@ -447,10 +459,11 @@ class StorageMetricsService {
      *
      * @return string[]
      */
-    public static function homeUserIds(?string $homePath = null, string $workBase = '/tmp/unraid-aicliagents/work'): array
+    public static function homeUserIds(?string $homePath = null, ?string $workBase = null): array
     {
         require_once __DIR__ . '/LayerManifestService.php';
         $homePath = $homePath ?? StoragePathResolver::homePersistPath('');
+        $workBase = $workBase ?? (rtrim(SecretPaths::stateRoot(), '/') . '/work');
         $ids = [];
         foreach (UtilityService::getUnraidUsers() as $user) {
             $files = LayerManifestService::layerFilesOfEntity($homePath, 'home', (string)$user);   // R-002: exact entity
@@ -467,6 +480,16 @@ class StorageMetricsService {
             }
         }
         return array_map('strval', array_keys($ids));
+    }
+
+    /** Return the agent id encoded by a supported persisted layer filename. */
+    public static function agentIdFromLayerFilename(string $filename): ?string
+    {
+        $agentKindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_(?:\d+_)?\d{8}T\d{6}Z|consolidated_(?:\d+_)?\d{8}T\d{6}Z)';
+        if (preg_match("/^agent_(.*?)_{$agentKindAlt}\.sqsh\$/", basename($filename), $match) !== 1) {
+            return null;
+        }
+        return $match[1];
     }
 
     /**

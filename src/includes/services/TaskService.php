@@ -17,8 +17,27 @@ class TaskService {
     /** #567/#570: the one sentence for a save in the emergency session. */
     const EMERGENCY_NOT_KEPT = 'Not saved: this session runs on the emergency temporary home. Its work is not kept and is lost when storage returns.';
 
+    /**
+     * Test seam (#663). A test sets 'emergency' (bool), 'ensureReady' (callable)
+     * and 'persist' (callable returning a FileStoragePersistResult) so persistHome
+     * runs without a live storage engine. Production never sets it.
+     * @var array{emergency?:bool,ensureReady?:callable,persist?:callable}|null
+     */
+    private static ?array $testSeam = null;
+
+    /**
+     * Test only. Pass null to restore the production calls.
+     * @param array{emergency?:bool,ensureReady?:callable,persist?:callable}|null $seam
+     */
+    public static function setTestSeam(?array $seam): void {
+        self::$testSeam = $seam;
+    }
+
     /** #567: true while a session runs on the emergency temporary home. */
     public static function inEmergencyMode(): bool {
+        if (self::$testSeam !== null && isset(self::$testSeam['emergency'])) {
+            return (bool)self::$testSeam['emergency'];
+        }
         require_once __DIR__ . '/StorageMountService.php';
         return StorageMountService::isEmergencyMode();
     }
@@ -47,7 +66,7 @@ class TaskService {
             return ['status' => 'emergency', 'message' => self::EMERGENCY_NOT_KEPT];
         }
 
-        $lockFile = "/tmp/unraid-aicliagents/init_$username.lock";
+        $lockFile = SecretPaths::homePersistLockPath((string)$username);
         $fp = fopen($lockFile, "w+");
         if (!$fp || !flock($fp, LOCK_EX)) {
             if ($fp) fclose($fp);
@@ -55,8 +74,13 @@ class TaskService {
             return false;
         }
 
-        FileStorage::ensureReady("home/$username");   // Epic #1310: facade intent
-        $result = FileStorage::persist("home/$username");   // Epic #1310: facade intent (delegates to commitChanges)
+        if (self::$testSeam !== null && isset(self::$testSeam['persist'])) {
+            if (isset(self::$testSeam['ensureReady'])) (self::$testSeam['ensureReady'])("home/$username");
+            $result = (self::$testSeam['persist'])("home/$username");
+        } else {
+            FileStorage::ensureReady("home/$username");   // Epic #1310: facade intent
+            $result = FileStorage::persist("home/$username");   // Epic #1310: facade intent (delegates to commitChanges)
+        }
         $res = $result->exit;
 
         flock($fp, LOCK_UN);
@@ -89,7 +113,7 @@ class TaskService {
      */
     private static function deferReasonMessage(string $type, string $id, bool $saved = true, string $fallbackReason = ''): string {
         $sanitisedId = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
-        $marker = "/tmp/unraid-aicliagents/.bake_defer_reason_{$type}_{$sanitisedId}";
+        $marker = SecretPaths::stateRoot() . "/.bake_defer_reason_{$type}_{$sanitisedId}";
         $reason = '';
         if (is_file($marker)) {
             $raw = @file_get_contents($marker);
@@ -179,7 +203,7 @@ class TaskService {
         [$type, $id] = explode('/', $entity, 2);
         $type = preg_replace('/[^a-z]/', '', $type);
         $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
-        $file = "/tmp/unraid-aicliagents/.graduate_refusal_{$type}_{$safe}";
+        $file = SecretPaths::stateRoot() . "/.graduate_refusal_{$type}_{$safe}";
         if (!is_file($file)) return '';
         $mtime = @filemtime($file);
         if ($mtime !== false && (time() - $mtime) >= 86400) return '';
@@ -255,7 +279,7 @@ class TaskService {
             return ['status' => 'emergency', 'message' => self::EMERGENCY_NOT_KEPT];
         }
 
-        $lockFile = "/tmp/unraid-aicliagents/init_$username.lock";
+        $lockFile = SecretPaths::homePersistLockPath((string)$username);
         $fp = fopen($lockFile, "w+");
         if (!$fp) return false;
 

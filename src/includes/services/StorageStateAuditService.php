@@ -144,7 +144,7 @@ class StorageStateAuditService {
             $config  = ConfigService::getConfig();
             $enabled = (string)($config['supervisor_enabled'] ?? '1') === '1';
             $tick    = max(1, (int)($config['supervisor_tick_seconds'] ?? 5));
-            $sih = SupervisorService::singleInstanceHealth();
+            $sih = self::supervisorHealth();
             $counts['supervisor_procs'] = (int)$sih['procs'];
             if (!$sih['healthy']) {
                 $violations[] = ['category' => self::CAT_SUPERVISOR,
@@ -233,6 +233,36 @@ class StorageStateAuditService {
         return false;
     }
 
+    /** The text of /proc/mounts (test hook AICLI_SL_PROC_MOUNTS names a fixture file). */
+    private static function procMounts(): string {
+        $fixture = getenv('AICLI_SL_PROC_MOUNTS');
+        $file = ($fixture !== false && $fixture !== '') ? $fixture : '/proc/mounts';
+        return is_readable($file) ? (string)@file_get_contents($file) : '';
+    }
+
+    /**
+     * The supervisor facts for I4 (test hook AICLI_SL_SUPERVISOR_HEALTH names a JSON file
+     * with the same keys as SupervisorService::singleInstanceHealth returns).
+     *
+     * @return array{healthy:bool,procs:int,running:bool,tick_age:?int,reason:string}
+     */
+    private static function supervisorHealth(): array {
+        $fixture = getenv('AICLI_SL_SUPERVISOR_HEALTH');
+        if ($fixture !== false && $fixture !== '' && is_readable($fixture)) {
+            $d = json_decode((string)@file_get_contents($fixture), true);
+            if (is_array($d)) {
+                return [
+                    'healthy'  => (bool)($d['healthy'] ?? true),
+                    'procs'    => (int)($d['procs'] ?? 0),
+                    'running'  => (bool)($d['running'] ?? false),
+                    'tick_age' => isset($d['tick_age']) ? (int)$d['tick_age'] : null,
+                    'reason'   => (string)($d['reason'] ?? ''),
+                ];
+            }
+        }
+        return SupervisorService::singleInstanceHealth();
+    }
+
     /**
      * Plugin overlay merge mounts from /proc/mounts -> entity => mountpoint.
      * Mirrors HealthService::collectMounts' parse exactly (home work dir +
@@ -241,7 +271,7 @@ class StorageStateAuditService {
      * @return array<string,string>
      */
     private static function pluginOverlayMounts(): array {
-        $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
+        $mounts = self::procMounts();
         $out = [];
         $root = preg_quote(rtrim(StoragePathResolver::mountRoot(), '/'), '#');
         if (preg_match_all('#^\S+\s+(' . $root . '/work/([^/\s]+)/home)\s+overlay\b#m', $mounts, $m, PREG_SET_ORDER)) {
@@ -294,7 +324,9 @@ class StorageStateAuditService {
             $mt = @filemtime($f);
             if ($mt !== false) $ages[basename($f)] = max(0, $now - $mt);
         }
-        foreach (@glob(rtrim($lockDir ?? '/var/run', '/') . '/aicli-bake-*.lock') ?: [] as $f) {
+        // Test hook AICLI_BAKE_LOCK_DIR moves the lock folder off /var/run.
+        $lockRoot = $lockDir ?? (getenv('AICLI_BAKE_LOCK_DIR') ?: '/var/run');
+        foreach (@glob(rtrim($lockRoot, '/') . '/aicli-bake-*.lock') ?: [] as $f) {
             // R-132: a bake lock file stays on disk after the bake ends. Only a lock that
             // a process still holds can be a stale marker, so skip a free one. The probe
             // is a shared lock, non-blocking, on a read-only handle: it creates nothing.
@@ -336,7 +368,7 @@ class StorageStateAuditService {
      * @return string[]
      */
     private static function orphanLoops(): array {
-        $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
+        $mounts = self::procMounts();
         $out = [];
         foreach (self::losetupLines() as $line) {
             if (strpos($line, 'unraid-aicliagents') === false) continue;

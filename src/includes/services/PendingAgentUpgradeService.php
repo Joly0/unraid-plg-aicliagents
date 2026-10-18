@@ -14,7 +14,8 @@ class PendingAgentUpgradeService
 {
     private static function baseDir(): string
     {
-        return rtrim(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents', '/');
+        $base = getenv('AICLI_TMP_BASE');
+        return rtrim($base !== false && $base !== '' ? $base : SecretPaths::stateRoot(), '/');
     }
 
     private static function safeId(string $agentId): string

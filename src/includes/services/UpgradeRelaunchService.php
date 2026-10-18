@@ -24,7 +24,7 @@ class UpgradeRelaunchService
     private static function baseDir(): string
     {
         $base = getenv('AICLI_TMP_BASE');
-        return $base !== false && $base !== '' ? $base : '/tmp/unraid-aicliagents';
+        return $base !== false && $base !== '' ? $base : SecretPaths::stateRoot();
     }
 
     public static function manifestPath(string $agentId): string

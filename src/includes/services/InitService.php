@@ -18,6 +18,31 @@ class InitService {
     private static $initialized = false;
 
     /**
+     * Test seams (#663). Production keeps this array empty, so every default below is the
+     * production value. Keys: runDir, varIni, emergencyFlag, emergencyHome, agentBase (paths);
+     * migrationInProgress, nginx, bootSweep, migrateAutoLaunch, supervisor, bootLaunch,
+     * killSessions, publish (callables that replace the real call).
+     * @var array<string,mixed>
+     */
+    private static $seams = [];
+
+    /**
+     * Test seam: install seams and clear the once-per-process flags. Tests only.
+     *
+     * @param array<string,mixed> $seams
+     */
+    public static function resetForTests(array $seams = []): void {
+        self::$seams = $seams;
+        self::$initialized = false;
+        self::$initializing = false;
+    }
+
+    /** The run folder that holds the pid and socket files of the sessions. */
+    private static function runDir(): string {
+        return rtrim((string)(self::$seams['runDir'] ?? '/var/run'), '/');
+    }
+
+    /**
      * Initializes the plugin state and environment.
      */
     public static function initPlugin() {
@@ -25,8 +50,9 @@ class InitService {
         self::$initializing = true;
 
         // Force system/user timezone if available, otherwise fallback to UTC
-        if (file_exists('/var/local/emhttp/var.ini')) {
-            $var = @parse_ini_file('/var/local/emhttp/var.ini');
+        $varIni = (string)(self::$seams['varIni'] ?? '/var/local/emhttp/var.ini');
+        if (file_exists($varIni)) {
+            $var = @parse_ini_file($varIni);
             if (!empty($var['timeZone'])) {
                 @date_default_timezone_set($var['timeZone']);
             } else {
@@ -36,7 +62,7 @@ class InitService {
             date_default_timezone_set('UTC');
         }
 
-        $logDir = "/tmp/unraid-aicliagents";
+        $logDir = SecretPaths::stateRoot();
         if (!is_dir($logDir)) {
             @mkdir($logDir, 0755, true);
             @chmod($logDir, 0755);
@@ -65,14 +91,14 @@ class InitService {
         
         $config = ConfigService::getConfig();
         $directories = [
-            "/boot/config/plugins/unraid-aicliagents",
-            "/boot/config/plugins/unraid-aicliagents/persistence",
-            "/boot/config/plugins/unraid-aicliagents/envs",
-            "/boot/config/plugins/unraid-aicliagents/pkg-cache",
-            "/tmp/unraid-aicliagents",
-            "/tmp/unraid-aicliagents/work",
-            "/tmp/unraid-aicliagents/caches",
-            "/var/run/aicli-sessions"
+            SecretPaths::flashRoot(),
+            SecretPaths::flashRoot() . '/persistence',
+            SecretPaths::flashRoot() . '/envs',
+            SecretPaths::flashRoot() . '/pkg-cache',
+            SecretPaths::stateRoot(),
+            rtrim(SecretPaths::stateRoot(), '/') . '/work',
+            rtrim(SecretPaths::stateRoot(), '/') . '/caches',
+            self::runDir() . "/aicli-sessions"
         ];
 
         foreach ($directories as $dir) {
@@ -84,7 +110,7 @@ class InitService {
         }
 
         // 1. Ensure Nginx configuration is updated and reloaded if necessary
-        ConfigService::ensureNginxConfig();
+        if (isset(self::$seams['nginx'])) { (self::$seams['nginx'])(); } else { ConfigService::ensureNginxConfig(); }
 
         // Phase 1: Ensure the durable layer manifest exists from first boot onwards (idempotent)
         LayerManifestService::initEmpty();
@@ -93,15 +119,15 @@ class InitService {
         // manifest, emits lifecycle log lines, and fires Unraid notifications for non-healthy
         // states. Does NOT block mounts. Phase 4b adds halt-and-ask via boot_integrity_strict cfg.
         // Guard: only run once per boot (cache file acts as sentinel).
-        if (!file_exists('/tmp/unraid-aicliagents/.boot_integrity_cache.json')) {
-            BootIntegrityService::runBootSweep();
+        if (!file_exists(SecretPaths::stateRoot() . '/.boot_integrity_cache.json')) {
+            if (isset(self::$seams['bootSweep'])) { (self::$seams['bootSweep'])(); } else { BootIntegrityService::runBootSweep(); }
         }
 
         // R-C1 (CLAUDE_RELAUNCH_SURVIVAL): one-time migration of per-(path,agent)
         // auto-launch flags up to the new agent-level map. Idempotent — guarded by
         // a persistent marker on the HOME state dir; cheap stat on the steady state.
         try {
-            ConfigService::migrateAutoLaunchToAgentLevel();
+            if (isset(self::$seams['migrateAutoLaunch'])) { (self::$seams['migrateAutoLaunch'])(); } else { ConfigService::migrateAutoLaunchToAgentLevel(); }
         } catch (\Throwable $e) {
             LogService::log("autolaunch agent-level migration error: " . $e->getMessage(), LogService::LOG_WARN, "InitService");
         }
@@ -120,7 +146,10 @@ class InitService {
     public static function ensureInit($skipMount = false) {
         self::initPlugin();
 
-        if (StorageMountService::isMigrationInProgress()) {
+        $migrating = isset(self::$seams['migrationInProgress'])
+            ? (bool)(self::$seams['migrationInProgress'])()
+            : StorageMountService::isMigrationInProgress();
+        if ($migrating) {
             // D-301: Log that we are in a waiting state
             LogService::log("Request deferred: Storage migration is currently in progress.", LogService::LOG_DEBUG);
             return;
@@ -134,39 +163,24 @@ class InitService {
         // It is cheap (one /proc scan + a stat) and never disturbs a healthy
         // supervisor — including one mid-bake, which keeps ticking via its
         // separate heartbeat process, so a fresh tick reads as healthy.
-        SupervisorService::ensureHealthy();
+        if (isset(self::$seams['supervisor'])) { (self::$seams['supervisor'])(); } else { SupervisorService::ensureHealthy(); }
 
         // Bug #521: one-shot per-boot autolaunch sweep. The disks_mounted event hook
         // and the PLG INLINE block are the primary triggers, but a fresh boot or a
         // crash-restart that skipped both leaves sessions dead until the user opens
         // the tab. The marker is on tmpfs, so it self-clears across reboots; on the
         // first ensureInit after boot we run the sweep and write the marker.
-        $bootMarker = '/tmp/unraid-aicliagents/.autolaunch_boot_done';
+        $bootMarker = SecretPaths::stateRoot() . '/.autolaunch_boot_done';
         if (!file_exists($bootMarker)) {
             @touch($bootMarker);
             // Run after the marker write so a partial failure doesn't loop. The
             // service is idempotent — already-running sessions are filtered.
             try {
-                // Relay is always-on by default, but the default is inert until
-                // the server is actually registered in the Config Hub. Do that
-                // first, then project, and only then launch — workspaces read
-                // their MCP server list once at startup, so a projection running
-                // after the sweep would not reach this boot's sessions at all.
-                AgentRelayService::ensureMcpRegistered();
-                // Same ordering rule for the plugin-management server: a workspace
-                // reads its MCP server list once at startup. This is a no-op unless
-                // the stored registration disagrees with admin_tools_enabled, so the
-                // common case (feature off, nothing registered) costs one array read.
-                \AICliAgents\Services\AdminMcpTools::ensureMcpRegistered();
-                // #137: reboot closed local workspaces without a UI close — sweep
-                // their orphaned Relay subscriptions so they stop ghosting contacts.
-                AgentRelayService::sweepOrphanedSubscriptions();
-                \AICliAgents\Services\Hub\HubProjector::projectAll();
-                AutoLaunchService::launchAllPending(null, 'init_boot');
-                AgentRelayService::ensureBootActors();
-                // #113: the Relay HTTP listener is a plugin-owned process, so
-                // nothing else restores it after a boot or a plugin restart.
-                AgentRelayService::ensureHttpListener();
+                if (isset(self::$seams['bootLaunch'])) {
+                    (self::$seams['bootLaunch'])();
+                } else {
+                    self::runBootLaunchSweep();
+                }
             } catch (\Throwable $e) {
                 LogService::log("AutoLaunch boot sweep failed: " . $e->getMessage(), LogService::LOG_WARN);
             }
@@ -174,11 +188,54 @@ class InitService {
     }
 
     /**
+     * The real once-per-boot sweep: register the MCP servers, project the Config Hub,
+     * then launch the pending sessions. The order matters (see the notes inside).
+     */
+    private static function runBootLaunchSweep(): void {
+        // Relay is always-on by default, but the default is inert until
+        // the server is actually registered in the Config Hub. Do that
+        // first, then project, and only then launch — workspaces read
+        // their MCP server list once at startup, so a projection running
+        // after the sweep would not reach this boot's sessions at all.
+        AgentRelayService::ensureMcpRegistered();
+        // Same ordering rule for the plugin-management server: a workspace
+        // reads its MCP server list once at startup. This is a no-op unless
+        // the stored registration disagrees with admin_tools_enabled, so the
+        // common case (feature off, nothing registered) costs one array read.
+        \AICliAgents\Services\AdminMcpTools::ensureMcpRegistered();
+        // #137: reboot closed local workspaces without a UI close — sweep
+        // their orphaned Relay subscriptions so they stop ghosting contacts.
+        AgentRelayService::sweepOrphanedSubscriptions();
+        \AICliAgents\Services\Hub\HubProjector::projectAll();
+        AutoLaunchService::launchAllPending(null, 'init_boot');
+        AgentRelayService::ensureBootActors();
+        // #113: the Relay HTTP listener is a plugin-owned process, so
+        // nothing else restores it after a boot or a plugin restart.
+        AgentRelayService::ensureHttpListener();
+    }
+
+    /**
+     * Kills the emergency terminal sessions (tmux and ttyd). Used once storage is back.
+     */
+    private static function killEmergencySessions(): void {
+        if (isset(self::$seams['killSessions'])) {
+            (self::$seams['killSessions'])();
+            return;
+        }
+        \AICliAgents\Services\ProcessManager::killAllAgentSessions();
+        exec("pkill -9 -f 'ttyd.*(aicliterm|temp-terminal)-' 2>/dev/null");
+        exec("pkill -9 -f 'aicli-run-' 2>/dev/null");
+        usleep(500000); // 0.5s for process cleanup
+    }
+
+    /**
      * Cleans up stale PID files, sockets, and temporary scripts.
      */
     private static function cleanupStaleState() {
-        $runDir = "/var/run";
-        
+        $runDir = self::runDir();
+        $emergencyFlag = (string)(self::$seams['emergencyFlag'] ?? StorageMountService::EMERGENCY_FLAG);
+        $emergencyHome = (string)(self::$seams['emergencyHome'] ?? StorageMountService::EMERGENCY_HOME);
+
         // Clean stale session artifacts if process is not running
         foreach (glob("$runDir/unraid-aicliagents-*.pid") as $pidFile) {
             if (file_exists($pidFile)) {
@@ -192,7 +249,7 @@ class InitService {
         }
 
         // Clean stale emergency mode state — only if HOME storage is back (not agent storage)
-        if (file_exists(StorageMountService::EMERGENCY_FLAG)) {
+        if (file_exists($emergencyFlag)) {
             $config = ConfigService::getConfig();
             $homePath = StoragePathResolver::homePersistPathFromConfig($config);   // R-046: the one resolver
             if (StorageMountService::isPathAvailable($homePath)) {
@@ -200,16 +257,12 @@ class InitService {
                 LogService::log("Emergency mode cleanup: storage now available. Killing emergency sessions...", LogService::LOG_INFO, "InitService");
 
                 // Kill emergency terminal sessions (tmux + ttyd)
-                \AICliAgents\Services\ProcessManager::killAllAgentSessions();
-                exec("pkill -9 -f 'ttyd.*(aicliterm|temp-terminal)-' 2>/dev/null");
-                exec("pkill -9 -f 'aicli-run-' 2>/dev/null");
-                usleep(500000); // 0.5s for process cleanup
+                self::killEmergencySessions();
 
-                @unlink(StorageMountService::EMERGENCY_FLAG);
-                $eHome = StorageMountService::EMERGENCY_HOME;
-                if (is_dir($eHome)) exec("rm -rf " . escapeshellarg($eHome));
+                @unlink($emergencyFlag);
+                if (is_dir($emergencyHome)) exec("rm -rf " . escapeshellarg($emergencyHome));
                 // Remove emergency home symlinks so mount_stack.sh can mkdir
-                foreach (glob("/tmp/unraid-aicliagents/work/*/home") as $link) {
+                foreach (glob(rtrim(SecretPaths::stateRoot(), '/') . '/work/*/home') as $link) {
                     if (is_link($link)) @unlink($link);
                 }
                 // Clean stale PID/socket files from killed sessions.
@@ -219,7 +272,7 @@ class InitService {
                 // workload (we never SIGNAL the recycled PID — but the file
                 // disappearing fools listActiveSessionsForAgent into thinking
                 // no session exists when one actually does).
-                foreach (glob("/var/run/unraid-aicliagents-*.pid") as $pidFile) {
+                foreach (glob("$runDir/unraid-aicliagents-*.pid") as $pidFile) {
                     $pid = (int)@file_get_contents($pidFile);
                     if ($pid > 0 && UtilityService::isPidRunning($pid)) {
                         // Process still alive — leave its pid file in place.
@@ -227,18 +280,18 @@ class InitService {
                     }
                     @unlink($pidFile);
                 }
-                foreach (glob("/var/run/aicliterm-*.sock") as $sock) @unlink($sock);
+                foreach (glob("$runDir/aicliterm-*.sock") as $sock) @unlink($sock);
 
                 // Remove emergency-installed agents from RAM (real sqsh agents will be mounted on demand)
-                foreach (glob("/tmp/unraid-aicliagents/.emergency_agent_*") as $flag) {
-                    $eAgentId = str_replace('/tmp/unraid-aicliagents/.emergency_agent_', '', $flag);
+                foreach (glob(SecretPaths::stateRoot() . '/.emergency_agent_*') as $flag) {
+                    $eAgentId = str_replace(SecretPaths::stateRoot() . '/.emergency_agent_', '', $flag);
                     // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1: agentBase(), not agentPath() —
                     // this runs unguarded on the boot init path (InitService::initPlugin,
                     // no surrounding try/catch), and $eAgentId comes from a flag-file
                     // name rather than a freshly-validated request param, so this call
                     // site keeps the non-throwing accessor to avoid a new failure mode
                     // on every page load if a stray flag file ever exists.
-                    $eAgentDir = AgentRegistry::agentBase() . "/$eAgentId";
+                    $eAgentDir = (string)(self::$seams['agentBase'] ?? AgentRegistry::agentBase()) . "/$eAgentId";
                     if (is_dir($eAgentDir) && !StorageMountService::isMounted($eAgentDir)) {
                         exec("rm -rf " . escapeshellarg($eAgentDir));
                         LogService::log("Removed emergency RAM agent: $eAgentId", LogService::LOG_INFO, "InitService");
@@ -246,15 +299,17 @@ class InitService {
                     @unlink($flag);
                 }
                 // Clear emergency agent versions so real sqsh versions take over
-                foreach (glob("/tmp/unraid-aicliagents/.emergency_agent_*") as $_) {} // already removed above
-                @unlink("/tmp/unraid-aicliagents/install-status"); // stale global status
+                foreach (glob(SecretPaths::stateRoot() . '/.emergency_agent_*') as $_) {} // already removed above
+                @unlink(SecretPaths::stateRoot() . '/install-status'); // stale global status
 
                 // Notify UI to reload via Nchan
-                EventBus::publish('storage.status', [], [
+                $statusEvent = [
                     'home_available' => true,
                     'agents_available' => true,
                     'emergency_mode' => false,
-                ]);
+                ];
+                if (isset(self::$seams['publish'])) { (self::$seams['publish'])('storage.status', [], $statusEvent); }
+                else { EventBus::publish('storage.status', [], $statusEvent); }
 
                 LogService::log("Emergency mode cleanup complete. UI notified.", LogService::LOG_INFO, "InitService");
             }
@@ -263,10 +318,11 @@ class InitService {
         // Clean stale installation progress files
         // D-327: Only delete if the corresponding install-bg.php process is NOT running
         // AND the file is older than 5 minutes (Grace period for UI completion).
-        $statusFiles = glob("/tmp/unraid-aicliagents/install-status-*");
+        $stateRoot = SecretPaths::stateRoot();
+        $statusFiles = glob(rtrim($stateRoot, '/') . '/install-status-*');
         $now = time();
         foreach ($statusFiles as $file) {
-            $agentId = str_replace('/tmp/unraid-aicliagents/install-status-', '', $file);
+            $agentId = str_replace(rtrim($stateRoot, '/') . '/install-status-', '', $file);
             $mtime = filemtime($file);
             
             // Search for active background installer for this specific agent

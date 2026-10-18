@@ -19,6 +19,11 @@ class HaltService {
 
     private const COMPONENT = 'HaltService';
 
+    /** The state directory for halt markers; production keeps the historical path. */
+    public static function directory(): string {
+        return rtrim(SecretPaths::stateRoot(), '/') . '/supervisor/halts';
+    }
+
     // Recommended actions per state (used by UI to choose recovery path)
     private const RECOMMENDED_ACTIONS = [
         'legacy_unmanaged' => 'restore_from_sibling',
@@ -67,7 +72,7 @@ class HaltService {
      * @return array<int, array{type: string, id: string, state: string, halted_at: string, details: array, recommended_action: string}>
      */
     public static function listAllHalts(): array {
-        $haltDir = self::HALT_DIR;
+        $haltDir = self::directory();
         if (!is_dir($haltDir)) {
             return [];
         }
@@ -138,7 +143,7 @@ class HaltService {
         array  $details,
         string $recommendedAction
     ): bool {
-        $dir = self::HALT_DIR . '/' . $type;
+        $dir = self::directory() . '/' . $type;
         if (!is_dir($dir)) {
             @mkdir($dir, 0755, true);
         }
@@ -241,7 +246,7 @@ class HaltService {
     // ---------------------------------------------------------------------------
 
     private static function haltFilePath(string $type, string $id): string {
-        return self::HALT_DIR . '/' . $type . '/' . $id;
+        return self::directory() . '/' . $type . '/' . $id;
     }
 
     private static function sidecarPath(string $type, string $id): string {

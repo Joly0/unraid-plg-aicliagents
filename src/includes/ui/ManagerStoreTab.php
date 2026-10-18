@@ -172,7 +172,7 @@ function av2_secrets_schema(array $agent): array {
                         elseif ($secretsTotal > 0 && $secretsSet < $secretsTotal) $state = 'state-warn';
 
                         // Install-in-progress hydration
-                        $statusFile = "/tmp/unraid-aicliagents/install-status-{$id}";
+                        $statusFile = \AICliAgents\Services\SecretPaths::stateRoot() . "/install-status-{$id}";
                         $isInstalling = false;
                         $statusData = ['progress' => 0, 'status_text' => 'Installing...'];
                         if (file_exists($statusFile)) {

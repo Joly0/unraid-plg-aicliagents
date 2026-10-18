@@ -121,7 +121,7 @@ class AgentHandler {
 
     /** #243: marker path — "the install now running for this agent is side by side". */
     private static function sideBySideMarker(string $agentId): string {
-        return "/tmp/unraid-aicliagents/install-sidebyside-$agentId";
+        return \AICliAgents\Services\SecretPaths::stateRoot() . "/install-sidebyside-$agentId";
     }
 
     /**
@@ -158,7 +158,7 @@ class AgentHandler {
      * reapStaleInstallMarkers()), so it happens with no browser open too.
      */
     private static function listActiveInstalls() {
-        $dir = '/tmp/unraid-aicliagents';
+        $dir = \AICliAgents\Services\SecretPaths::stateRoot();
         $active = [];
         $seen = [];
         foreach (glob("$dir/install-status-*") ?: [] as $f) {
@@ -229,7 +229,7 @@ class AgentHandler {
      */
     const INSTALL_STALE_THRESHOLD_SECS = 180;
 
-    public static function isInstallInProgress(string $agentId): bool {
+    public static function isInstallInProgress(string $agentId, ?callable $processProbe = null): bool {
         if ($agentId === '') return false;
 
         // #72: install-bg can finish while activation is deferred by an open
@@ -239,7 +239,7 @@ class AgentHandler {
             return true;
         }
 
-        $statusFile = "/tmp/unraid-aicliagents/install-status-$agentId";
+        $statusFile = \AICliAgents\Services\SecretPaths::stateRoot() . "/install-status-$agentId";
         $markerInProgress = false;
         if (is_file($statusFile)) {
             $status = @json_decode((string)@file_get_contents($statusFile), true);
@@ -252,7 +252,9 @@ class AgentHandler {
         }
 
         // Signal 2: a live install-bg.php process for this agent.
-        $processRunning = \AICliAgents\Services\PendingAgentUpgradeService::backgroundInstallRunning((string)$agentId);
+        $processRunning = $processProbe !== null
+            ? (bool)$processProbe((string)$agentId)
+            : \AICliAgents\Services\PendingAgentUpgradeService::backgroundInstallRunning((string)$agentId);
 
         if ($processRunning) {
             // A live install-bg process is authoritative — in progress regardless
@@ -515,7 +517,7 @@ class AgentHandler {
         if (!empty($preClosed)) {
             // $agentId is registry-validated before reaching this handler, so
             // $statusFile is a known local tmpfs path — not an outbound URL.
-            $statusFile = "/tmp/unraid-aicliagents/install-status-$agentId";
+            $statusFile = \AICliAgents\Services\SecretPaths::stateRoot() . "/install-status-$agentId";
             $cur = @json_decode((string)@file_get_contents($statusFile), true) ?: [];
             $cur['pre_closed_sessions'] = $preClosed;
             @file_put_contents($statusFile, json_encode($cur)); // nosemgrep: php.lang.security.tainted-url-to-connection.tainted-url-to-connection
@@ -585,7 +587,7 @@ class AgentHandler {
 
         aicli_log("Upgrade: graceful-closing " . count($sessions) . " session(s) for $agentId before install", AICLI_LOG_INFO);
 
-        @mkdir('/tmp/unraid-aicliagents', 0755, true);
+        @mkdir(\AICliAgents\Services\SecretPaths::stateRoot(), 0755, true);
 
         // Quiesce each agent + capture its resume id via the SHARED pipeline
         // (TerminalHandler::captureResumeForClose) so the post-upgrade auto-relaunch
@@ -609,7 +611,7 @@ class AgentHandler {
         // Touch close sentinels so aicli-shell.sh exits its relaunch loop
         // instead of respawning against the half-upgraded binary.
         foreach ($sessions as $s) {
-            @touch('/tmp/unraid-aicliagents/close-' . $s['id'] . '.flag');
+            @touch(\AICliAgents\Services\SecretPaths::stateRoot() . '/close-' . $s['id'] . '.flag');
         }
         usleep(300000);
 
@@ -911,7 +913,7 @@ class AgentHandler {
             echo json_encode(['status' => 'error', 'message' => 'invalid agentId']);
             return;
         }
-        $statusDir = self::$installStatusDirOverride ?? '/tmp/unraid-aicliagents';
+        $statusDir = self::$installStatusDirOverride ?? \AICliAgents\Services\SecretPaths::stateRoot();
         $file = empty($agentId)
             ? "$statusDir/install-status"
             : "$statusDir/install-status-{$agentId}";

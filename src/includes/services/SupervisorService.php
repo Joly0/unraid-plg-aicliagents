@@ -96,7 +96,7 @@ class SupervisorService {
         }
 
         if (!self::pidOwnsScript($pid)) {
-            @unlink(self::PIDFILE);
+            @unlink(self::pidfilePath());
             return true;
         }
 
@@ -116,7 +116,7 @@ class SupervisorService {
         }
 
         if (!self::pidAlive($pid)) {
-            @unlink(self::PIDFILE);
+            @unlink(self::pidfilePath());
             return true;
         }
 
@@ -206,7 +206,7 @@ class SupervisorService {
         // (1) Clean down: no procs at all -> start one (clear a stale pidfile first).
         if ($pids === []) {
             if ($running) {
-                @unlink(self::PIDFILE); // pidfile names a dead owner — stale
+                @unlink(self::pidfilePath()); // pidfile names a dead owner — stale
             }
             return self::start() ? 'started' : 'noop';
         }
@@ -233,7 +233,7 @@ class SupervisorService {
         //     A single transient extra root with a healthy owner never reaches here
         //     (covered by (2) above).
         self::reapAllSupervisors($pids);
-        @unlink(self::PIDFILE);
+        @unlink(self::pidfilePath());
         return self::start() ? 'healed' : 'noop';
     }
 
@@ -1453,6 +1453,12 @@ class SupervisorService {
         return ($env !== false && $env !== '') ? $env : self::JOBS_DIR;
     }
 
+    /** Pidfile path — AICLI_SUPERVISOR_PIDFILE redirects for tests (a fake supervisor process). */
+    public static function pidfilePath(): string {
+        $env = getenv('AICLI_SUPERVISOR_PIDFILE');
+        return ($env !== false && $env !== '') ? $env : self::PIDFILE;
+    }
+
     /** Queue dir — AICLI_QUEUE_DIR redirects for tests. */
     public static function queueDir(): string {
         $env = getenv('AICLI_QUEUE_DIR');
@@ -1664,10 +1670,10 @@ class SupervisorService {
      * Read and return the integer PID from the pidfile, or null.
      */
     private static function readPidfile(): ?int {
-        if (!file_exists(self::PIDFILE)) {
+        if (!file_exists(self::pidfilePath())) {
             return null;
         }
-        $raw = @file_get_contents(self::PIDFILE);
+        $raw = @file_get_contents(self::pidfilePath());
         if ($raw === false) {
             return null;
         }

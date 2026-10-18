@@ -67,20 +67,30 @@ final class PinnedLayersService
         return $out;
     }
 
-    /** @return array<string,int> session id => open files that are not what their path names now */
-    public static function staleHomeHolders(): array
+    /**
+     * Seams (tests): $procRoot is the folder that holds the process folders (default /proc).
+     * $statOpen returns the stat array of an open-file link (default stat()). A fixture tree
+     * cannot fake the kernel link to an open file, so a test passes its own stat function.
+     *
+     * @param ?callable(string):(array<int|string,int>|false) $statOpen
+     * @return array<string,int> session id => open files that are not what their path names now
+     */
+    public static function staleHomeHolders(?string $procRoot = null, ?callable $statOpen = null): array
     {
+        $procRoot = rtrim($procRoot ?? '/proc', '/');
+        $statOpen = $statOpen ?? static fn(string $link) => @stat($link);
         $procs = [];
-        foreach (@glob('/proc/[0-9]*') ?: [] as $p) {
+        foreach (@glob($procRoot . '/[0-9]*') ?: [] as $p) {
             $env = @file_get_contents($p . '/environ');
             if ($env === false || !preg_match('/(?:^|\0)AICLI_SESSION_ID=([A-Za-z0-9_-]{1,128})(?:\0|$)/', $env, $m)) continue;
             $files = [];
             $links = array_merge([$p . '/cwd'], @glob($p . '/fd/*') ?: []);
             foreach ($links as $l) {
                 $t = @readlink($l);
-                if ($t === false || strpos($t, '/tmp/unraid-aicliagents/work/') !== 0) continue;
+                $workPrefix = rtrim(SecretPaths::stateRoot(), '/') . '/work/';
+                if ($t === false || strpos($t, $workPrefix) !== 0) continue;
                 if (substr($t, -10) === ' (deleted)') continue;   // a file deleted on purpose (a temp file) is not a stale mount
-                $st = @stat($l);
+                $st = $statOpen($l);
                 if ($st === false) continue;
                 $now = @stat($t);
                 $files[] = ['path' => $t, 'dev' => (int)$st['dev'], 'ino' => (int)$st['ino'],

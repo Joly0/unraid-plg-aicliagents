@@ -348,7 +348,7 @@ class AgentRegistry {
         }
 
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
 
         // D-329: Pre-fetch all SquashFS files to avoid repeated expensive glob calls on Flash/Network storage
         $allSqsh = glob("$persistPath/*.sqsh");
@@ -397,7 +397,7 @@ class AgentRegistry {
             // D-326: Also consider 'installed' if a background installation is currently running
             // This prevents the 'INSTALL' button from reappearing if the user refreshes during install.
             if (!$agent['is_installed']) {
-                $statusFile = "/tmp/unraid-aicliagents/install-status-{$id}";
+                $statusFile = SecretPaths::stateRoot() . "/install-status-{$id}";
                 if (file_exists($statusFile)) {
                     $status = json_decode(@file_get_contents($statusFile), true);
                     if ($status && isset($status['progress']) && $status['progress'] > 0 && $status['progress'] < 100) {
@@ -1516,7 +1516,7 @@ class AgentRegistry {
         // Build the same sqsh-existence map getRegistry uses so we recognise
         // installed-but-unmounted agents (the whole point of this method).
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
         $allSqsh = glob("$persistPath/*.sqsh") ?: [];
         $allSqshBasenames = array_map('basename', $allSqsh);
         $kindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';

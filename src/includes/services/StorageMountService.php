@@ -120,7 +120,9 @@ class StorageMountService {
     }
 
     /** Forgejo #558: written by event/stopping, removed by event/disks_mounted. */
-    const ARRAY_STOPPING_FLAG = "/tmp/unraid-aicliagents/.array_stopping";
+    private static function arrayStoppingFlagPath(): string {
+        return rtrim(SecretPaths::stateRoot(), '/') . '/.array_stopping';
+    }
 
     /**
      * Forgejo #558: is the array stopping?
@@ -140,7 +142,7 @@ class StorageMountService {
     public static function isArrayStopping(?string $varIni = null, ?string $flag = null, ?int $now = null): bool {
         $ini = $varIni ?? (string)@file_get_contents('/var/local/emhttp/var.ini');
         if (preg_match('/^fsState="Stopping"/m', $ini)) return true;
-        $f = $flag ?? self::ARRAY_STOPPING_FLAG;
+        $f = $flag ?? self::arrayStoppingFlagPath();
         clearstatcache(true, $f);
         if (!file_exists($f)) return false;
         $age = ($now ?? time()) - (int)@filemtime($f);
@@ -288,9 +290,21 @@ class StorageMountService {
         }
     }
 
+    private const STORAGECTL = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh';
+
+    /**
+     * The storagectl dispatcher every call here shells out to. AICLI_STORAGECTL is the
+     * test-only script-path override (the same hook FileStorage honours); production
+     * never sets it, so the deployed script runs.
+     */
+    private static function storagectlScript(): string {
+        $e = getenv('AICLI_STORAGECTL');
+        return ($e !== false && $e !== '') ? $e : self::STORAGECTL;
+    }
+
     /** exec one `storagectl mount` with the given lock wait; returns [exit, output lines]. */
     private static function execStoragectlMount(string $args, int $lockWaitS): array {
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $script = self::storagectlScript();
         $out = [];
         $res = 1;
         // nosemgrep: php.lang.security.exec-use.exec-use
@@ -570,6 +584,19 @@ class StorageMountService {
         }
     }
 
+    /** Seconds ensureHomeMounted waits for the per-user mount lock before it goes on without it. */
+    public const HOME_MOUNT_LOCK_WAIT_S = 10.0;
+
+    /**
+     * The lock wait in seconds. AICLI_HOME_MOUNT_LOCK_WAIT_S is a test-only override
+     * (a test must not wait the full ten seconds); production never sets it.
+     */
+    private static function homeMountLockWaitS(): float {
+        $e = getenv('AICLI_HOME_MOUNT_LOCK_WAIT_S');
+        if ($e !== false && $e !== '' && is_numeric($e) && (float)$e >= 0.0) return (float)$e;
+        return self::HOME_MOUNT_LOCK_WAIT_S;
+    }
+
     /** The body of ensureHomeMounted. Sets $path to the route taken (fast, lock or mount). */
     private static function ensureHomeMountedTraced($user, int &$exit, string &$path) {
         $exit = 1;
@@ -606,7 +633,8 @@ class StorageMountService {
         // Serialize concurrent mounts for the same user with an advisory lock.
         // Losers block until the winner finishes, then re-check before mounting.
         $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
-        $lockFile = "/tmp/unraid-aicliagents/home_mount_{$safeUser}.lock";
+        // The state root is /tmp/unraid-aicliagents unless a test redirects it (AICLI_STATE_ROOT).
+        $lockFile = rtrim(SecretPaths::stateRoot(), '/') . "/home_mount_{$safeUser}.lock";
         $path = 'lock';
         $lock = @fopen($lockFile, 'c');
         if ($lock !== false) {
@@ -619,11 +647,12 @@ class StorageMountService {
             // (storagectl op_mount) holds its OWN mount-op lock so we never
             // double-mount, and the isMounted re-check below short-circuits when the
             // winner already finished.
-            $lockDeadline = microtime(true) + 10.0;
+            $lockWaitS = self::homeMountLockWaitS();
+            $lockDeadline = microtime(true) + $lockWaitS;
             while (!flock($lock, LOCK_EX | LOCK_NB)) {
                 if (microtime(true) >= $lockDeadline) {
-                    LogService::log("Home mount lock wait timed out for $safeUser after 10s — proceeding (winner may be wedged); op_mount lock still serializes.", LogService::LOG_WARN, "StorageMountService");
-                    PerfTrace::record('storage.mount_lock_timeout', 10000, "user=$safeUser");
+                    LogService::log("Home mount lock wait timed out for $safeUser after {$lockWaitS}s — proceeding (winner may be wedged); op_mount lock still serializes.", LogService::LOG_WARN, "StorageMountService");
+                    PerfTrace::record('storage.mount_lock_timeout', (int)round($lockWaitS * 1000), "user=$safeUser");
                     break;
                 }
                 usleep(100000); // 100ms
@@ -844,9 +873,14 @@ class StorageMountService {
      * Verifies the home overlay mount is genuinely an OverlayFS, not a phantom
      * proc entry. A healthy home mount reads "overlay <mnt> overlay ..." in /proc/mounts.
      */
-    public static function isHomeMountHealthy(string $user): bool {
-        $mnt = rtrim(UtilityService::getWorkDir($user) . "/home", '/');
-        $mounts = file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '';
+    public static function isHomeMountHealthy(
+        string $user,
+        ?string $mountsText = null,
+        ?string $mountPath = null,
+        ?string $persistPath = null
+    ): bool {
+        $mnt = rtrim($mountPath ?? (UtilityService::getWorkDir($user) . "/home"), '/');
+        $mounts = $mountsText ?? (file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '');
         if (self::overlayMountedAt($mounts, $mnt)) {
             return true;
         }
@@ -854,7 +888,7 @@ class StorageMountService {
         // <persist>/passthrough/homes/<user>, not an overlay. Only overlays counted, so
         // the page re-ran the home mount twice a second and never loaded (prod02,
         // 2026-10-14, the first home ever converted).
-        $persist = rtrim(StoragePathResolver::homePersistPath($user), '/');
+        $persist = rtrim($persistPath ?? StoragePathResolver::homePersistPath($user), '/');
         return $persist !== '' && self::isPlainHomeBound($mnt, $persist . '/passthrough/homes/' . $user);
     }
 
@@ -918,16 +952,25 @@ class StorageMountService {
      * still busy, in which case it stays mounted and the caller must not delete
      * anything under it.
      */
-    public static function unmountReal(string $path, int $tries = 3): bool {
-        $path = rtrim($path, '/');
-        if ($path === '' || !self::isMounted($path)) return true;
-        $tries = max(1, $tries);
-        for ($i = 1; $i <= $tries; $i++) {
+    public static function unmountReal(string $path, int $tries = 3, ?callable $umount = null, ?callable $isMounted = null, ?callable $pause = null): bool {
+        // $umount (fn(string):int exit code), $isMounted (fn(string):bool) and $pause
+        // (fn(int microseconds)) are test seams; production runs the real umount, reads
+        // /proc/mounts and sleeps 0.5 s.
+        $umount = $umount ?? static function (string $p): int {
             $out = [];
             // nosemgrep: php.lang.security.exec-use.exec-use
-            exec("umount " . escapeshellarg($path) . " 2>/dev/null", $out, $rc);
-            if ($rc === 0 || !self::isMounted($path)) return true;
-            if ($i < $tries) usleep(500000);
+            exec("umount " . escapeshellarg($p) . " 2>/dev/null", $out, $rc);
+            return (int)$rc;
+        };
+        $isMounted = $isMounted ?? static function (string $p): bool { return self::isMounted($p); };
+        $pause = $pause ?? static function (int $us): void { usleep($us); };
+        $path = rtrim($path, '/');
+        if ($path === '' || !$isMounted($path)) return true;
+        $tries = max(1, $tries);
+        for ($i = 1; $i <= $tries; $i++) {
+            $rc = $umount($path);
+            if ($rc === 0 || !$isMounted($path)) return true;
+            if ($i < $tries) $pause(500000);
         }
         LogService::log("Kept busy mount $path: a real unmount failed $tries times (never lazy-unmounted, #512).", LogService::LOG_WARN, "StorageMountService");
         return false;
@@ -1056,15 +1099,16 @@ class StorageMountService {
      * is not an error the caller has to handle specially — it means "install the
      * old way", and installAgent treats it as such.
      */
-    public static function stageAgentInstall(string $agentId): ?string
+    public static function stageAgentInstall(string $agentId, ?string $agentBase = null): ?string
     {
+        // $agentBase is a test seam: the agents root a staging mount must lie under.
         self::$lastStageRefusal = '';
         $persistPath = StoragePathResolver::agentPersistPath();
         if (!self::isPathAvailable($persistPath)) {
             LogService::log("stageAgentInstall($agentId): storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
             return null;
         }
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $script = self::storagectlScript();
         $out = [];
         // nosemgrep: php.lang.security.exec-use.exec-use
         exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
@@ -1076,7 +1120,7 @@ class StorageMountService {
                 . (self::$lastStageRefusal !== '' ? ', reason ' . self::$lastStageRefusal : '') . ')', LogService::LOG_WARN, "StorageMountService");
             return null;
         }
-        $mount = self::stagedMountFromJson(implode("\n", $out));
+        $mount = self::stagedMountFromJson(implode("\n", $out), $agentBase);
         if ($mount === null || !is_dir($mount)) {
             LogService::log("stageAgentInstall($agentId): storagectl reported success but no usable staging mount.", LogService::LOG_WARN, "StorageMountService");
             return null;
@@ -1116,7 +1160,7 @@ class StorageMountService {
      * the payload — must return null rather than a half-path the installer would
      * then write into.
      */
-    public static function stagedMountFromJson(string $json): ?string
+    public static function stagedMountFromJson(string $json, ?string $agentBase = null): ?string
     {
         $data = json_decode(trim($json), true);
         if (!is_array($data)) return null;
@@ -1126,7 +1170,7 @@ class StorageMountService {
         // A staging mount is always under the agents root. Refusing anything else
         // keeps a malformed or hostile response from steering an install — and an
         // install writes hundreds of megabytes wherever it is pointed.
-        $expected = AgentRegistry::agentBase() . '/.staging/';
+        $expected = ($agentBase ?? AgentRegistry::agentBase()) . '/.staging/';
         return strncmp($mount, $expected, strlen($expected)) === 0 ? $mount : null;
     }
 
@@ -1140,7 +1184,7 @@ class StorageMountService {
     public static function bakeStagedInstall(string $agentId): int
     {
         $persistPath = StoragePathResolver::agentPersistPath();
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $script = self::storagectlScript();
         $out = [];
         // nosemgrep: php.lang.security.exec-use.exec-use
         // #571: the bake can run for minutes. Keep the install's tray entry alive
@@ -1165,7 +1209,7 @@ class StorageMountService {
     public static function unstageAgentInstall(string $agentId, bool $keepUpper = false): void
     {
         $persistPath = StoragePathResolver::agentPersistPath();
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $script = self::storagectlScript();
         $out = [];
         // nosemgrep: php.lang.security.exec-use.exec-use
         exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
@@ -1236,7 +1280,7 @@ class StorageMountService {
     public static function homeConsolidationRecommended(string $user): bool {
         if ($user === '') return false;
         $persistPath = StoragePathResolver::homePersistPath($user);
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $script = self::storagectlScript();
         if (!is_file($script)) return false;
         // nosemgrep: php.lang.security.exec-use.exec-use
         $json = @shell_exec("bash " . escapeshellarg($script) . " status --type home --id " . escapeshellarg($user) . " --persist " . escapeshellarg($persistPath) . " 2>/dev/null");
@@ -1252,7 +1296,7 @@ class StorageMountService {
             : StoragePathResolver::agentPersistPath();
         // Phase 5: route through the storagectl dispatcher (op_consolidate) instead
         // of the consolidate_layers.sh shim. Exit code unchanged (0 ok / 1 / 2).
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $script = self::storagectlScript();
 
         $oldSize = 0;
         foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $f) {

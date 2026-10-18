@@ -23,6 +23,12 @@ class LayerManifestService {
     /** Lock file on tmpfs — cheap, no flash wear, released on crash (POSIX flock). */
     private const LOCK_PATH = '/var/run/aicli-supervisor.manifest.lock';
 
+    /** Lock path override for isolated tests; production keeps the tmpfs default. */
+    private static function lockPath(): string {
+        $path = getenv('AICLI_MANIFEST_LOCK_PATH');
+        return ($path !== false && $path !== '') ? $path : self::LOCK_PATH;
+    }
+
     private const COMPONENT = 'LayerManifestService';
 
     // -----------------------------------------------------------------------
@@ -764,7 +770,7 @@ class LayerManifestService {
         // MUST be non-blocking: readManifest is also called from inside withLock's
         // LOCK_EX (same process, different fd — flock treats those as conflicting),
         // so a blocking LOCK_SH here would self-deadlock every mutator.
-        $lockFd   = @fopen(self::LOCK_PATH, 'c');
+        $lockFd   = @fopen(self::lockPath(), 'c');
         $haveLock = ($lockFd !== false) && @flock($lockFd, LOCK_SH | LOCK_NB);
         try {
             for ($attempt = 0; $attempt < 3; $attempt++) {
@@ -1234,12 +1240,13 @@ class LayerManifestService {
      * Returns whatever $callback returns (expected: bool).
      */
     private static function withLock(callable $callback): bool {
-        $lockDir = dirname(self::LOCK_PATH);
+        $lockPath = self::lockPath();
+        $lockDir = dirname($lockPath);
         if (!is_dir($lockDir)) {
             @mkdir($lockDir, 0755, true);
         }
 
-        $fd = @fopen(self::LOCK_PATH, 'c');
+        $fd = @fopen($lockPath, 'c');
         if ($fd === false) {
             // If we can't create the lock file (e.g., /var/run missing at boot),
             // fall through without locking — durability degrades but doesn't break.

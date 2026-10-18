@@ -16,6 +16,12 @@ use AICliAgents\Services\LogService;
 class TarballSource implements AgentSource {
     const DL_BASE = '/tmp/unraid-aicliagents/dl';
 
+    /** Test seam: a callable(string $cmd): ?string that stands in for shell_exec in the download step. */
+    public static $shellSeam = null;
+
+    /** Test seam: a download folder that replaces DL_BASE (null keeps DL_BASE). */
+    public static ?string $dlBaseOverride = null;
+
     public function fetch(string $agentId, array $agent, ?string $targetVersion, $progress): bool {
         $src = $agent['source'] ?? [];
         $urlTpl = (string)($src['url'] ?? '');
@@ -39,13 +45,13 @@ class TarballSource implements AgentSource {
         @mkdir("$agentDir/pkg", 0755, true);
 
         if (is_callable($progress)) $progress("Downloading {$version}...", 35);
-        $dlDir = self::DL_BASE . "/$agentId";
+        $dlDir = (self::$dlBaseOverride ?? self::DL_BASE) . "/$agentId";
         @mkdir($dlDir, 0755, true);
         $dlPath = $dlDir . '/' . basename(parse_url($url, PHP_URL_PATH) ?: 'tarball.bin');
         // R-120 (#662): curl must end with exit code 0. A download cut short by the 300 s limit
         // leaves a partial file and exit code 28 (or 18); it is deleted, never extracted.
         $dl = 'curl -fL -m 300 -o ' . escapeshellarg($dlPath) . ' ' . escapeshellarg($url) . ' 2>&1; echo __RC=$?';
-        $dlOut = (string)@shell_exec($dl);
+        $dlOut = (string)(self::$shellSeam !== null ? (self::$shellSeam)($dl) : @shell_exec($dl));
         $dlOk = preg_match('/__RC=(\d+)\s*$/', $dlOut, $dm) === 1 && (int)$dm[1] === 0;
         if (!$dlOk || !file_exists($dlPath) || filesize($dlPath) === 0) {
             @unlink($dlPath);
@@ -73,6 +79,11 @@ class TarballSource implements AgentSource {
         if ($bin !== '' && file_exists($bin)) {
             $cmd = str_replace('{binary}', escapeshellarg($bin), $probe) . ' 2>&1';
             $out = @shell_exec($cmd) ?: '';
+            // Some probes print a tool dependency before the agent version
+            // (for example: "curl 8.5.0; agent 1.2.3"). Prefer the labelled
+            // agent version, then keep the first-version fallback for legacy
+            // output that has no label.
+            if (preg_match('/\bagent(?:\s+version)?\s*[:=]?\s*v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/i', $out, $m)) return $m[1];
             if (preg_match('/(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/', $out, $m)) return $m[1];
         }
         if (file_exists("$agentDir/VERSION")) {

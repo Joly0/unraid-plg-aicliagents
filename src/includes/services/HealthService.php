@@ -560,25 +560,56 @@ class HealthService {
         // One /proc/mounts read (the cheap findmnt equivalent StorageMountService::
         // isMounted uses) -> active overlay entities; per-entity a single glob
         // answers "has persisted layers".
-        $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
+        $mounts = self::procMounts();
         $mounted = [];
-        if (preg_match_all('#^\S+\s+/tmp/unraid-aicliagents/work/([^/\s]+)/home\s+overlay\b#m', $mounts, $m)) {
-            foreach ($m[1] as $user) {
-                $mounted["home/$user"] = self::hasLayers('home', (string)$user, StoragePathResolver::homePersistPath((string)$user));
+        foreach (self::activeOverlayEntities($mounts, SecretPaths::stateRoot(), AgentRegistry::agentBase()) as $entity) {
+            [$type, $user] = explode('/', $entity, 2); // $user is the home user or the agent id
+            if ($type === 'home') {
+                $mounted[$entity] = self::hasLayers('home', (string)$user, StoragePathResolver::homePersistPath((string)$user));
+            } else {
+                $mounted[$entity] = self::hasLayers('agent', (string)$user, StoragePathResolver::agentPersistPath());
             }
         }
-        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through
-        // AgentRegistry::agentBase() instead of the removed
-        // StorageMountService::AGENT_MNT_BASE duplicate constant.
-        //
-        // Phase 2 (2026-09-09): a migrated agent's overlay mounts at
-        // agents/.versions/<id>/<generation>, not agents/<id> — match both shapes
-        // (the versioned alternative first, so it never falls through and gets
-        // misread as a legacy id) or this audit reports a correctly-mounted,
-        // migrated agent as unmounted. Group 1 = versioned id, group 2 = legacy id.
-        $agentBase = preg_quote(AgentRegistry::agentBase(), '#');
+        return self::evalMounts($mounted, array_keys(LayerManifestService::getAllEntities()));
+    }
+
+    /** Path of the kernel mount table. AICLI_PROC_MOUNTS is a test-only hook (a fixture file). */
+    private static function procMountsPath(): string {
+        $e = getenv('AICLI_PROC_MOUNTS');
+        return ($e !== false && $e !== '') ? $e : '/proc/mounts';
+    }
+
+    /** The mount table text, or '' when it cannot be read. */
+    private static function procMounts(): string {
+        $path = self::procMountsPath();
+        return is_readable($path) ? (string)@file_get_contents($path) : '';
+    }
+
+    /**
+     * The entities ("home/<user>", "agent/<id>") that have an overlay mounted, read from
+     * mount table text. Pure.
+     *
+     * A home overlay mounts at <stateRoot>/work/<user>/home.
+     *
+     * SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): a migrated agent's overlay
+     * mounts at <agentBase>/.versions/<id>/<generation>, not <agentBase>/<id>. Both
+     * shapes match (the versioned alternative first, so it never falls through and gets
+     * misread as a legacy id) or the audit reports a correctly-mounted, migrated agent
+     * as unmounted. Group 1 = versioned id, group 2 = legacy id.
+     *
+     * @return string[] entity names, homes first, no duplicates
+     */
+    public static function activeOverlayEntities(string $mounts, string $stateRoot, string $agentBase): array {
+        $entities = [];
+        $workRoot = preg_quote(rtrim($stateRoot, '/') . '/work', '#');
+        if (preg_match_all('#^\S+\s+' . $workRoot . '/([^/\s]+)/home\s+overlay\b#m', $mounts, $m)) {
+            foreach ($m[1] as $user) {
+                $entities["home/$user"] = true;
+            }
+        }
+        $base = preg_quote($agentBase, '#');
         if (preg_match_all(
-            '#^\S+\s+' . $agentBase . '/(?:\.versions/([^/\s]+)/[^/\s]+|([^/\s]+))\s+overlay\b#m',
+            '#^\S+\s+' . $base . '/(?:\.versions/([^/\s]+)/[^/\s]+|([^/\s]+))\s+overlay\b#m',
             $mounts,
             $m,
             PREG_SET_ORDER
@@ -586,10 +617,10 @@ class HealthService {
             foreach ($m as $row) {
                 $id = ($row[1] ?? '') !== '' ? $row[1] : ($row[2] ?? '');
                 if ($id === '') continue;
-                $mounted["agent/$id"] = self::hasLayers('agent', $id, StoragePathResolver::agentPersistPath());
+                $entities["agent/$id"] = true;
             }
         }
-        return self::evalMounts($mounted, array_keys(LayerManifestService::getAllEntities()));
+        return array_map('strval', array_keys($entities));
     }
 
     private static function hasLayers(string $type, string $id, string $persistPath): bool {
@@ -627,17 +658,38 @@ class HealthService {
     private static function collectHomeUpper(): array {
         $free = self::freePct('/boot');
         $used = $free === null ? 0.0 : 100.0 - $free;
-        $uppers = [];
+        $mounts = '';
+        $homes = [];
         if ($used >= 70.0) {
-            $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
-            foreach (@glob('/tmp/unraid-aicliagents/work/*/home') ?: [] as $home) {
+            $mounts = self::procMounts();
+            $homes = @glob(rtrim(SecretPaths::stateRoot(), '/') . '/work/*/home') ?: [];
+        }
+        return self::homeUpperCheck($used, $mounts, $homes, [self::class, 'duMegabytes']);
+    }
+
+    /**
+     * #435: the home-upper decision on given facts. Pure except for $sizeMb. Only a home whose
+     * overlay writable layer (upperdir) sits on the boot drive (/boot/) is measured, and only
+     * while the boot drive is at least 70% used (a measure is a du, so it is skipped below that).
+     *
+     * @param string[]            $homes  home mount folders, <stateRoot>/work/<user>/home
+     * @param callable(string):int $sizeMb size of a folder in MB
+     */
+    public static function homeUpperCheck(float $bootUsedPct, string $mounts, array $homes, callable $sizeMb): array {
+        $uppers = [];
+        if ($bootUsedPct >= 70.0) {
+            foreach ($homes as $home) {
                 $upper = StorageMountService::overlayOptionAt($mounts, $home, 'upperdir');
                 if ($upper === null || strpos($upper, '/boot/') !== 0) continue;
-                $mb = (int)trim((string)@shell_exec('du -sm ' . escapeshellarg($upper) . ' 2>/dev/null | cut -f1'));
-                $uppers[basename(dirname($home))] = $mb;
+                $uppers[basename(dirname($home))] = (int)$sizeMb($upper);
             }
         }
-        return self::evalHomeUpper($used, $uppers);
+        return self::evalHomeUpper($bootUsedPct, $uppers);
+    }
+
+    /** Size of a folder in whole MB (du -sm); 0 when du fails. */
+    public static function duMegabytes(string $path): int {
+        return (int)trim((string)@shell_exec('du -sm ' . escapeshellarg($path) . ' 2>/dev/null | cut -f1'));
     }
 
     private static function collectPinnedLayers(): array {
@@ -664,7 +716,7 @@ class HealthService {
     }
 
     private static function collectDebugLog(): array {
-        $logFile = (getenv('AICLI_DEBUG_LOG_DIR') ?: '/tmp/unraid-aicliagents') . '/debug.log';
+        $logFile = (getenv('AICLI_DEBUG_LOG_DIR') ?: SecretPaths::stateRoot()) . '/debug.log';
         $size = is_file($logFile) ? (int)(@filesize($logFile) ?: 0) : 0;
         return self::evalDebugLog($size, self::debugLogMaxBytes());
     }
@@ -679,7 +731,7 @@ class HealthService {
     }
 
     private static function collectClientErrors(): array {
-        $logFile = (getenv('AICLI_DEBUG_LOG_DIR') ?: '/tmp/unraid-aicliagents') . '/debug.log';
+        $logFile = (getenv('AICLI_DEBUG_LOG_DIR') ?: SecretPaths::stateRoot()) . '/debug.log';
         $tail = self::tailBytes($logFile, self::CLIENT_ERROR_TAIL_BYTES);
         return self::evalClientErrors(self::countClientErrors($tail, time() - 3600));
     }
@@ -768,13 +820,16 @@ class HealthService {
      * StorageHandler::backupStatusFor() — the SAME per-user object
      * `get_storage_status`'s `last_backup` field carries.
      */
-    private static function collectBackup(): ?array {
+    private static function collectBackup(?array $users = null): ?array {
         $config = ConfigService::getConfig();
 
         require_once __DIR__ . '/../handlers/StorageHandler.php';
         require_once __DIR__ . '/UtilityService.php';
         require_once __DIR__ . '/HomeBackupSettingsService.php';
-        $users = UtilityService::getUnraidUsers();
+        // $users is a test seam: null reads the Unraid users from /etc/passwd.
+        if ($users === null) {
+            $users = UtilityService::getUnraidUsers();
+        }
         if (empty($users)) {
             $users = [(string)($config['user'] ?? 'root')];
         }
@@ -856,7 +911,7 @@ class HealthService {
     /** Runtime dir for cache + fingerprint + defer markers. AICLI_RUNTIME_DIR test hook. */
     public static function runtimeDir(): string {
         $e = getenv('AICLI_RUNTIME_DIR');
-        return ($e !== false && $e !== '') ? rtrim($e, '/') : '/tmp/unraid-aicliagents';
+        return ($e !== false && $e !== '') ? rtrim($e, '/') : SecretPaths::stateRoot();
     }
 
     public static function cachePath(): string {

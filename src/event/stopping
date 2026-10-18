@@ -110,7 +110,7 @@ log "Shutdown/Array stop detected."
 # soon as the sessions below close; the plugin refuses a start on the array or
 # a pool while this flag exists (StorageMountService::isArrayStopping).
 # event/disks_mounted removes it; /tmp does not survive a reboot.
-touch /tmp/unraid-aicliagents/.array_stopping 2>/dev/null || true
+touch "${AICLI_STATE_ROOT:-/tmp/unraid-aicliagents}/.array_stopping" 2>/dev/null || true
 
 # docs/specs/VOICE_MAIL.md: voice mail lives on tmpfs between heartbeats, so flush
 # it to Flash before anything else in shutdown runs — this is the moment a reboot
