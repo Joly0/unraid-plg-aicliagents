@@ -346,8 +346,18 @@ class LayerManifestService {
     public static function repointPathPrefix(string $oldPrefix, string $newPrefix, string $entityPrefix = ''): int {
         $moved = 0;
         self::withLock(function () use ($oldPrefix, $newPrefix, $entityPrefix, &$moved) {
-            $manifest = self::readManifest();
+            // R-045 (#623): loadForWrite keeps a copy of a damaged live file as
+            // .corrupt and restores, rebuilds or refuses. readManifest would have
+            // let the write below replace the damaged file with the older .bak
+            // and keep no evidence.
+            $manifest = self::loadForWrite();
             if ($manifest === null || !self::checkSchemaVersion($manifest)) {
+                LifecycleLogService::log(
+                    LifecycleLogService::LEVEL_ERROR,
+                    self::COMPONENT,
+                    'paths_repoint_failed',
+                    ['from' => $oldPrefix, 'to' => $newPrefix, 'reason' => 'manifest_unusable']
+                );
                 return false;
             }
             $count = 0;
@@ -887,8 +897,37 @@ class LayerManifestService {
     }
 
     /**
+     * True when the file looks like a complete squashfs: not empty, starts with
+     * the magic 'hsqs', and the size the header claims (bytes_used, offset 40)
+     * is above zero and not larger than the file. A layer that is still being
+     * written, or was cut short, has no valid bytes_used.
+     */
+    public static function looksLikeCompleteSquashfs(string $path): bool {
+        if (!is_file($path) || is_link($path)) {
+            return false;
+        }
+        $size = (int)@filesize($path);
+        if ($size < 96) {
+            return false;
+        }
+        $fh = @fopen($path, 'rb');
+        if ($fh === false) {
+            return false;
+        }
+        $head = @fread($fh, 48);
+        @fclose($fh);
+        if (!is_string($head) || strlen($head) < 48 || substr($head, 0, 4) !== 'hsqs') {
+            return false;
+        }
+        $u = @unpack('Pused', substr($head, 40, 8));
+        $used = is_array($u) ? (int)$u['used'] : 0;
+        return $used > 0 && $used <= $size;
+    }
+
+    /**
      * The manifest entries of one entity, from the layer files in $dir, oldest first.
-     * A zero-byte file is not a layer and is left out. Nothing is changed on disk.
+     * A zero-byte file and a file without a complete squashfs header are not layers
+     * and are left out. Nothing is changed on disk.
      *
      * @return array<int, array<string, mixed>>
      */
@@ -909,6 +948,14 @@ class LayerManifestService {
             $full  = rtrim($dir, '/') . '/' . $n;
             $bytes = (int)@filesize($full);
             if ($bytes <= 0) {
+                continue;
+            }
+            // R-044 (#622): a layer cut short by a power loss has a size above zero
+            // but no complete squashfs header. Hashing it would record the damaged
+            // bytes as a healthy layer, so it is left out and logged.
+            if (!self::looksLikeCompleteSquashfs($full)) {
+                LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, self::COMPONENT,
+                    'rebuild_skipped_incomplete_layer', ['file' => $n, 'bytes' => $bytes]);
                 continue;
             }
             $out[] = [
@@ -1035,7 +1082,14 @@ class LayerManifestService {
         if (!isset($dirs[$type]) || $id === '' || self::isSmokeId($id)) {
             return false;
         }
-        return self::withLock(function () use ($entity, $type, $id, $dirs) {
+        // R-044 (#622): hash the layers BEFORE the manifest lock. Hashing a layer on
+        // the USB stick under LOCK_EX made every bake, consolidate and supervisor
+        // tick wait. The locked block re-reads the manifest and only uses this
+        // entry when the entity is still missing.
+        $prepared = isset(self::getAllEntities()[$entity])
+            ? null
+            : self::entityFromDisk($dirs[$type], $type, $id);
+        return self::withLock(function () use ($entity, $type, $id, $dirs, $prepared) {
             $fileWasGood = self::readManifestState()['state'] === 'ok';
             $manifest = self::loadForWrite();
             if ($manifest === null || !self::checkSchemaVersion($manifest)) {
@@ -1045,7 +1099,7 @@ class LayerManifestService {
                 return true;
             }
             if (!isset($manifest['entities'][$entity])) {
-                $entry = self::entityFromDisk($dirs[$type], $type, $id);
+                $entry = $prepared ?? self::entityFromDisk($dirs[$type], $type, $id);
                 if ($entry === null) {
                     return false;
                 }

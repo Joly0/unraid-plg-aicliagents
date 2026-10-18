@@ -81,10 +81,11 @@ class StorageMigrationService {
             LogService::log("Wipe refused: invalid storage type or id.", LogService::LOG_WARN, "StorageMigrationService");
             return false;
         }
-        $config = ConfigService::getConfig();
+        // R-046 (#624): the one resolver, so the wipe measures and clears the folder
+        // the shell scripts use when a path is blank in the config.
         $persistPath = ($type === 'home')
-            ? ($config['home_storage_path']  ?? "/boot/config/plugins/unraid-aicliagents")
-            : ($config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents");
+            ? StoragePathResolver::homePersistPath('')
+            : StoragePathResolver::agentPersistPath();
 
         $flashOld = 0;
         foreach (self::entityLayerFiles($persistPath, $type, $id) as $f) $flashOld += (int)@filesize($f);
@@ -251,8 +252,7 @@ class StorageMigrationService {
             LogService::log("Refusing home migration: target storage is not mounted: $newPath", LogService::LOG_WARN, "StorageMigrationService");
             return false;
         }
-        $config = ConfigService::getConfig();
-        $oldPath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $oldPath = StoragePathResolver::homePersistPath('');
         if ($newPath === $oldPath) return true;
 
         LogService::log("Migrating home persistence from $oldPath to $newPath...", LogService::LOG_INFO, "StorageMigrationService");

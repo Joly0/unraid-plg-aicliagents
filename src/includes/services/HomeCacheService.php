@@ -187,9 +187,8 @@ class HomeCacheService
     {
         $base = getenv('AICLI_PERSIST_PATH');
         if ($base === false || $base === '') {
-            $cfg = ConfigService::getConfig();
-            $base = (string)($cfg['home_storage_path'] ?? '');
-            if ($base === '') $base = '/boot/config/plugins/unraid-aicliagents/persistence';
+            // R-046 (#624): the one resolver, with the same fall-through as the shell.
+            $base = StoragePathResolver::homePersistPath($user);
         }
         return rtrim($base, '/') . '/passthrough/homes/' . $user;
     }

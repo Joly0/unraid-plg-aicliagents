@@ -121,7 +121,8 @@ final class UpperPlacementService
                         . (int)floor(self::ZRAM_MAX_SHARE * 100) . ' % of the device). Save and merge the homes first, or keep the disk layer.'];
                 }
             } else {
-                $persist = (string)($config['home_storage_path'] ?? '');
+                // R-046 (#624): the one resolver (blank home path falls through like the shell).
+                $persist = StoragePathResolver::homePersistPathFromConfig($config);
                 $freeMb = (int)($seams['free_mb'] ?? (int)floor((float)@disk_free_space($persist) / 1048576));
                 if ($freeMb < $totalMb + 512) {
                     return ['status' => 'error', 'message' => "The persistence drive has $freeMb MB free and the move needs about " . ($totalMb + 512) . ' MB (the layers plus a margin). Free some space first.'];

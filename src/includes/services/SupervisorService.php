@@ -1099,6 +1099,47 @@ class SupervisorService {
         }
     }
 
+    /**
+     * R-048 (#626): path of the per-job lock file. It sits in the tray folder next to
+     * the entry (the folder the tests redirect with AICLI_ACTIVITY_DIR). The tray
+     * folder only lists *.json files, so a .lock file is never taken for an entry.
+     */
+    public static function jobSyncLockPath(string $opId): string {
+        $env = getenv('AICLI_ACTIVITY_DIR');
+        $dir = ($env !== false && $env !== '') ? $env : ActivityService::DIR;
+        return $dir . '/' . preg_replace('/[^A-Za-z0-9_.-]/', '_', $opId) . '.sync.lock';
+    }
+
+    /**
+     * Take the per-job lock without blocking (LOCK_NB in a short poll with a deadline).
+     * Null when another poll holds it: that poll is finishing the job, so this one skips it.
+     *
+     * @return resource|null
+     */
+    private static function takeJobSyncLock(string $opId) {
+        $path = self::jobSyncLockPath($opId);
+        if (!is_dir(dirname($path))) @mkdir(dirname($path), 0755, true);
+        $fh = @fopen($path, 'c');
+        if ($fh === false) {
+            return null;
+        }
+        $deadline = microtime(true) + 0.5;
+        while (!@flock($fh, LOCK_EX | LOCK_NB)) {
+            if (microtime(true) >= $deadline) {
+                @fclose($fh);
+                return null;
+            }
+            usleep(10000);
+        }
+        return $fh;
+    }
+
+    /** @param resource $fh */
+    private static function releaseJobSyncLock($fh): void {
+        @flock($fh, LOCK_UN);
+        @fclose($fh);
+    }
+
     public static function syncJobActivities(): void {
         require_once __DIR__ . '/ActivityService.php';
         foreach (self::listJobs(false) as $job) {
@@ -1113,6 +1154,28 @@ class SupervisorService {
             }
             $state = (string)($job['state'] ?? '');
             $defer = isset($job['defer_reason']) && $job['defer_reason'] !== null ? (string)$job['defer_reason'] : '';
+            // R-048 (#626): finishing a job reads its result file and deletes it. Two
+            // polls (two browser tabs) that both read the entry as unfinished must not
+            // both finish it: the second one has no result file left and would
+            // overwrite "Moved 140 files (3.0 GB)" with an empty or generic line. The
+            // read of the entry, the step text and the write are ONE step under a
+            // per-job lock; the entry is read again once the lock is held.
+            $jobLock = null;
+            if ($state === 'done' || $state === 'failed') {
+                if (($entry['status'] ?? '') === $state) {
+                    continue;
+                }
+                $jobLock = self::takeJobSyncLock($opId);
+                if ($jobLock === null) {
+                    continue; // another poll is finishing this job now
+                }
+                $entry = ActivityService::get($opId);
+                if ($entry === null || ($entry['status'] ?? '') === $state) {
+                    self::releaseJobSyncLock($jobLock);
+                    continue; // the other poll already finished it
+                }
+            }
+            try {
             switch ($state) {
                 case 'done':
                     if (($entry['status'] ?? '') !== 'done') {
@@ -1292,6 +1355,11 @@ class SupervisorService {
                         ActivityService::heartbeat($opId);
                     }
                     break;
+            }
+            } finally {
+                if ($jobLock !== null) {
+                    self::releaseJobSyncLock($jobLock);
+                }
             }
         }
 

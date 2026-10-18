@@ -1248,19 +1248,11 @@ class StorageMountService {
             LogService::log("Successfully consolidated storage layers for $id. Footprint changed from $oldSizeMB MB to $newSizeMB MB on Flash.", LogService::LOG_INFO, "StorageMountService");
             LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'consolidate_ok', ['type' => $type, 'id' => $id, 'old_mb' => $oldSizeMB, 'new_mb' => $newSizeMB]);
 
-            // Phase 1: Replace manifest entries with the single consolidated layer
-            if (!empty($sqshAfter)) {
-                $consolidated = $sqshAfter[0];
-                $sha256 = LayerManifestService::computeFileSha256($consolidated);
-                $newLayer = [
-                    'filename'   => basename($consolidated),
-                    'sha256'     => $sha256 ?? '',
-                    'bytes'      => (int)filesize($consolidated),
-                    'kind'       => 'consolidated',
-                    'created_at' => date('Y-m-d\TH:i:s\Z'),
-                ];
-                LayerManifestService::replaceLayers("$type/$id", [$newLayer], $persistPath);
-            }
+            // R-047 (#625): storagectl already replaced the manifest entries with the
+            // consolidated layer, under the manifest lock (manifest_replace_layers in
+            // storage_ops.sh). PHP does not write the manifest a second time: the old
+            // block took the first glob match, which is the wrong file when a second
+            // layer exists.
         } elseif ($res === 2) {
             $deferred = true;
             LogService::log("Consolidation deferred for $type $id (overlay busy) — supervisor will retry.", LogService::LOG_WARN, "StorageMountService");

@@ -405,12 +405,16 @@ class BootIntegrityService {
      *
      * @return array<int, array{entity: string, state: string, evidence: array<string, mixed>}>
      */
-    /** Folder for throwaway test data. An entry that lives only here is never real user data. */
-    public const TEMP_ROOT = '/mnt/cache/appdata/_tmp/';
+    /**
+     * Folder for throwaway test data: /mnt/<pool>/appdata/_tmp/ on any pool (cache, datapool,
+     * a named pool) or on the user share. An entry that lives only here is never real user data.
+     * R-049 (#627): the old fixed /mnt/cache spelling missed the test server, where appdata is on datapool.
+     */
+    public const TEMP_ROOT_PATTERN = '#^/mnt/[A-Za-z0-9_.-]+/appdata/_tmp/#';
 
     /**
      * BOOT_INTEGRITY_STALE_TEMP_ENTITY.md (#462): true when a manifest entry records only paths under
-     * TEMP_ROOT and none of those folders exists any more. Pure: `$dirExists` is the test seam.
+     * TEMP_ROOT_PATTERN and none of those folders exists any more. Pure: `$dirExists` is the test seam.
      *
      * @param array<string,mixed>|null $manifestEntry
      */
@@ -427,7 +431,7 @@ class BootIntegrityService {
         }
         if ($paths === []) return false;
         foreach ($paths as $p) {
-            if (strpos($p, self::TEMP_ROOT) !== 0 || strpos($p, '..') !== false) return false;
+            if (preg_match(self::TEMP_ROOT_PATTERN, $p) !== 1 || strpos($p, '..') !== false) return false;
             if ($dirExists($p)) return false;
         }
         return true;
@@ -1057,25 +1061,7 @@ class BootIntegrityService {
      * written has no valid bytes_used yet.
      */
     private static function looksLikeCompleteSquashfs(string $path): bool {
-        if (!is_file($path) || is_link($path)) {
-            return false;
-        }
-        $size = (int)@filesize($path);
-        if ($size < 96) {
-            return false;
-        }
-        $fh = @fopen($path, 'rb');
-        if ($fh === false) {
-            return false;
-        }
-        $head = @fread($fh, 48);
-        @fclose($fh);
-        if (!is_string($head) || strlen($head) < 48 || substr($head, 0, 4) !== 'hsqs') {
-            return false;
-        }
-        $u = @unpack('Pused', substr($head, 40, 8));
-        $used = is_array($u) ? (int)$u['used'] : 0;
-        return $used > 0 && $used <= $size;
+        return LayerManifestService::looksLikeCompleteSquashfs($path);
     }
 
     private static function logRecoveredKept(string $entity, string $name, string $reason): void {

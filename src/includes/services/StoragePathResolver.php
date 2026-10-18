@@ -52,11 +52,27 @@ class StoragePathResolver {
     public static function homePersistPath($user): string {
         // $user accepted for API symmetry; path is currently plugin-wide, not per-user.
         // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
-        $config = ConfigService::getConfig();
-        $path   = $config['home_storage_path']
-               ?? $config['agent_storage_path']
-               ?? '';
-        if (empty(trim($path))) {
+        return self::homePersistPathFromConfig(ConfigService::getConfig());
+    }
+
+    /**
+     * The home persist path for a given config array (pure; the same rule as homePersistPath).
+     * R-046 (#624): same order as home_persist_path() in resolve_paths.sh. A blank
+     * value falls through to the next one; `??` only skips a missing key, so a blank
+     * home_storage_path used to pick the flash path while the shell used the agent path.
+     *
+     * @param array<string,mixed> $config
+     */
+    public static function homePersistPathFromConfig(array $config): string {
+        $path = '';
+        foreach (['home_storage_path', 'agent_storage_path'] as $key) {
+            $candidate = trim((string)($config[$key] ?? ''));
+            if ($candidate !== '') {
+                $path = $candidate;
+                break;
+            }
+        }
+        if ($path === '') {
             $path = self::PLUGIN_BASE . '/persistence';
         }
         return self::normalize($path);

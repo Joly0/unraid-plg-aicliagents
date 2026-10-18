@@ -86,6 +86,58 @@ class HomeBackupSettingsService {
         }
     }
 
+    /** How long set() waits for the per-home lock, in seconds. */
+    private static float $lockWaitSeconds = 3.0;
+
+    /** For tests only: shorten the lock wait. */
+    public static function setLockWaitForTests(float $seconds): void {
+        self::$lockWaitSeconds = $seconds;
+    }
+
+    /**
+     * R-050 (#628): path of the per-home lock file. It sits in /var/run (RAM), never on
+     * the flash. AICLI_BACKUP_SETTINGS_LOCK_DIR overrides the folder for tests.
+     */
+    public static function lockPathFor(string $user): string {
+        $env = getenv('AICLI_BACKUP_SETTINGS_LOCK_DIR');
+        $dir = ($env !== false && $env !== '') ? rtrim($env, '/') : '/var/run';
+        return $dir . '/aicli-backup-settings-' . $user . '.lock';
+    }
+
+    /**
+     * Take the lock with LOCK_EX|LOCK_NB in a short poll with a deadline (never a blocking
+     * flock). Null when it could not be taken in time.
+     *
+     * @return resource|null
+     */
+    private static function takeLock(string $user) {
+        $path = self::lockPathFor($user);
+        if (!is_dir(dirname($path))) @mkdir(dirname($path), 0755, true);
+        $fh = @fopen($path, 'c');
+        if ($fh === false) {
+            // No lock file possible (for example /var/run missing at boot): save without
+            // the lock, as the manifest writer does. The write itself stays atomic.
+            return false;
+        }
+        $deadline = microtime(true) + self::$lockWaitSeconds;
+        while (!@flock($fh, LOCK_EX | LOCK_NB)) {
+            if (microtime(true) >= $deadline) {
+                @fclose($fh);
+                return null;
+            }
+            usleep(10000);
+        }
+        return $fh;
+    }
+
+    /** @param resource|false $fh */
+    private static function releaseLock($fh): void {
+        if (is_resource($fh)) {
+            @flock($fh, LOCK_UN);
+            @fclose($fh);
+        }
+    }
+
     /** For tests only: replace the target resolver (null restores the real one). */
     public static function setTargetResolverForTests(?callable $resolver): void {
         self::$targetResolver = $resolver;
@@ -158,15 +210,28 @@ class HomeBackupSettingsService {
         if (!$checked['ok']) {
             return ['status' => 'error', 'key' => $key, 'message' => $checked['message']];
         }
-        $current = self::get($user);
-        $current[$key] = $checked['value'];
-        $current['inherited_from_global'] = false;
-        $current['updated_at'] = gmdate('Y-m-d\TH:i:s\Z');
-        if (!self::writeFile($user, $current)) {
-            return ['status' => 'error', 'key' => $key, 'message' => 'The setting could not be written to the flash drive. Nothing was changed.'];
+        // R-050 (#628): the dialog saves each key on change, so two PHP workers can run
+        // set() for one home at once. Each reads the whole file, changes one key and
+        // writes all of it, so the later write would carry the old value of the other
+        // key. The read, the change and the write are ONE step under a per-home lock
+        // (validation above stays outside it: the target check can be slow).
+        $lock = self::takeLock($user);
+        if ($lock === null) {
+            return ['status' => 'error', 'key' => $key, 'message' => 'Another save for this home is still running. Nothing was changed. Try again.'];
         }
-        // Read back: report what is really on disk, never what was asked for.
-        $onDisk = self::readFile($user);
+        try {
+            $current = self::get($user);
+            $current[$key] = $checked['value'];
+            $current['inherited_from_global'] = false;
+            $current['updated_at'] = gmdate('Y-m-d\TH:i:s\Z');
+            if (!self::writeFile($user, $current)) {
+                return ['status' => 'error', 'key' => $key, 'message' => 'The setting could not be written to the flash drive. Nothing was changed.'];
+            }
+            // Read back: report what is really on disk, never what was asked for.
+            $onDisk = self::readFile($user);
+        } finally {
+            self::releaseLock($lock);
+        }
         if ($onDisk === null) {
             return ['status' => 'error', 'key' => $key, 'message' => 'The setting was written but could not be read back.'];
         }
