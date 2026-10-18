@@ -355,7 +355,8 @@ final class EventLedger {
                     $agentId = (string)($payload['agentId'] ?? 'an agent');
                     $where = (string)($payload['name'] ?? $payload['workspaceId'] ?? '');
                     $excerpt = (string)($payload['excerpt'] ?? '');
-                    return trim("$agentId spoke" . ($where !== '' ? " in $where" : '') . ($excerpt !== '' ? ": $excerpt" : ''));
+                    $by = (string)($payload['spokenByName'] ?? '') ?: (string)($payload['spokenBy'] ?? '');
+                    return trim("$agentId spoke" . ($where !== '' ? " in $where" : '') . ($by !== '' ? " (said by $by)" : '') . ($excerpt !== '' ? ": $excerpt" : ''));
                 default:
                     return $kind;
             }

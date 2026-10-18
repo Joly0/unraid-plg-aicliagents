@@ -159,6 +159,9 @@ class VoiceService {
     /** Test seam: callable(string $url, array $headers, string $jsonBody): array{errno,error,status,body}. Real curl when null. */
     public static $transport = null;
 
+    /** Test seam: callable(string $text): string replacing the redaction pass in excerpt(). Null uses RedactionService. */
+    public static $redactor = null;
+
     /** Test seam: callable(): int returning "now" (epoch seconds). Null uses time(). */
     public static $now = null;
 
@@ -468,6 +471,10 @@ class VoiceService {
             $workspaceId = (string)($actorContext['workspaceId'] ?? '');
             $agentId     = (string)($actorContext['agentId'] ?? '');
             $name        = (string)($actorContext['name'] ?? '');
+            // #664 R-142: when an agent speaks for ANOTHER workspace, AdminService::speak()
+            // passes who really spoke. The ledger and the voice mail keep both names.
+            $spokenBy     = (string)($actorContext['spokenBy']['workspaceId'] ?? '');
+            $spokenByName = (string)($actorContext['spokenBy']['name'] ?? '');
             // VOICE_MAIL.md R14 (Forgejo #376): a fixed intro names the workspace,
             // "<spoken name> says:". The operator's own Test click has none.
             $intro = $bypassSwitches ? ''
@@ -570,7 +577,7 @@ class VoiceService {
                 // Settings switch confirmation, which plays the returned answer
                 // directly and must not also fan it out to every open tab.
                 $publishSpeech = function (bool $fallback = false, string $fallbackMessage = '') use (
-                    $text, $voiceId, $workspaceId, $agentId, $name, $chars, $excerpt,
+                    $text, $voiceId, $workspaceId, $agentId, $name, $chars, $excerpt, $spokenBy, $spokenByName,
                     $actorContext, $bypassSwitches, $lastFile, $now, $publish, $intro
                 ): array {
                     $voicemailId = $bypassSwitches ? null
@@ -590,6 +597,8 @@ class VoiceService {
                         // above and ignores the rest.
                         'engine'      => 'browser',
                         'excerpt'     => $excerpt,
+                        'spokenBy'     => $spokenBy,
+                        'spokenByName' => $spokenByName,
                     ];
                     if ($fallback) $payload['fallback'] = true;
                     if ($publish) EventBus::publish('voice', [], $payload);
@@ -652,6 +661,8 @@ class VoiceService {
                     'intro'       => $intro,
                     'engine'      => self::hostOf($ttsUrl),
                     'excerpt'     => $excerpt,
+                    'spokenBy'     => $spokenBy,
+                    'spokenByName' => $spokenByName,
                 ];
                 if ($publish) EventBus::publish('voice', [], $payload);
                 @touch($lastFile, $now);
@@ -1558,12 +1569,16 @@ class VoiceService {
      */
     private static function excerpt(string $text): string {
         $safe = $text;
-        if (class_exists('\\AICliAgents\\Services\\RedactionService')) {
+        if (self::$redactor !== null || class_exists('\\AICliAgents\\Services\\RedactionService')) {
             try {
-                $safe = RedactionService::redact($text, RedactionService::loadKnownSecrets());
+                $safe = self::$redactor !== null
+                    ? (string)(self::$redactor)($text)
+                    : RedactionService::redact($text, RedactionService::loadKnownSecrets());
             } catch (\Throwable $e) {
-                // Fall back to the untruncated original — a broken redaction
-                // pass must not block the excerpt entirely.
+                // Fail closed (#664 R-147): the original may hold a secret the
+                // agent read aloud, and it would reach the ledger and the tray.
+                // AdminService::sendInputExcerpt() does the same.
+                return '';
             }
         }
         return function_exists('mb_substr') ? mb_substr($safe, 0, self::EXCERPT_CHARS) : substr($safe, 0, self::EXCERPT_CHARS);

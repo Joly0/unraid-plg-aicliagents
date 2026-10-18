@@ -286,6 +286,9 @@ final class VoiceMailService {
             'workspaceId' => $workspaceId,
             'agentId'     => (string)($actor['agentId'] ?? ''),
             'name'        => (string)($actor['name'] ?? ''),
+            // #664 R-142: set only when an agent spoke for a DIFFERENT workspace.
+            'spokenBy'     => (string)($actor['spokenBy']['workspaceId'] ?? ''),
+            'spokenByName' => (string)($actor['spokenBy']['name'] ?? ''),
             'text'        => $text,
             'mode'        => $mode,
             'voice'       => $voice,

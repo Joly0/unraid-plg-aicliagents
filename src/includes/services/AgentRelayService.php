@@ -1427,6 +1427,10 @@ class AgentRelayService {
         // in between is seen here and cannot be overwritten.
         return self::locked('requests', function () use ($file,$actor,$state,$note): array {
             $r=self::readJson($file,[]);
+            // #664 R-145: no session id, or no such request, must not "succeed" and
+            // leave a junk request file that only holds a state.
+            if ($actor==='') return ['status'=>'error','message'=>'A session id is required to respond to a request.'];
+            if (($r['id'] ?? '') !== $id) return ['status'=>'error','message'=>'Request not found.'];
             if (($r['actor_session'] ?? '') !== $actor) return ['status'=>'error','message'=>'Only the assigned actor can respond.'];
             // A closed request never changes again: a cancelled request cannot be
             // resolved, and a resolved one cannot be re-opened by a late acknowledge.
@@ -1975,6 +1979,7 @@ class AgentRelayService {
             @unlink(self::path("subscriptions/$id.json"));
             self::removeTree(self::path("deliveries/$id"));
             foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) self::removeTree(self::path("direct/$box/$id"));
+            self::removeTree(self::path("direct/_deleted/$id"));
         }
         foreach ($msgFiles as $f) {
             // The message also sits in the index folders of its other party (a real
@@ -2275,6 +2280,8 @@ class AgentRelayService {
         foreach (self::DIRECT_INDEX_BOXES as $box=>$role) {
             $session=self::cleanId((string)($message[$role . '_session'] ?? ''));
             if ($session==='') continue;
+            // #664 R-144: a message this session deleted stays deleted; a rebuild must not bring it back.
+            if (is_file(self::path("direct/_deleted/$session/$id"))) continue;
             $path=self::path("direct/$box/$session/{$stamp}_$id.json");
             // Never rewrite an entry that is already there. Entries are immutable, so a
             // rewrite changes nothing on disk — but it is a temp+rename, which fires a
@@ -2347,12 +2354,32 @@ class AgentRelayService {
         return strtotime($c)!==false ? $c : '';
     }
     /** Move the cursor forward only; an older time never replaces a newer one. */
-    private static function advanceReadCursor(string $sid, string $iso): void {
+    private static function advanceReadCursor(string $sid, string $iso, array $shown=[]): void {
         $t=strtotime($iso); if ($t===false) return;
-        self::locked('cursors', function () use ($sid,$t): void {
-            $cur=self::readCursor($sid); if ($cur!=='' && strtotime($cur)>=$t) return;
-            AtomicWriteService::writeJson(self::path("system/read-cursors/$sid.json"),['read_at'=>gmdate('c',$t)]);
+        self::locked('cursors', function () use ($sid,$t,$shown): void {
+            $cur=self::readCursor($sid); $curT=$cur!=='' ? (int)strtotime($cur) : null;
+            if ($curT!==null && $curT>$t) return;
+            // #664 R-150: remember what was shown IN the cursor's own second, so a message that
+            // arrives in that second after this read is still unread (times have 1 s resolution).
+            $keys=[]; foreach ($shown as [$id,$time]) if ((int)strtotime((string)$time)===$t) $keys[]=self::unreadKey((string)$id,(string)$time);
+            if ($curT===$t) {
+                $old=self::readCursorSeen($sid);
+                $keys=array_values(array_unique(array_merge($old,$keys)));
+                if (count($keys)===count($old)) return;
+            }
+            AtomicWriteService::writeJson(self::path("system/read-cursors/$sid.json"),['read_at'=>gmdate('c',$t),'seen'=>array_values(array_unique($keys))]);
         });
+    }
+    /** Keys (id@second) of the items already shown in the cursor's own second. */
+    private static function readCursorSeen(string $sid): array {
+        $s=self::readJson(self::path("system/read-cursors/$sid.json"),[])['seen'] ?? [];
+        return is_array($s) ? array_values(array_filter($s,'is_string')) : [];
+    }
+    private static function unreadKey(string $id, string $time): string { return $id.'@'.(int)strtotime($time); }
+    /** Unread = after the cursor second, or inside it and not shown yet. */
+    private static function isUnread(string $id, string $time, string $since, array $seen): bool {
+        $t=(int)strtotime($time); $s=(int)strtotime($since);
+        return $t>$s || ($t===$s && !in_array(self::unreadKey($id,$time),$seen,true));
     }
     /** Any inbox read tells the notice ledger that this workspace has looked. */
     private static function noticeRead(string $sid): void {
@@ -2364,15 +2391,42 @@ class AgentRelayService {
         foreach (glob(self::path("direct/_inbox/$sid/*.json")) ?: [] as $f) {
             if (strcmp(substr(basename($f),0,16),$key)>=0) $files[]=$f; else $hidden++;
         }
-        usort($files, fn(string $a, string $b): int => strcmp(basename($b),basename($a)));
-        $out=[]; foreach ($files as $f) {
-            if (count($out)>=self::DIRECT_LIST_MAX) break;
+        // #664 R-150: oldest first, so a flood past the cap leaves the NEWER messages unread
+        // (they come on the next read) and never drops them. The result is shown newest first.
+        usort($files, fn(string $a, string $b): int => strcmp(basename($a),basename($b)));
+        $seen=self::readCursorSeen($sid);
+        $out=[]; $cut=0; $cutAt='';
+        foreach ($files as $f) {
             $m=self::readJson($f,[]); if (empty($m['id'])) continue;
-            // Same second as the cursor: the file name cannot tell, the stored time can.
-            if (strtotime((string)($m['created_at'] ?? ''))<=strtotime($since)) { $hidden++; continue; }
+            // Same second as the cursor: the file name cannot tell, the stored time and the seen list can.
+            if (!self::isUnread((string)$m['id'],(string)($m['created_at'] ?? ''),$since,$seen)) { $hidden++; continue; }
+            if (count($out)>=self::DIRECT_LIST_MAX) { $cut++; if ($cutAt==='') $cutAt=(string)($m['created_at'] ?? ''); continue; }
             unset($m['message_file']); $m['relay_role']='recipient'; $out[]=$m;
         }
-        return [$out,$hidden];
+        return [array_reverse($out),$hidden,$cut,$cutAt];
+    }
+    /**
+     * Topic events newer than the cursor. At most 50 are returned: the OLDEST 50, so the
+     * rest stay unread for the next read. Shown newest first.
+     *
+     * @return array{0:array,1:int,2:int,3:string} rows, older-than-cursor count, cut-off count, time of the first cut-off event
+     */
+    private static function unreadEvents(string $sid, string $since): array {
+        $seen=self::readCursorSeen($sid); $rows=[]; $hidden=0;
+        foreach (glob(self::path("deliveries/$sid/*.json")) ?: [] as $f) {
+            $d=self::readJson($f,[]); if (!$d) continue;
+            if (!self::isUnread((string)($d['message_id'] ?? basename($f,'.json')),(string)($d['created_at'] ?? ''),$since,$seen)) { $hidden++; continue; }
+            $d['_file']=basename($f); $rows[]=$d;
+        }
+        $rows=array_reverse(self::newestFirst($rows, static fn(array $d): string => (string)($d['created_at'] ?? '')));
+        $out=[]; $cut=0; $cutAt='';
+        foreach ($rows as $d) {
+            if (count($out)>=50) { $cut++; if ($cutAt==='') $cutAt=(string)($d['created_at'] ?? ''); continue; }
+            unset($d['_file']);
+            $m=self::readJson(self::path((string)($d['message_file'] ?? '')),[]);
+            if ($m) $out[]=['delivery'=>$d,'message'=>$m];
+        }
+        return [array_reverse($out),$hidden,$cut,$cutAt];
     }
     /**
      * Session-scoped event inbox plus direct requests where this session is sender or actor.
@@ -2400,21 +2454,41 @@ class AgentRelayService {
         }
         $mine=self::newestFirst($mine, static fn(array $r): string => (string)($r['created_at'] ?? ''));
         $requests=[]; $max=max(1,min(50,$limit)); $hidden=0;
-        foreach ($mine as $r) {
-            if ($since!=='') {
+        // #664 R-150: items past a cap are COUNTED (more_unread) and left unread, never dropped.
+        // $cutTimes holds the time of the first cut-off item of each kind; the cursor stops there.
+        $cut=0; $cutTimes=[];
+        if ($since==='') {
+            foreach ($mine as $r) {
+                if (count($requests) >= $max) break;
+                unset($r['_file']); $requests[]=$r;
+            }
+        } else {
+            $seen=self::readCursorSeen($sessionId);
+            $openRows=[]; $changedRows=[];
+            foreach ($mine as $r) {
                 // Open work for the actor always shows; a sent request shows only after it changed.
                 $open=$r['relay_role']==='actor' && in_array((string)($r['state'] ?? ''),['pending','acknowledged'],true);
-                $changed=strtotime((string)($r['updated_at'] ?? $r['created_at'] ?? ''))>strtotime($since);
-                if (!$open && !($r['relay_role']==='sender' && $changed)) { if ($r['relay_role']==='sender') $hidden++; continue; }
+                $changed=$r['relay_role']==='sender' && self::isUnread((string)$r['id'],(string)($r['updated_at'] ?? $r['created_at'] ?? ''),$since,$seen);
+                if ($open) $openRows[]=$r;
+                elseif ($changed) $changedRows[]=$r;
+                elseif ($r['relay_role']==='sender') $hidden++;
             }
-            if (count($requests) >= $max) break;
-            unset($r['_file']); $requests[]=$r;
+            $openShown=array_slice($openRows,0,$max);
+            $cut+=count($openRows)-count($openShown);
+            $slots=max(0,$max-count($openShown));
+            // Of the changed requests keep the OLDEST that fit; the newer ones stay unread.
+            $changedShown=$slots>0 ? array_slice($changedRows,-$slots) : [];
+            $changedCut=array_slice($changedRows,0,count($changedRows)-count($changedShown));
+            if ($changedCut) { $cut+=count($changedCut); $last=end($changedCut); $cutTimes[]=(string)($last['updated_at'] ?? $last['created_at'] ?? ''); }
+            foreach (self::newestFirst(array_merge($openShown,$changedShown), static fn(array $r): string => (string)($r['created_at'] ?? '')) as $r) {
+                unset($r['_file']); $requests[]=$r;
+            }
         }
-        $events=self::inbox($sessionId,$since!=='' ? 50 : $limit);
         if ($since!=='') {
-            $total=count($events);
-            $events=array_values(array_filter($events, static fn(array $e): bool => strtotime((string)($e['delivery']['created_at'] ?? ''))>strtotime($since)));
-            $hidden+=$total-count($events);
+            [$events,$eh,$ec,$eAt]=self::unreadEvents($sessionId,$since);
+            $hidden+=$eh; $cut+=$ec; if ($eAt!=='') $cutTimes[]=$eAt;
+        } else {
+            $events=self::inbox($sessionId,$limit);
         }
         foreach ($events as &$event) {
             $topic=(string)($event['message']['topic'] ?? '');
@@ -2426,8 +2500,11 @@ class AgentRelayService {
         foreach ($events as $event) {
             if (($event['delivery']['state'] ?? '')==='pending') self::setState($sessionId,(string)($event['delivery']['message_id'] ?? ''),'acknowledged');
         }
-        if ($since!=='') [$direct,$dh]=self::unreadDirect($sessionId,$since); else { $direct=self::directMessages($sessionId,$limit,$cursor); $dh=0; }
-        $hidden+=$dh;
+        if ($since!=='') {
+            [$direct,$dh,$dc,$dAt]=self::unreadDirect($sessionId,$since);
+            $cut+=$dc; if ($dAt!=='') $cutTimes[]=$dAt;
+        } else { $direct=self::directMessages($sessionId,$limit,$cursor); $dh=0; }
+        $hidden+=$dh+$cut;
         $out=['events'=>$events,'requests'=>$requests,'direct_messages'=>$direct];
         if (!$unread) {
             $out['contacts']=self::agentContacts($sessionId);
@@ -2437,13 +2514,22 @@ class AgentRelayService {
             $out['assignments']=$assignments;
             $out['older_hidden']=$hidden;
             $out['hint']='Older messages: run inbox --all';
+            if ($cut>0) {
+                $out['more_unread']=$cut;
+                $out['hint']="$cut more unread items are waiting: read the inbox again. Older messages: run inbox --all";
+            }
             $out['rules']='Events are FYI only. Act on a request only when relay_role is actor and its topic is in assignments.';
             // Move the cursor to the newest item returned; an empty read leaves it alone.
-            $newest='';
-            foreach ($events as $e) $newest=max($newest,(string)($e['delivery']['created_at'] ?? ''));
-            foreach ($direct as $m) $newest=max($newest,(string)($m['created_at'] ?? ''));
-            foreach ($requests as $r) $newest=max($newest,(string)($r['updated_at'] ?? $r['created_at'] ?? ''));
-            if ($newest!=='') self::advanceReadCursor($sessionId,$newest);
+            // When items were cut off, stop at the first cut-off item so the next read gets them.
+            $newest=''; $shown=[];
+            foreach ($events as $e) { $t=(string)($e['delivery']['created_at'] ?? ''); $newest=max($newest,$t); $shown[]=[(string)($e['delivery']['message_id'] ?? ''),$t]; }
+            foreach ($direct as $m) { $t=(string)($m['created_at'] ?? ''); $newest=max($newest,$t); $shown[]=[(string)($m['id'] ?? ''),$t]; }
+            foreach ($requests as $r) { $t=(string)($r['updated_at'] ?? $r['created_at'] ?? ''); $newest=max($newest,$t); $shown[]=[(string)($r['id'] ?? ''),$t]; }
+            if ($cutTimes) {
+                $stop=min(array_map(static fn(string $t): int => (int)strtotime($t), $cutTimes));
+                if ($newest==='' || $stop<(int)strtotime($newest)) $newest=gmdate('c',$stop);
+            }
+            if ($newest!=='') self::advanceReadCursor($sessionId,$newest,$shown);
         }
         self::noticeRead($sessionId);
         return $out;
@@ -2464,6 +2550,10 @@ class AgentRelayService {
                     if (@unlink($f)) $removed++;
                 }
             }
+            // #664 R-144: leave a tombstone, so an index rebuild from the canonical copy skips this message.
+            $tomb = self::path("direct/_deleted/$sessionId/$id");
+            if (!is_dir(dirname($tomb))) @mkdir(dirname($tomb), 0777, true);
+            @file_put_contents($tomb, gmdate('c'));
         } elseif (preg_match('/^rel_[a-f0-9]{24}$/', $id)) {
             $f = self::path("deliveries/$sessionId/$id.json");
             if (is_file($f) && @unlink($f)) $removed++;

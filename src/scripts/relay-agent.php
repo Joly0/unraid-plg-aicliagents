@@ -60,6 +60,15 @@ $action = $argv[1] ?? 'topics';
 $topic = $argv[2] ?? '';
 $description = $argv[3] ?? '';
 
+// #664 R-145: every action but the session-agnostic maintenance ones acts AS a
+// session. With no AICLI_SESSION_ID it must stop with an error, not write
+// anything under an empty id.
+$relayAgentMaintenance = ['drain-all', 'peer-sync', 'sweep-orphans', 'purge-test-traces', 'http-listener-reconcile'];
+if ($session === '' && !in_array($action, $relayAgentMaintenance, true)) {
+    echo json_encode(['status'=>'error', 'message'=>'AICLI_SESSION_ID is not set, so this shell is not a Relay session. Run this command from an agent workspace.'], JSON_UNESCAPED_SLASHES) . PHP_EOL;
+    exit(1);
+}
+
 switch ($action) {
     case 'topics':        $result = ['status'=>'ok', 'topics'=>AgentRelayService::agentTopics($session)]; break;
     case 'subscriptions': $result = ['status'=>'ok', 'relay'=>AgentRelayService::subscriptions($session)]; break;

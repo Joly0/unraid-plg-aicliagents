@@ -225,7 +225,7 @@ final class FavouritesService {
                 return false;
             }
             return self::save($filtered);
-        });
+        }, false);
     }
 
     /** Sets lastOpenedAt to now. Returns true only when the favourite exists. */
@@ -245,7 +245,7 @@ final class FavouritesService {
                 return false;
             }
             return self::save($favourites);
-        });
+        }, false);
     }
 
     // ------------------------------------------------------------------
@@ -315,9 +315,15 @@ final class FavouritesService {
      * (never Flash) so two concurrent read-modify-write calls (e.g. two
      * PHP-FPM workers racing an upsert) cannot clobber each other. Best
      * effort: if the lock file cannot even be opened, $fn still runs
-     * unlocked rather than failing the whole request.
+     * unlocked rather than failing the whole request. When the lock file opens
+     * but the lock stays held past the retry budget, $fn does NOT run: a write
+     * on a stale read would drop the other writer's row (#664 R-143). The
+     * caller gets $whenBusy instead (an error array by default).
+     *
+     * @param mixed $whenBusy
      */
-    private static function withLock(callable $fn) {
+    private static function withLock(callable $fn, $whenBusy = null) {
+        $whenBusy ??= ['error' => 'Favourites are busy; try again.'];
         $lockPath = self::lockPath();
         $dir = dirname($lockPath);
         if (!is_dir($dir)) @mkdir($dir, 0777, true);
@@ -332,6 +338,10 @@ final class FavouritesService {
                 break;
             }
             usleep(self::LOCK_RETRY_DELAY_US);
+        }
+        if (!$locked) {
+            fclose($handle);
+            return $whenBusy;
         }
         try {
             return $fn();

@@ -542,6 +542,14 @@ class NotebookService {
                     'createdAt' => $now, 'updatedAt' => $now, 'pinned' => !empty($p['pinned']),
                 ];
                 if (!empty($p['needsYou'])) $meta['needsYou'] = true;
+                // #664 R-149: the vault is written before the card file. Every refusal after a
+                // vault write clears what was written, so no orphan secret is left for a card
+                // that does not exist.
+                $vaulted = [];
+                $fail = function (array $err) use (&$vaulted, $ctx, $id): array {
+                    foreach ($vaulted as $field) self::vaultClear($ctx, $id, $field);
+                    return $err;
+                };
                 // Keep extra meta keys a caller supplied, except the ones this writer owns.
                 foreach ($extras as $k => $v) {
                     if (in_array($k, ['id', 'type', 'title', 'tags', 'owner', 'createdAt', 'updatedAt', 'pinned', 'needsYou', 'secrets', 'editedBy'], true)) continue;
@@ -562,9 +570,10 @@ class NotebookService {
                         if ($ctx['scope'] === 'global') return ['error' => 'A global card cannot hold a secret. Use a project notebook.'];
                         $refs = [];
                         foreach ($p['secrets'] as $field => $value) {
-                            if (!in_array($field, NotebookFormat::SECRET_FIELDS, true)) return ['error' => "'$field' is not a secret field. Use password, token or apiKey."];
+                            if (!in_array($field, NotebookFormat::SECRET_FIELDS, true)) return $fail(['error' => "'$field' is not a secret field. Use password, token or apiKey."]);
                             if (!is_string($value) || $value === '') continue;
-                            if ($e = self::vaultSet($ctx, $id, (string)$field, $value)) return ['error' => $e];
+                            if ($e = self::vaultSet($ctx, $id, (string)$field, $value)) return $fail(['error' => $e]);
+                            $vaulted[] = (string)$field;
                             $refs[$field] = self::vaultRef($ctx, $id, (string)$field);
                         }
                         if ($refs) $meta['secrets'] = $refs;
@@ -580,11 +589,11 @@ class NotebookService {
                     $baseSlug = NotebookFormat::slug($meta['title']);
                 }
                 $raw = NotebookFormat::build($meta, $body, $ext, $prefix);
-                if (strlen($raw) > self::MAX_FILE_BYTES) return ['error' => 'This artefact is larger than ' . self::limitLabel() . ', which is the limit.'];
-                if (!$confirm && ($hit = NotebookSecretGuard::scan($raw)) !== null) return self::secretRefusal($hit);
+                if (strlen($raw) > self::MAX_FILE_BYTES) return $fail(['error' => 'This artefact is larger than ' . self::limitLabel() . ', which is the limit.']);
+                if (!$confirm && ($hit = NotebookSecretGuard::scan($raw)) !== null) return $fail(self::secretRefusal($hit));
                 $name = self::uniqueName($ctx, $baseSlug, $ext, $id);
                 $abs = $ctx['root'] . '/' . $area . '/' . $name;
-                if (!AtomicWriteService::write($abs, $raw)) return ['error' => self::writeError($abs)];
+                if (!AtomicWriteService::write($abs, $raw)) return $fail(['error' => self::writeError($abs)]);
                 self::$gitCache = [];
                 return ['id' => $id, 'raw' => $raw];
             });

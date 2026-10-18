@@ -8,6 +8,9 @@
  * The tool table and dispatch live in RelayMcpTools so this adapter and the
  * HTTPS adapter cannot drift apart.
  */
+// STDOUT is the JSON-RPC transport: a PHP warning printed there would corrupt it.
+@ini_set('display_errors', '0');
+
 require_once __DIR__ . '/../includes/AICliAgentsManager.php';
 
 use AICliAgents\Services\RelayMcpTools;
@@ -70,7 +73,25 @@ function relayMcpAskChild(string $script, string $requestLine): ?string {
     if (!is_resource($proc)) return null;
     fwrite($pipes[0], rtrim($requestLine, "\r\n") . "\n");
     fclose($pipes[0]);
-    $out = (string)stream_get_contents($pipes[1]);
+    // #664 R-146: read with a deadline. A child stuck on a slow store must not block this
+    // process (and so the agent's whole transport) for ever; on timeout it is stopped and
+    // this process answers itself.
+    $limit = (float)(getenv('AICLI_RELAY_MCP_CHILD_TIMEOUT') ?: 30);
+    $deadline = microtime(true) + $limit;
+    $out = '';
+    stream_set_blocking($pipes[1], false);
+    while (true) {
+        $left = $deadline - microtime(true);
+        if ($left <= 0) { @proc_terminate($proc, 9); break; }
+        $read = [$pipes[1]]; $write = null; $except = null;
+        $ready = @stream_select($read, $write, $except, 0, (int)min(250000, $left * 1000000));
+        if ($ready === false) break;
+        if ($ready > 0) {
+            $chunk = fread($pipes[1], 65536);
+            if ($chunk !== false && $chunk !== '') $out .= $chunk;
+            elseif (feof($pipes[1])) break;
+        }
+    }
     fclose($pipes[1]);
     proc_close($proc);
     foreach (explode("\n", $out) as $reply) {
@@ -124,7 +145,20 @@ while (true) {
             // No usable reply: answer from this process rather than failing the call.
         }
     }
-    if ($method === 'tools/list') { relayMcpReply($id,['tools'=>RelayMcpTools::definitions()]); if ($relayMcpOneShot) break; continue; }
-    if ($method === 'tools/call') { relayMcpReply($id,RelayMcpTools::toolResult(RelayMcpTools::call((string)($params['name'] ?? ''),is_array($params['arguments'] ?? null)?$params['arguments']:[],$session))); if ($relayMcpOneShot) break; continue; }
+    // #664 R-146: an exception in a tool (a store file of the wrong shape, say) becomes an
+    // error result. It must never end this long-lived process, or every relay_* tool reads
+    // as "failed to connect" for the rest of the session.
+    if ($method === 'tools/list') {
+        try { $tools = RelayMcpTools::definitions(); } catch (\Throwable $e) { $tools = []; }
+        relayMcpReply($id,['tools'=>$tools]); if ($relayMcpOneShot) break; continue;
+    }
+    if ($method === 'tools/call') {
+        try {
+            $result = RelayMcpTools::toolResult(RelayMcpTools::call((string)($params['name'] ?? ''),is_array($params['arguments'] ?? null)?$params['arguments']:[],$session));
+        } catch (\Throwable $e) {
+            $result = ['content'=>[['type'=>'text','text'=>'Relay tool error: ' . $e->getMessage()]],'isError'=>true];
+        }
+        relayMcpReply($id,$result); if ($relayMcpOneShot) break; continue;
+    }
     if ($id !== null) relayMcpError($id,-32601,'Method not found');
 }

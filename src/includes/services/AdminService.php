@@ -1877,6 +1877,14 @@ class AdminService {
                 'agentId'     => $session['agentId'] ?? $caller['agentId'],
                 'name'        => $session['name'] ?? $caller['name'],
             ];
+            // #664 R-142: keep who really spoke when it is not the workspace named.
+            if ($caller['workspaceId'] !== '' && $caller['workspaceId'] !== $actorContext['workspaceId']) {
+                $actorContext['spokenBy'] = [
+                    'workspaceId' => $caller['workspaceId'],
+                    'agentId'     => $caller['agentId'],
+                    'name'        => $caller['name'],
+                ];
+            }
             return VoiceService::speak($text, $actorContext, $voice, false, true, $audition, $speed);
         } catch (\Throwable $e) {
             return self::failure('speak', $e);

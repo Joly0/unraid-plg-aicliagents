@@ -22,6 +22,7 @@ class WorkspaceBundleService
     const BUNDLE_DIR       = '/tmp/unraid-aicliagents/bundles';
     const BUNDLE_MAX_BYTES = 1048576;  // 1 MB
     const MEMBER_MAX_BYTES = 262144;   // 256 KB
+    const MEMBER_MAX_COUNT = 32;       // a bundle holds a handful of known files
     const SCHEMA_VERSION   = 1;
 
     // Known member names (relative paths inside the tar) — allowlist for import.
@@ -208,6 +209,14 @@ class WorkspaceBundleService
                 return ['status' => 'error', 'message' => 'Bundle exceeds 1 MB size cap'];
             }
 
+            // -- 1b. List the members BEFORE extracting (#664 R-148). The 1 MB cap is on the
+            //        compressed file; a gzip bomb inflates to far more, into RAM-backed /tmp.
+            //        The listing reads the stream without writing a byte to disk.
+            $listError = self::checkListedMembers($tarPath);
+            if ($listError !== null) {
+                return ['status' => 'error', 'message' => $listError];
+            }
+
             // -- 2. Extract to a temp dir --
             $extractDir = sys_get_temp_dir() . '/aicli-import-' . getmypid() . '-' . time();
             if (!mkdir($extractDir, 0700, true)) {
@@ -258,6 +267,47 @@ class WorkspaceBundleService
     }
 
     // ---------- Internal ----------
+
+    /**
+     * Read the member list (`tar tzvf`) and refuse the archive when a regular file is
+     * over the member cap or there are too many members. Returns an error message, or
+     * null when the listing is acceptable. Nothing is extracted here.
+     */
+    private static function checkListedMembers(string $tarPath): ?string
+    {
+        $proc = proc_open(['tar', 'tzvf', $tarPath], [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+        if (!is_resource($proc)) {
+            return 'Failed to start tar process for listing';
+        }
+        $error = null;
+        $count = 0;
+        while (($line = fgets($pipes[1])) !== false) {
+            $count++;
+            if ($count > self::MEMBER_MAX_COUNT) {
+                $error = 'Archive has too many members — rejected before extraction';
+                break;
+            }
+            // GNU tar: "-rw-r--r-- user/group  1234 2026-01-01 00:00 name"
+            if (!preg_match('/^(\S)\S*\s+\S+\s+(\d+)\s+\S+\s+\S+\s+(.*)$/', rtrim($line, "\r\n"), $m)) {
+                $error = 'Archive listing could not be read — rejected before extraction';
+                break;
+            }
+            if ($m[1] === '-' && (int)$m[2] > self::MEMBER_MAX_BYTES) {
+                $error = "Archive member '" . $m[3] . "' exceeds 256 KB cap (checked before extraction)";
+                break;
+            }
+        }
+        if ($error !== null) {
+            // Stop tar now: do not let it keep inflating a bomb.
+            @proc_terminate($proc, 9);
+        }
+        fclose($pipes[1]);
+        $rc = proc_close($proc);
+        if ($error === null && $rc !== 0) {
+            return 'Extraction failed: the archive is not a readable tar.gz';
+        }
+        return $error;
+    }
 
     private static function processExtracted(string $extractDir, string $newWorkspacePath, string $agentId, bool $acceptSecrets): array
     {

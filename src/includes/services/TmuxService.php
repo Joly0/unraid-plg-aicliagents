@@ -921,9 +921,14 @@ class TmuxService {
      * fallback can come from the sender's own message (semi-trusted), so strip to
      * printable ASCII (no newlines/control chars that could disturb the paste) and
      * cap the length. The session id is still validated to the strict id charset.
+     * A sender on a linked box ("peer_…") is shown by id only (#664 R-151).
      */
     private static function relaySenderLabel(string $id, string $name): string {
         $id   = preg_match('/^[A-Za-z0-9_-]{1,128}$/', $id) ? $id : 'a peer';
+        // #664 R-151: a sender on a LINKED BOX (id "peer_…") chose its own name on the other
+        // box, so no part of that name reaches the terminal. Only the id is shown. The name of
+        // a workspace on THIS box is the operator's own and is still shown.
+        if (strncmp($id, 'peer_', 5) === 0) return $id;
         $name = preg_replace('/[^\x20-\x7E]/', '', (string)$name);   // printable ASCII only
         $name = trim(preg_replace('/\s+/', ' ', (string)$name));
         if (strlen($name) > 48) $name = rtrim(substr($name, 0, 47)) . '...';

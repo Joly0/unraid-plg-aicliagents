@@ -496,6 +496,10 @@ this skill. Calling one does not delete, upgrade, back up, or restore
 anything. It can only PROPOSE the action. Read this whole section before
 you call any of them for the first time.
 
+This rule is about how the tools work, not about what a process on this server
+could do. Every agent runs as root, so the approval step is a rule of the
+tools, not a lock. Follow it as a rule: never go around it.
+
 `aicli_restore_home` has NO CLI equivalent for you. The CLI's `restore-home`
 action is the OPERATOR'S OWN command — it needs an explicit `--yes` and, once
 given, restores AT ONCE with no approval step at all, exactly like
