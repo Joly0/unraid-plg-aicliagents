@@ -143,10 +143,10 @@ class GitHandler
         $path = (string)($_REQUEST['path'] ?? '');
         $ref  = (string)($_REQUEST['ref'] ?? '');
         if ($path === '' || $ref === '') return ['', '', 'path and ref required'];
-        if ($path[0] === '/' || strpos($path, '..') !== false || !preg_match('#^[A-Za-z0-9._/ -]{1,256}$#', $path)) {
+        if ($path[0] === '/' || strpos($path, '..') !== false || !preg_match('#^[A-Za-z0-9._/ -]{1,256}$#D', $path)) {
             return ['', '', 'invalid path'];
         }
-        if (!preg_match('/^[0-9a-f]{4,40}$/i', $ref) && $ref !== 'HEAD') {
+        if (!preg_match('/^[0-9a-f]{4,40}$/iD', $ref) && $ref !== 'HEAD') {
             return ['', '', 'invalid ref'];
         }
         return [$path, $ref, null];

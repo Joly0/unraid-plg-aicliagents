@@ -143,7 +143,7 @@ class VoiceHandler
         $record = VoiceMailService::resolveWorkspace((string)($m['workspaceId'] ?? ''))['record'];
         $intro = VoiceMailService::introFor(VoiceMailService::spokenNameFor($record, (string)($m['name'] ?? '')));
         $clipId = (string)($m['clipId'] ?? '');
-        if ($clipId !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/', $clipId)
+        if ($clipId !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $clipId)
             && is_file(VoiceService::dir() . '/' . $clipId . '.mp3')) {
             return [
                 'status' => 'ok', 'mode' => 'audio', 'text' => (string)$m['text'], 'intro' => $intro,
@@ -511,7 +511,7 @@ class VoiceHandler
     public static function rawVoiceClip(): void
     {
         $clipId = (string)($_GET['id'] ?? '');
-        if (!preg_match('/^v_[0-9a-f]{16}$/', $clipId)) {
+        if (!preg_match('/^v_[0-9a-f]{16}$/D', $clipId)) {
             http_response_code(404);
             header('Content-Type: application/json');
             echo json_encode(['status' => 'error', 'message' => 'invalid clip id']);
@@ -622,7 +622,7 @@ class VoiceHandler
         if ($hasKey) {
             $key = (string)$_POST['key'];
             $countRaw = (string)($_POST['count'] ?? '1');
-            if (!preg_match('/^\d+$/', $countRaw)) {
+            if (!preg_match('/^\d+$/D', $countRaw)) {
                 return ['status' => 'error', 'message' => 'count must be a whole number.'];
             }
             $count = (int)$countRaw;

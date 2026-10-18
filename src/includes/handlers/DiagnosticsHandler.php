@@ -107,7 +107,7 @@ class DiagnosticsHandler {
     public static function safeBundleName($raw): ?string {
         $raw = (string)$raw;
         if ($raw === '' || basename($raw) !== $raw) return null;
-        if (!preg_match('/^aicli-support-[A-Za-z0-9._-]+\.zip$/', $raw)) return null;
+        if (!preg_match('/^aicli-support-[A-Za-z0-9._-]+\.zip$/D', $raw)) return null;
         if (strpos($raw, '..') !== false) return null;
         return $raw;
     }

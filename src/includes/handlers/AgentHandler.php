@@ -163,7 +163,7 @@ class AgentHandler {
         $seen = [];
         foreach (glob("$dir/install-status-*") ?: [] as $f) {
             $base = basename($f);
-            if (!preg_match('/^install-status-([a-z0-9][a-z0-9-]{0,63})$/', $base, $m)) continue;
+            if (!preg_match('/^install-status-([a-z0-9][a-z0-9-]{0,63})$/D', $base, $m)) continue;
             $status = @json_decode((string)@file_get_contents($f), true);
             if (!is_array($status)) continue;
             // A safely queued upgrade is deliberately not active: terminals
@@ -353,7 +353,7 @@ class AgentHandler {
      * status file, a cfg key or a path. Returns the id, or null when it is not acceptable.
      */
     public static function requireAgentId($raw): ?string {
-        if (!is_string($raw) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/i', $raw)) return null;
+        if (!is_string($raw) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/iD', $raw)) return null;
         return array_key_exists($raw, \AICliAgents\Services\AgentRegistry::getDefaultAgents()) ? $raw : null;
     }
 
@@ -908,7 +908,7 @@ class AgentHandler {
         // hyphens). Blocks "../" traversal, null bytes, and any shell meta
         // that could weaponise the subsequent echo. Semgrep flagged this as
         // an echoed-request XSS/LFI candidate and it was legitimate.
-        if ($agentId !== '' && !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/i', $agentId)) {
+        if ($agentId !== '' && !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/iD', $agentId)) {
             header('Content-Type: application/json');
             echo json_encode(['status' => 'error', 'message' => 'invalid agentId']);
             return;

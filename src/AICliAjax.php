@@ -268,7 +268,7 @@ if (isset($_GET['action'])) {
                 $user = ($type === 'agents') ? 'agents' : getAICliConfig()['user'];
             }
             ob_end_clean();
-            if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/', (string)$user)) {
+            if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', (string)$user)) {
                 header('Content-Type: application/json');
                 echo json_encode(['progress' => 0, 'step' => 'invalid user']);
             } else {

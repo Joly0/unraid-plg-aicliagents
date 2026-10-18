@@ -208,7 +208,7 @@ class NotebookHandler
         $start = 0;
         $end = $size - 1;
         $partial = false;
-        if ($size > 0 && isset($_SERVER['HTTP_RANGE']) && preg_match('/^bytes=(\d*)-(\d*)$/', trim((string)$_SERVER['HTTP_RANGE']), $m) && ($m[1] !== '' || $m[2] !== '')) {
+        if ($size > 0 && isset($_SERVER['HTTP_RANGE']) && preg_match('/^bytes=(\d*)-(\d*)$/D', trim((string)$_SERVER['HTTP_RANGE']), $m) && ($m[1] !== '' || $m[2] !== '')) {
             if ($m[1] === '') { $start = max(0, $size - (int)$m[2]); }
             else { $start = (int)$m[1]; if ($m[2] !== '') $end = min($end, (int)$m[2]); }
             if ($start > $end || $start >= $size) {

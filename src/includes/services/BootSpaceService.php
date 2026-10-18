@@ -707,7 +707,7 @@ class BootSpaceService
      */
     public static function removeLeftover(string $key, array $seams = []): array
     {
-        if (preg_match('/^(graduated|retired|homelayers|testhome):[A-Za-z0-9._-]{1,128}$/', $key) !== 1) {
+        if (preg_match('/^(graduated|retired|homelayers|testhome):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
             return ['status' => 'error', 'message' => 'This item is not valid.'];
         }
         $data = $seams['data'] ?? self::read();
@@ -768,6 +768,12 @@ class BootSpaceService
         }
         $real = realpath($path);
         $realRoot = realpath($persist);
+        if ($real === false && is_link($path)) {
+            // A dangling link: its target is gone, so realpath() cannot resolve the link. The link
+            // itself is the item, so check the folder that holds the link instead.
+            $parent = realpath(dirname($path));
+            $real = $parent === false ? false : $parent . '/' . basename($path);
+        }
         if ($real === false || $realRoot === false || !self::isInside($real, $realRoot) || $real === $realRoot) {
             return ['status' => 'error', 'message' => 'The item lies outside the persistence folder, so it was not removed.'];
         }
@@ -780,7 +786,7 @@ class BootSpaceService
         $freed = $listedBytes;
         $out = []; $rc = 0;
         @exec('rm -rf -- ' . escapeshellarg($path) . ' 2>&1', $out, $rc);
-        if (file_exists($path)) {
+        if (file_exists($path) || is_link($path)) {
             return ['status' => 'error', 'message' => 'The item could not be removed completely.'];
         }
         self::logRemoved($key, $freed);

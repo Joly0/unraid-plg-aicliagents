@@ -280,7 +280,14 @@ class InitService {
                     }
                     @unlink($pidFile);
                 }
-                foreach (glob("$runDir/aicliterm-*.sock") as $sock) @unlink($sock);
+                // #682: a terminal socket belongs to its session. Keep the socket of a session whose
+                // process is still alive, or the live terminal loses its socket.
+                foreach (glob("$runDir/aicliterm-*.sock") as $sock) {
+                    $sockId = substr(basename($sock), strlen('aicliterm-'), -strlen('.sock'));
+                    $sessionPid = (int)@file_get_contents("$runDir/unraid-aicliagents-$sockId.pid");
+                    if ($sessionPid > 0 && UtilityService::isPidRunning($sessionPid)) continue;
+                    @unlink($sock);
+                }
 
                 // Remove emergency-installed agents from RAM (real sqsh agents will be mounted on demand)
                 foreach (glob(SecretPaths::stateRoot() . '/.emergency_agent_*') as $flag) {

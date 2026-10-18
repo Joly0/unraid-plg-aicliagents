@@ -96,7 +96,7 @@ class BundleHandler
 
             // Sanitize filename: no path separators, must end in .tar.gz.
             $filename = ValidationService::sanitizeFilename($rawFilename);
-            if (empty($filename) || !preg_match('/\.tar\.gz$/', $filename)) {
+            if (empty($filename) || !preg_match('/\.tar\.gz$/D', $filename)) {
                 return ['status' => 'error', 'message' => 'Invalid bundle filename (must end in .tar.gz)'];
             }
 

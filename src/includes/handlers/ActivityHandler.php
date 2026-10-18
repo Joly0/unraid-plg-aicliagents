@@ -122,7 +122,7 @@ class ActivityHandler
     private static function deliverRelayWaiting(): array
     {
         $opId = (string)($_REQUEST['opId'] ?? '');
-        if (!preg_match('/^relay_waiting__([A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)$/', $opId, $m)) {
+        if (!preg_match('/^relay_waiting__([A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)$/D', $opId, $m)) {
             return ['status' => 'error', 'message' => 'invalid opId'];
         }
         $agentId   = $m[1];
@@ -200,7 +200,7 @@ class ActivityHandler
         // TmuxService::dismissPendingRelay() records the dismissal itself
         // (server-wide: EVERY device stops showing this pill) and re-raises
         // on the next genuinely new arrival.
-        if (preg_match('/^relay_waiting__([A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)$/', $opId, $m)) {
+        if (preg_match('/^relay_waiting__([A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)$/D', $opId, $m)) {
             TmuxService::dismissPendingRelay($m[1], $m[2]);
             return ['status' => 'ok'];
         }

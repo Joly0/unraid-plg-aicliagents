@@ -101,7 +101,7 @@ class UtilityHandler {
         $agent = $_REQUEST['agent'] ?? 'unknown';
         $session = $_REQUEST['session'] ?? 'unknown';
         // Allowlist: only known browser-side stage names accepted
-        if (!preg_match('/^browser\.[a-z0-9._-]{1,40}$/', $stage)) {
+        if (!preg_match('/^browser\.[a-z0-9._-]{1,40}$/D', $stage)) {
             return ['status' => 'error', 'message' => 'invalid stage'];
         }
         // Sanitize agent + session against the same shell-safe pattern used elsewhere
@@ -175,7 +175,7 @@ class UtilityHandler {
         // Quiet hours: HH:MM-HH:MM (may wrap midnight) or empty. A bad value keeps the stored one.
         if (array_key_exists('notebook_quiet_hours', $_POST)) {
             $nbQuiet = trim((string)$_POST['notebook_quiet_hours']);
-            if ($nbQuiet === '' || preg_match('/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/', $nbQuiet) === 1) {
+            if ($nbQuiet === '' || preg_match('/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/D', $nbQuiet) === 1) {
                 $_POST['notebook_quiet_hours'] = $nbQuiet;
             } else {
                 $_POST['notebook_quiet_hours'] = (string)(\AICliAgents\Services\ConfigService::getConfig()['notebook_quiet_hours'] ?? '');
@@ -183,7 +183,7 @@ class UtilityHandler {
         }
         if (array_key_exists('notebook_folder', $_POST)) {
             $nbFolder = is_array($_POST['notebook_folder']) ? '' : trim((string)$_POST['notebook_folder']);
-            $nbOk = preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,39}$/', $nbFolder) === 1 && strtolower($nbFolder) !== 'assets' && strpos($nbFolder, '..') === false;
+            $nbOk = preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,39}$/D', $nbFolder) === 1 && strtolower($nbFolder) !== 'assets' && strpos($nbFolder, '..') === false;
             if ($nbOk) {
                 $_POST['notebook_folder'] = $nbFolder;
             } else {
@@ -245,7 +245,7 @@ class UtilityHandler {
         if ($v === '') return '';
         $v = rtrim($v, '/');
         if ($v === ''
-            || preg_match('#^/[A-Za-z0-9._ /+-]+$#', $v) !== 1
+            || preg_match('#^/[A-Za-z0-9._ /+-]+$#D', $v) !== 1
             || strpos($v, '..') !== false
             || preg_match('#^/(boot|tmp|dev/shm|run|var/run)(/|$)#', $v) === 1) {
             return $stored;
@@ -278,7 +278,7 @@ class UtilityHandler {
         foreach ($_POST as $k => $v) {
             if ($k === 'csrf_token' || $k === 'action' || $k === 'agentId') continue;
             // Accept: uppercase identifier, OR one containing a {PLACEHOLDER} token.
-            if (!preg_match('/^\{?[A-Z][A-Z0-9_]*\}?[A-Z0-9_]{0,127}$/', (string)$k)) continue;
+            if (!preg_match('/^\{?[A-Z][A-Z0-9_]*\}?[A-Z0-9_]{0,127}$/D', (string)$k)) continue;
             $resolved[$k] = (string)$v;
         }
         // Second pass: resolve {PLACEHOLDER}_API_KEY forms. PLACEHOLDER is itself
@@ -290,7 +290,7 @@ class UtilityHandler {
                 $subst = $resolved[$placeholder] ?? '';
                 if ($subst === '') continue; // no provider chosen yet — can't resolve the API-key name
                 $realEnv = str_replace($m[0], strtoupper($subst), $k);
-                if (!preg_match('/^[A-Z][A-Z0-9_]{1,63}$/', $realEnv)) continue;
+                if (!preg_match('/^[A-Z][A-Z0-9_]{1,63}$/D', $realEnv)) continue;
                 if ($v === '') {                       // user cleared the field → delete the key
                     if (array_key_exists($realEnv, $existing)) { unset($existing[$realEnv]); $touched++; }
                 } else {
@@ -299,7 +299,7 @@ class UtilityHandler {
                 continue;
             }
             // Final guard: only literal names that pass the strict shape persist.
-            if (!preg_match('/^[A-Z][A-Z0-9_]{1,63}$/', $k)) continue;
+            if (!preg_match('/^[A-Z][A-Z0-9_]{1,63}$/D', $k)) continue;
             if ($v === '') {                           // user cleared the field → delete the key
                 if (array_key_exists($k, $existing)) { unset($existing[$k]); $touched++; }
             } else {
@@ -579,7 +579,7 @@ class UtilityHandler {
             return 'Type one folder name, not a path.';
         }
         if ($name[0] === '.' && !$allowHidden) return 'A name that starts with a dot makes a hidden folder. Use another name.';
-        if (!preg_match('/^[A-Za-z0-9 ._+@,()-]+$/', $name)) {
+        if (!preg_match('/^[A-Za-z0-9 ._+@,()-]+$/D', $name)) {
             return 'Use only letters, digits, spaces and . _ - + @ , ( ) in the name.';
         }
         if ($name[0] === '-' || $name[0] === ' ') return 'The name cannot start with a dash or a space.';
@@ -940,7 +940,7 @@ class UtilityHandler {
     public static function saveFileChunk($rawPath, $rawFilename, $b64chunk, string $uploadId, int $chunkIndex, int $totalChunks, bool $secretFlag = false): array {
         $logCtx = "UtilityHandler";
 
-        if (!preg_match('/^[0-9a-f]{16}$/i', $uploadId)) {
+        if (!preg_match('/^[0-9a-f]{16}$/iD', $uploadId)) {
             aicli_log("[Upload/Chunk] REJECTED: malformed uploadId", AICLI_LOG_ERROR, $logCtx);
             return ['status' => 'error', 'message' => 'Invalid upload id'];
         }
@@ -1076,14 +1076,14 @@ class UtilityHandler {
     }
 
     private static function registerUploadPart(string $uploadId, string $part): void {
-        if (!preg_match('/^[0-9a-f]{16}$/', $uploadId)) return;
+        if (!preg_match('/^[0-9a-f]{16}$/D', $uploadId)) return;
         $dir = self::uploadPartsIndexDir();
         if (!is_dir($dir)) @mkdir($dir, 0700, true);
         @file_put_contents("$dir/$uploadId", $part);
     }
 
     private static function forgetUploadPart(string $uploadId): void {
-        if (!preg_match('/^[0-9a-f]{16}$/', $uploadId)) return;
+        if (!preg_match('/^[0-9a-f]{16}$/D', $uploadId)) return;
         @unlink(self::uploadPartsIndexDir() . "/$uploadId");
     }
 
@@ -1098,7 +1098,7 @@ class UtilityHandler {
         $now = $now ?? time();
         $removed = 0;
         foreach ((scandir($dir) ?: []) as $entry) {
-            if (!preg_match('/^[0-9a-f]{16}$/', $entry)) continue;
+            if (!preg_match('/^[0-9a-f]{16}$/D', $entry)) continue;
             $marker = "$dir/$entry";
             $mtime = @filemtime($marker);
             if ($mtime === false || ($now - $mtime) < $ttlSeconds) continue;

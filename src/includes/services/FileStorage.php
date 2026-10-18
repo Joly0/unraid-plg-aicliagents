@@ -461,7 +461,7 @@ final class FileStorage
         $persist = self::persistPathFor('home', $user);
         $device  = (string)(self::backendForPath($persist)['backend'] ?? '');
         $wear    = (string)(self::probeTarget($persist)['wear'] ?? '');
-        $hasLayers = $persist !== '' && preg_match('/^[A-Za-z0-9._-]+$/', $user) === 1
+        $hasLayers = $persist !== '' && preg_match('/^[A-Za-z0-9._-]+$/D', $user) === 1
             && count(glob(rtrim($persist, '/') . '/home_' . $user . '_*.sqsh') ?: []) > 0;
         $effective = self::effectiveBackendCaps($device, $hasLayers)['backend'];
         return ['device' => $device, 'wear' => $wear, 'effective' => $effective,

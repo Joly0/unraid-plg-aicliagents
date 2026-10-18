@@ -884,7 +884,7 @@ class SupervisorService {
      */
     public static function convertFailureReason(string $op, string $entity, string $dir = '/tmp/unraid-aicliagents'): string {
         if ($op !== 'graduate') return '';
-        if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#', $entity, $m)) return '';
+        if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#D', $entity, $m)) return '';
         $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $m[2]);
         $raw = @file_get_contents("$dir/.convert_reason_{$m[1]}_{$safe}");
         if ($raw === false) return '';
@@ -930,7 +930,7 @@ class SupervisorService {
      * @return array{done:int,total:int,pct:int,rate:string,eta_s:int}|null
      */
     private static function graduateCopyProgress(string $entity, string $dir = '/tmp/unraid-aicliagents'): ?array {
-        if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#', $entity, $m)) return null;
+        if (!preg_match('#^(home|agent)/([A-Za-z0-9._-]+)$#D', $entity, $m)) return null;
         $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $m[2]);
         $log = "$dir/.convert_progress_{$m[1]}_{$safe}.log";
         $mt = @filemtime($log);
@@ -956,7 +956,7 @@ class SupervisorService {
     private static function consolidateWritePercent(string $entity): ?int {
         if (strpos($entity, 'home/') !== 0) return null;
         $id = substr($entity, 5);
-        if ($id === '' || preg_match('/^[A-Za-z0-9._-]+$/', $id) !== 1) return null;
+        if ($id === '' || preg_match('/^[A-Za-z0-9._-]+$/D', $id) !== 1) return null;
         $raw = @file_get_contents("/tmp/unraid-aicliagents/task-status-$id");
         $d = is_string($raw) ? json_decode($raw, true) : null;
         if (!is_array($d) || strpos((string)($d['step'] ?? ''), 'Writing the new layer') !== 0) return null;

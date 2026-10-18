@@ -478,7 +478,7 @@ class TerminalHandler {
         }
         // Defensive whitelist: agent ids in the registry are [a-z0-9-].
         // Anything else can't match a session so bail cheap.
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/i', $agentId)) {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/iD', $agentId)) {
             return ['status' => 'error', 'message' => 'invalid agentId'];
         }
         // The Store calls this immediately before it asks the operator anything
@@ -876,7 +876,7 @@ class TerminalHandler {
         $prefix = "aicli-agent-$agentId-";
         if ($agentId === '' || strncmp($sessName, $prefix, strlen($prefix)) !== 0) return '';
         $sid = substr($sessName, strlen($prefix));
-        return preg_match('/^[A-Za-z0-9_-]{1,128}$/', $sid) ? $sid : '';
+        return preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sid) ? $sid : '';
     }
 
     /**
@@ -1493,7 +1493,7 @@ class TerminalHandler {
                     $newestId    = basename($file, '.pb');
                 }
             }
-            if ($newestId !== null && preg_match('/^[A-Za-z0-9-]{20,}$/', $newestId)) return $newestId;
+            if ($newestId !== null && preg_match('/^[A-Za-z0-9-]{20,}$/D', $newestId)) return $newestId;
             return null;
         }
 
@@ -1556,7 +1556,7 @@ class TerminalHandler {
             }
             // #71: main-conversation ids are GUIDs (8-4-4-4-12 hex). Anything
             // else found on disk is agent metadata, not a resumable session.
-            if ($newestId !== null && preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/', $newestId)) return $newestId;
+            if ($newestId !== null && preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/D', $newestId)) return $newestId;
             return null;
         }
 
@@ -1599,7 +1599,7 @@ class TerminalHandler {
                 if (!is_array($payload)) continue;
                 $id = (string)($payload['id'] ?? '');
                 $cwd = rtrim(str_replace('\\', '/', (string)($payload['cwd'] ?? '')), '/');
-                if (!preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/', $id)) continue;
+                if (!preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/D', $id)) continue;
                 if (!in_array($cwd, $wantedCwds, true)) continue;
                 // Forgejo #448: since Codex 0.159 the sub-agent threads an agent
                 // spawns are stored the same way, with `source: {subagent: …}`,
@@ -2026,7 +2026,7 @@ class TerminalHandler {
             // #365 (docs/specs/TERMINAL_BACKGROUND_WARM.md): true once ttyd's socket
             // exists. The page mounts the terminal frame only after this, so the
             // first request never finds no socket (nginx [crit] connect() failed).
-            'terminalSocketReady' => (bool)preg_match('/^[A-Za-z0-9_-]{1,64}$/', (string)$id)
+            'terminalSocketReady' => (bool)preg_match('/^[A-Za-z0-9_-]{1,64}$/D', (string)$id)
                 && file_exists('/var/run/aicliterm-' . $id . '.sock'),
         ];
     }
@@ -2077,7 +2077,7 @@ class TerminalHandler {
         $tail = max(1, min(2000, $tail ?: 500));
         $ctx   = trim((string)($_GET['ctx'] ?? ''));
         $trace = trim((string)($_GET['trace'] ?? ''));
-        if ($trace !== '' && !preg_match('/^[a-z0-9]{4,16}$/', $trace)) $trace = '';
+        if ($trace !== '' && !preg_match('/^[a-z0-9]{4,16}$/D', $trace)) $trace = '';
         $levelRaw = $_GET['level'] ?? '';
         $level = ($levelRaw !== '' && is_numeric($levelRaw)) ? max(0, min(3, (int)$levelRaw)) : null;
 

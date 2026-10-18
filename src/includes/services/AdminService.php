@@ -1582,7 +1582,7 @@ class AdminService {
             $user = (string)($cfg['user'] ?? 'root');
             if ($user === '' || $user === '0') $user = 'root';
         }
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['error' => "'$user' is not a valid user name."];
         }
         try {

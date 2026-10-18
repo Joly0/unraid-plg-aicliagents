@@ -108,7 +108,7 @@ class HomeCacheService
     public static function status(string $user): array
     {
         $none = ['location' => 'none', 'path' => '', 'bytes' => 0, 'cap_bytes' => 0, 'on_boot_bytes' => 0];
-        if (preg_match('/^[A-Za-z0-9._-]+$/', $user) !== 1) return $none;
+        if (preg_match('/^[A-Za-z0-9._-]+$/D', $user) !== 1) return $none;
         // Background measurement only (#552). The time left on the shared deadline caps the script.
         require_once __DIR__ . '/MeasureDeadline.php';
         $left = MeasureDeadline::remaining(120);
@@ -133,7 +133,7 @@ class HomeCacheService
      */
     public static function clear(string $user, ?callable $sessionsOf = null): array
     {
-        if (preg_match('/^[A-Za-z0-9._-]+$/', $user) !== 1) {
+        if (preg_match('/^[A-Za-z0-9._-]+$/D', $user) !== 1) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         $sessionsOf = $sessionsOf ?? static function (string $u): array {

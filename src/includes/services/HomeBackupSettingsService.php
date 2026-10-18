@@ -48,7 +48,7 @@ class HomeBackupSettingsService {
     }
 
     public static function validUser(string $user): bool {
-        return $user !== '' && (bool)preg_match('/^[A-Za-z0-9._-]+$/', $user) && $user !== '.' && $user !== '..';
+        return $user !== '' && (bool)preg_match('/^[A-Za-z0-9._-]+$/D', $user) && $user !== '.' && $user !== '..';
     }
 
     public static function pathFor(string $user): string {

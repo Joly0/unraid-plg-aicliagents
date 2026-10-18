@@ -34,7 +34,7 @@ class HomeBackupSnapshotService {
      * @return array{status:string,message?:string,deleted?:string,name?:string,latest?:string}
      */
     public static function delete(string $user, string $target, string $snapshotArg, bool $busy): array {
-        if ($user === '' || !preg_match('/^[A-Za-z0-9._-]+$/', $user) || $user === '.' || $user === '..') {
+        if ($user === '' || !preg_match('/^[A-Za-z0-9._-]+$/D', $user) || $user === '.' || $user === '..') {
             return self::err('invalid_user');
         }
         if ($busy) {

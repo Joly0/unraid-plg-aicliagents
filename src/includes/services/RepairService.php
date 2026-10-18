@@ -33,7 +33,7 @@ final class RepairService
         }
 
         $targets = array_values(array_unique(array_filter($targets, static function ($entity): bool {
-            return is_string($entity) && preg_match('#^(home|agent)/[A-Za-z0-9._-]+$#', $entity) === 1;
+            return is_string($entity) && preg_match('#^(home|agent)/[A-Za-z0-9._-]+$#D', $entity) === 1;
         })));
         sort($targets, SORT_STRING);
         return $targets;

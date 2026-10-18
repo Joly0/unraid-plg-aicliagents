@@ -134,7 +134,7 @@ class EnvHandler {
         $rejected = [];
         foreach ($payload as $k => $v) {
             $k = (string)$k; $v = (string)$v;
-            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', $k)) {
+            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $k)) {
                 $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
                 continue;
             }
@@ -214,7 +214,7 @@ class EnvHandler {
         $rejected = [];
         foreach ($payload as $k => $v) {
             $k = (string)$k; $v = (string)$v;
-            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', $k)) {
+            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $k)) {
                 $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
                 continue;
             }
@@ -331,7 +331,7 @@ class EnvHandler {
                 $subst = $vault[$placeholder] ?? '';
                 if ($subst !== '') {
                     $resolved = str_replace($m[0], strtoupper($subst), $env);
-                    if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', $resolved)) {
+                    if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $resolved)) {
                         $out[$resolved] = true;
                     }
                 }

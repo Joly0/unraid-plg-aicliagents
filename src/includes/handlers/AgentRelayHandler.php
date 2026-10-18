@@ -44,7 +44,7 @@ class AgentRelayHandler {
             // than a rename and was left alone.
             case 'pane_input_get_rules': return array_merge(['status'=>'ok'], \AICliAgents\Services\PaneInputRules::effective(), ['overlay'=>\AICliAgents\Services\PaneInputRules::readOverlay(), 'agents'=>array_map(static fn(array $a): string => (string)($a['name'] ?? ''), \AICliAgents\Services\AgentRegistry::getDefaultAgents())]);
             case 'pane_input_save_rules': $layer=json_decode((string)($_POST['rules'] ?? '{}'),true); return \AICliAgents\Services\PaneInputRules::saveOverlay(is_array($layer)?$layer:[]);
-            case 'pane_input_probe': $aid=(string)($_REQUEST['agent_id'] ?? ''); return preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/',$aid) && preg_match('/^[A-Za-z0-9_-]{1,128}$/',$session) ? array_merge(['status'=>'ok'], \AICliAgents\Services\TmuxService::paneAcceptsInput($aid,$session)) : ['status'=>'error','message'=>'Choose a running workspace.'];
+            case 'pane_input_probe': $aid=(string)($_REQUEST['agent_id'] ?? ''); return preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D',$aid) && preg_match('/^[A-Za-z0-9_-]{1,128}$/D',$session) ? array_merge(['status'=>'ok'], \AICliAgents\Services\TmuxService::paneAcceptsInput($aid,$session)) : ['status'=>'error','message'=>'Choose a running workspace.'];
             // RELAY_REMOTE_CLIENTS.md: a table of remotes, each with its own token.
             // Phase 2 (#299): request_topics feeds the remote Permissions dialog.
             case 'relay_get_http_clients': return ['status'=>'ok','clients'=>AgentRelayService::httpClients(),'request_topics'=>AgentRelayService::requestableTopics()];

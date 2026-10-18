@@ -446,7 +446,7 @@ class StorageHandler {
         if (!in_array($type, ['home', 'agent'], true) || $id === '') {
             return ['status' => 'error', 'message' => 'type and id are required (type must be home or agent)'];
         }
-        if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+        if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', $id)) {
             return ['status' => 'error', 'message' => 'Invalid id format'];
         }
         // Sanitize reason: strip anything that isn't safe for a log line
@@ -488,7 +488,7 @@ class StorageHandler {
         }
 
         // Sanitize id: allow alphanumerics, hyphens, underscores, dots
-        if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+        if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', $id)) {
             return ['status' => 'error', 'message' => 'Invalid id format'];
         }
 
@@ -523,7 +523,7 @@ class StorageHandler {
      */
     private static function autoHealAgentInstall(): array {
         $id = trim((string)($_REQUEST['id'] ?? ''));
-        if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+        if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', $id)) {
             return ['status' => 'error', 'message' => 'Invalid or missing agent id'];
         }
 
@@ -597,7 +597,7 @@ class StorageHandler {
      */
     private static function storageJobStatus(): array {
         $jobId = trim((string)($_REQUEST['job_id'] ?? ''));
-        if ($jobId === '' || !preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/', $jobId)) {
+        if ($jobId === '' || !preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/D', $jobId)) {
             return ['status' => 'error', 'message' => 'job_id required ([A-Za-z0-9._-], max 128 chars)'];
         }
         \AICliAgents\Services\SupervisorService::syncJobActivities();
@@ -678,7 +678,7 @@ class StorageHandler {
         }
         if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
         if ($user === '0') $user = 'root';
-        return preg_match('/^[A-Za-z0-9._-]+$/', $user) ? $user : '';
+        return preg_match('/^[A-Za-z0-9._-]+$/D', $user) ? $user : '';
     }
 
     /** AJAX: persist the home that was clicked (the Storage tab's Persist button). */
@@ -703,7 +703,7 @@ class StorageHandler {
         // saveWorkspaceEnvs for synchronous env-save persistence.
         $user = trim($user);
         if ($user === '' || $user === '0') $user = 'root';
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         // #567: a save in the emergency session keeps nothing. Say so; queue nothing.
@@ -744,7 +744,7 @@ class StorageHandler {
      */
     public static function homeSessionsResponse(?callable $sessions = null, ?array $registry = null): array {
         $id = (string)($_GET['id'] ?? '');
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $id)) {
             return ['status' => 'error', 'message' => 'invalid_id'];
         }
         // #617: a read endpoint does not reap sessions. The sweep runs from actions and the supervisor.
@@ -764,7 +764,7 @@ class StorageHandler {
      * @return list<array{id:string,agentId:string,name:string,icon:string,path:string,workspace:string}>
      */
     public static function listHomeSessions(string $id, bool $sweep = true, ?callable $listSessions = null, ?array $registry = null): array {
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $id)) {
             return [];
         }
         if ($registry === null) {
@@ -815,7 +815,7 @@ class StorageHandler {
      * @return array{status:string,jobId?:string,opId?:string,message?:string}
      */
     public static function backupHome(string $user, array $opts = []): array {
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         require_once __DIR__ . '/../services/StorageTargetService.php';
@@ -913,7 +913,7 @@ class StorageHandler {
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
         if ($user === '0') $user = 'root';
-        return preg_match('/^[A-Za-z0-9._-]+$/', $user) ? $user : '';
+        return preg_match('/^[A-Za-z0-9._-]+$/D', $user) ? $user : '';
     }
 
     /** AJAX (read): GET user -> {status, settings}. HOME_BACKUP.md #287. */
@@ -950,7 +950,7 @@ class StorageHandler {
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
         if ($user === '0') $user = 'root';
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         return self::backupStatusFor($user);
@@ -1165,7 +1165,7 @@ class StorageHandler {
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
         if ($user === '0') $user = 'root';
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         return self::listBackups($user);
@@ -1178,7 +1178,7 @@ class StorageHandler {
      * is `'pre-restore'` for a safety snapshot a restore took, else `''`.
      */
     public static function listBackups(string $user): array {
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         $target = self::effectiveBackupTarget($user);
@@ -1254,7 +1254,7 @@ class StorageHandler {
      * @param callable|null $busyProbe test seam: fn(string $user): bool
      */
     public static function deleteBackupSnapshot(string $user, string $snapshot, ?callable $busyProbe = null): array {
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         require_once __DIR__ . '/../services/HomeBackupSnapshotService.php';
@@ -1306,7 +1306,7 @@ class StorageHandler {
      * @return array{status:string,jobId?:string,opId?:string,safety_snapshot?:bool,message?:string,reason?:string}
      */
     public static function restoreHome(string $user, array $opts = []): array {
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         require_once __DIR__ . '/../services/StorageTargetService.php';
@@ -1433,7 +1433,7 @@ class StorageHandler {
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
         if ($user === '0') $user = 'root';
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $user)) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         return self::restoreStatusFor($user);
@@ -1521,7 +1521,7 @@ class StorageHandler {
         if (!in_array($type, ['agent', 'home'], true)) {
             return ['status' => 'error', 'message' => 'invalid_type'];
         }
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $id)) {
             return ['status' => 'error', 'message' => 'invalid_id'];
         }
         aicli_log("AJAX Request: Consolidate storage for $type: $id", AICLI_LOG_INFO);
@@ -1715,7 +1715,7 @@ class StorageHandler {
     private static function homeCacheStatus(): array {
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '') $user = 'root';
-        if (preg_match('/^[A-Za-z0-9._-]+$/', $user) !== 1) {
+        if (preg_match('/^[A-Za-z0-9._-]+$/D', $user) !== 1) {
             return ['status' => 'error', 'message' => 'invalid_user'];
         }
         $data = \AICliAgents\Services\BootSpaceService::read();
@@ -1748,7 +1748,7 @@ class StorageHandler {
     public static function convertHome(string $id, ?callable $gate = null, bool $continueAfter = true): array {
         $id = trim($id);
         if ($id === '' || $id === '0') $id = 'root';
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $id)) {
             return ['status' => 'error', 'message' => 'invalid_id'];
         }
         if ($gate === null) {
@@ -2093,7 +2093,7 @@ class StorageHandler {
     private static function deleteHome(): array {
         $id = trim((string)($_REQUEST['id'] ?? ''));
 
-        if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+        if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', $id)) {
             return ['status' => 'error', 'message' => 'id is required and must be alphanumeric (1-64 chars)'];
         }
 
