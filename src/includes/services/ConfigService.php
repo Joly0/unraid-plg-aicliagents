@@ -1744,23 +1744,74 @@ class ConfigService {
         return is_array($entry) ? $entry : null;
     }
 
+    /** How long a writer waits for the scheduled-continue lock before it goes on without it. */
+    private const SCHEDULED_CONTINUE_LOCK_WAIT_S = 2.0;
+
+    /**
+     * Test seam: called inside the scheduled-continue lock, after the map was read and
+     * before it is written back. A test uses it to look at what a second writer could do.
+     * @var callable|null
+     */
+    public static $afterScheduledContinueRead = null;
+
+    /**
+     * Read the map, change it and write it back while holding one lock (the lost-update item of #661).
+     * The poll (set), the ticker (clear) and the UI (set/clear) run in different processes.
+     * Each one used to read the whole map, change one entry and write the whole map back, so
+     * a write that landed between the read and the write was lost. The lock is taken with
+     * LOCK_NB in a poll loop with a deadline, never a blocking flock. When a holder is stuck
+     * past the deadline, the change is still made without the lock (the old behaviour): a
+     * stuck holder must not stop the supervisor tick.
+     *
+     * @param callable(array):?array $mutate returns the new map, or null for "nothing to write"
+     */
+    private static function mutateScheduledContinueMap(callable $mutate): bool
+    {
+        $path = self::getScheduledContinueFilePath();
+        $lockPath = $path . '.lock';
+        @mkdir(dirname($lockPath), 0755, true);
+        $lock = @fopen($lockPath, 'c');
+        if ($lock !== false) {
+            $deadline = microtime(true) + self::SCHEDULED_CONTINUE_LOCK_WAIT_S;
+            $held = false;
+            do {
+                if (@flock($lock, LOCK_EX | LOCK_NB)) { $held = true; break; }
+                usleep(20000);
+            } while (microtime(true) < $deadline);
+            if (!$held) { @fclose($lock); $lock = false; }
+        }
+        try {
+            $map = self::getScheduledContinueMap();
+            if (is_callable(self::$afterScheduledContinueRead)) {
+                call_user_func(self::$afterScheduledContinueRead);
+            }
+            $new = $mutate($map);
+            if ($new === null) return true;
+            return AtomicWriteService::writeJson($path, $new);
+        } finally {
+            if ($lock !== false) { @flock($lock, LOCK_UN); @fclose($lock); }
+        }
+    }
+
     /** Upsert one workspace's schedule. Persists the whole map atomically. */
     public static function setScheduledContinue(string $sessionId, array $entry): bool
     {
         if ($sessionId === '') return false;
-        $map = self::getScheduledContinueMap();
-        $map[$sessionId] = $entry;
-        return AtomicWriteService::writeJson(self::getScheduledContinueFilePath(), $map);
+        return self::mutateScheduledContinueMap(static function (array $map) use ($sessionId, $entry): array {
+            $map[$sessionId] = $entry;
+            return $map;
+        });
     }
 
     /** Remove one workspace's schedule. No-op if absent. */
     public static function clearScheduledContinue(string $sessionId): void
     {
         if ($sessionId === '') return;
-        $map = self::getScheduledContinueMap();
-        if (!array_key_exists($sessionId, $map)) return;
-        unset($map[$sessionId]);
-        AtomicWriteService::writeJson(self::getScheduledContinueFilePath(), $map);
+        self::mutateScheduledContinueMap(static function (array $map) use ($sessionId): ?array {
+            if (!array_key_exists($sessionId, $map)) return null;
+            unset($map[$sessionId]);
+            return $map;
+        });
     }
 
     /**

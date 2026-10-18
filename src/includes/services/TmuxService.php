@@ -3423,7 +3423,9 @@ class TmuxService {
             $slice = min($left, 0.5);
             $sec = (int)floor($slice);
             $n = @stream_select($r, $w, $x, $sec, (int)(($slice - $sec) * 1000000));
-            if ($n === false) break;
+            // A failed select (a signal) is retried: the deadline above still bounds the loop,
+            // while a break here would leave proc_close() to wait for ever on a hung client.
+            if ($n === false) { usleep(10000); continue; }
             foreach ($r as $p) {
                 $chunk = fread($p, 65536);
                 $isOut = ($p === ($pipes[1] ?? null));
@@ -3436,7 +3438,10 @@ class TmuxService {
             }
             foreach ($w as $p) {
                 $put = @fwrite($p, substr($in, 0, 65536));
-                if ($put !== false && $put > 0) $in = (string)substr($in, $put);
+                // false = the client closed its input (it failed before it read all of it). Stop
+                // writing and read its exit code; a retry would spin until the timeout.
+                if ($put === false) { fclose($p); unset($pipes[0]); $in = ''; continue; }
+                if ($put > 0) $in = (string)substr($in, $put);
                 if ($in === '') { fclose($p); unset($pipes[0]); }
             }
         }

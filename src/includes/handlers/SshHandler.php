@@ -49,7 +49,9 @@ class SshHandler {
     }
 
     private static function checkSshEnabled(): array {
-        $cfg = '/boot/config/ident.cfg';
+        // Test seam: unit tests point this at a temp file. Unset in production.
+        $e = getenv('AICLI_IDENT_CFG');
+        $cfg = ($e !== false && $e !== '') ? $e : '/boot/config/ident.cfg';
         // Normalize configured user — '0' is a legacy invalid value from a select-index bug
         $pluginCfg = \AICliAgents\Services\ConfigService::getConfig();
         $sshUser = $pluginCfg['user'] ?? 'root';

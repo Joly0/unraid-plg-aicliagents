@@ -25,11 +25,14 @@ class AutoLaunchService
     private const BOOT_CONSOLIDATE_WORKER = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/boot-consolidate-relaunch.php';
 
     /**
-     * Test seams (R-110). All null in production.
-     *   $launcher  callable(array $sids): array — replaces launchAllPending() in reconcileDeadWorkspaces()
+     * Test seams. All null in production.
+     *   $launcher callable(array $sids): array — replaces launchAllPending() in reconcileDeadWorkspaces()
+     *   $registryOverride, $startRunner — isolate launchAllPending() from installed agents and ttyd
      *   $stateFileOverride, $lockFileOverride — redirect the back-off state file and the sweep lock
      */
     public static $launcher = null;
+    public static ?array $registryOverride = null;
+    public static $startRunner = null;
     public static ?string $stateFileOverride = null;
     public static ?string $lockFileOverride = null;
 
@@ -211,7 +214,7 @@ class AutoLaunchService
         }
 
         $sessions = $workspaces['sessions'] ?? [];
-        $registry = AgentRegistry::getRegistry();
+        $registry = self::$registryOverride ?? AgentRegistry::getRegistry();
 
         // #129 follow-up: never relaunch a session whose home is mid-consolidation
         // — a relaunch re-opens the overlay and forces the consolidate to defer,
@@ -326,7 +329,11 @@ class AutoLaunchService
 
                 $chatId = $resumeId !== null ? 'auto' : '';
                 self::log("Auto-launching workspace $sid for $agentId (trigger=$reason)", AICLI_LOG_INFO);
-                TerminalService::startTerminal($sid, $path, $chatId, $agentId, 'auto_launch');
+                if (is_callable(self::$startRunner)) {
+                    call_user_func(self::$startRunner, $sid, $path, $chatId, $agentId);
+                } else {
+                    TerminalService::startTerminal($sid, $path, $chatId, $agentId, 'auto_launch');
+                }
 
                 // T-10 (ACTIVITY_TRAY.md): startTerminal reports its own failures by
                 // returning silently (mount/ttyd errors don't throw), so verify the

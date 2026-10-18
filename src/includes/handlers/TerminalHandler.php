@@ -973,6 +973,15 @@ class TerminalHandler {
         \AICliAgents\Services\AutoLaunchSuppression::suppress($safeId);
     }
 
+    /**
+     * #661: where the close sentinel of a session lives. aicli-shell.sh reads the default
+     * path; AICLI_TMP_BASE redirects it for tests only (the same seam as TerminalService::markClosing).
+     */
+    public static function closeFlagPath(string $safeId): string {
+        $base = rtrim((string)(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents'), '/');
+        return $base . '/close-' . $safeId . '.flag';
+    }
+
     /** Test seam: fn(string $homePath): bool. Null = StorageMountService::isPathAvailable. */
     public static $homeAvailableProbe = null;
 
@@ -997,121 +1006,129 @@ class TerminalHandler {
         // during the ~9 seconds the close actually takes.
         \AICliAgents\Services\TerminalService::markClosing((string)$id);
         aicli_log("gracefulClose: START $ctx", AICLI_LOG_INFO, "TerminalHandler");
+        // #661: a sentinel left by an earlier close that died half way must not leak into this one.
+        $closeFlag = self::closeFlagPath($safeId);
+        @unlink($closeFlag);
+        try {
+            // Non-root audit: shared multi-user lookup helper. Stays in lock-step
+            // with every other tmux call-site (agentSignalReload, AgentHandler,
+            // ProcessManager, InstallerService).
+            [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
 
-        // Non-root audit: shared multi-user lookup helper. Stays in lock-step
-        // with every other tmux call-site (agentSignalReload, AgentHandler,
-        // ProcessManager, InstallerService).
-        [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
-
-        // Bulk/supervisor close path (forceCloseHome → handle('graceful_close',$id),
-        // shutdown-capture) carries NO $_GET, so workspace+agent arrive empty and
-        // captureResumeForClose can SCRAPE the resume id but cannot SAVE it ("could
-        // not save (missing workspace or agent)") — relaunch then loses precise
-        // resume (e.g. a user-renamed chat). Resolve from the live session itself:
-        // workspace from the per-session .workdir metadata, agentId from the tmux
-        // session name (aicli-agent-<agentId>-<safeId>). Works even when the
-        // registry metadata is 'unknown' (reconnect sessions).
-        if ($path === '') {
-            $wdf = \AICliAgents\Services\UtilityService::getWorkDirFilePath($safeId);
-            if (is_file($wdf)) {
-                $path = trim((string)@file_get_contents($wdf));
-            }
-        }
-        if ($agentId === '' && $sessName !== '') {
-            $agentId = self::agentIdFromSessionName($sessName, $safeId);
-        }
-        // Refresh the grep-able context with whatever we resolved.
-        $ctx = sprintf("session=%s agent=%s workspace=%s",
-            $safeId,
-            $agentId !== '' ? $agentId : 'unknown',
-            $path !== '' ? $path : 'unknown'
-        );
-
-        $capturedId = null;
-
-        if (!empty($sessName)) {
-            $escSess = escapeshellarg($sessName);
-            aicli_log("gracefulClose: tmux session resolved as '$sessName' (sock=$tmuxSock) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
-
-            @mkdir('/tmp/unraid-aicliagents', 0755, true);
-
-            // Quiesce the agent and capture + persist its resume id. Extracted to
-            // captureResumeForClose() so the pre-upgrade bulk close
-            // (AgentHandler::_closeSessionsForUpgrade) runs the IDENTICAL pipeline:
-            // the universal exit keys (Ctrl-C x2 + Ctrl-D x2 for agy), the 3-retry
-            // exit-screen scrape (covers EVERY agent that prints a resume hint —
-            // gemini, copilot, kilo, codex, …), then the disk-based fallback
-            // (opencode/agy/claude). Single source of truth so the two close paths
-            // can never drift on resume capture again (the upgrade path used to do
-            // disk-only, silently dropping resume for all scrape-only agents).
-            $capturedId = self::captureResumeForClose($sessName, $tmuxSock, $tmuxBin, $agentId, $path, $ctx);
-
-            // NOW set the sentinel and unblock the shell's "Press ENTER" read
-            // so the relaunch loop exits cleanly instead of timing out after
-            // 10s. Order is critical: sentinel before Enter means the next
-            // loop iteration breaks; the Enter just wakes the blocking read.
-            @touch("/tmp/unraid-aicliagents/close-$safeId.flag");
-            @shell_exec("$tmuxBin send-keys -t $escSess Enter 2>/dev/null");
-
-            // Poll for the tmux session to actually exit. Budget is per-session
-            // configurable via `graceful_close_timeout` (seconds, default 3 —
-            // the historical hardcoded value). Clamped to [1, 60] so a typo'd
-            // config value can't hang the close path. See ACTIVITY_TRAY.md.
-            $budget = (int)(getAICliConfig()['graceful_close_timeout'] ?? 3);
-            $budget = max(1, min(60, $budget ?: 3));
-            $exited = false;
-            for ($i = 0; $i < $budget * 10; $i++) {
-                $still = trim((string) shell_exec("$tmuxBin has-session -t $escSess 2>/dev/null && echo y || echo n"));
-                if ($still === 'n') { $exited = true; break; }
-                usleep(100000);
-            }
-            if ($exited) {
-                aicli_log("gracefulClose: tmux session '$sessName' exited cleanly | $ctx", AICLI_LOG_INFO, "TerminalHandler");
-            } else {
-                aicli_log("gracefulClose: tmux session '$sessName' did not exit within {$budget}s — falling back to hard stop | $ctx", AICLI_LOG_WARN, "TerminalHandler");
-            }
-        } else {
-            aicli_log("gracefulClose: no tmux session found for $ctx — proceeding to hard stop (session may have already died)", AICLI_LOG_WARN, "TerminalHandler");
-        }
-
-        // Bug #1071 follow-up: always try the disk-based fallback when no
-        // resume id was captured from the pane (covers the case where the
-        // tmux session was already gone by the time gracefulClose ran).
-        if (empty($capturedId)) {
-            $diskId = self::discoverLatestSessionId($agentId, $path);
-            if ($diskId) {
-                $capturedId = $diskId;
-                aicli_log("gracefulClose: no live tmux pane to scrape -- discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
-                if (!empty($path) && !empty($agentId)) {
-                    // Disk-only (no pane to scrape): guarded on a shared folder (RESUME_IDENTITY_PER_WORKSPACE.md V3).
-                    $resumeSaved = \AICliAgents\Services\ConfigService::saveDiskFallbackResumeId($path, $agentId, $capturedId, (string)$id);
-                    if ($resumeSaved) aicli_log("gracefulClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+            // Bulk/supervisor close path (forceCloseHome → handle('graceful_close',$id),
+            // shutdown-capture) carries NO $_GET, so workspace+agent arrive empty and
+            // captureResumeForClose can SCRAPE the resume id but cannot SAVE it ("could
+            // not save (missing workspace or agent)") — relaunch then loses precise
+            // resume (e.g. a user-renamed chat). Resolve from the live session itself:
+            // workspace from the per-session .workdir metadata, agentId from the tmux
+            // session name (aicli-agent-<agentId>-<safeId>). Works even when the
+            // registry metadata is 'unknown' (reconnect sessions).
+            if ($path === '') {
+                $wdf = \AICliAgents\Services\UtilityService::getWorkDirFilePath($safeId);
+                if (is_file($wdf)) {
+                    $path = trim((string)@file_get_contents($wdf));
                 }
             }
-        }
+            if ($agentId === '' && $sessName !== '') {
+                $agentId = self::agentIdFromSessionName($sessName, $safeId);
+            }
+            // Refresh the grep-able context with whatever we resolved.
+            $ctx = sprintf("session=%s agent=%s workspace=%s",
+                $safeId,
+                $agentId !== '' ? $agentId : 'unknown',
+                $path !== '' ? $path : 'unknown'
+            );
 
-        // Whether the tmux session exited cleanly or not, reap every process
-        // that inherited this workspace's exact environment before tearing down
-        // ttyd + sockets + pid files. This catches an agent plugin that detached
-        // from tmux and would otherwise outlive a user-closed workspace.
-        $reapedPids = \AICliAgents\Services\ProcessManager::terminateSessionDescendants($safeId);
-        if ($reapedPids !== []) {
-            aicli_log("gracefulClose: reaped detached session descendants=" . implode(',', $reapedPids) . " | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+            $capturedId = null;
+
+            if (!empty($sessName)) {
+                $escSess = escapeshellarg($sessName);
+                aicli_log("gracefulClose: tmux session resolved as '$sessName' (sock=$tmuxSock) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+
+                @mkdir('/tmp/unraid-aicliagents', 0755, true);
+
+                // Quiesce the agent and capture + persist its resume id. Extracted to
+                // captureResumeForClose() so the pre-upgrade bulk close
+                // (AgentHandler::_closeSessionsForUpgrade) runs the IDENTICAL pipeline:
+                // the universal exit keys (Ctrl-C x2 + Ctrl-D x2 for agy), the 3-retry
+                // exit-screen scrape (covers EVERY agent that prints a resume hint —
+                // gemini, copilot, kilo, codex, …), then the disk-based fallback
+                // (opencode/agy/claude). Single source of truth so the two close paths
+                // can never drift on resume capture again (the upgrade path used to do
+                // disk-only, silently dropping resume for all scrape-only agents).
+                $capturedId = self::captureResumeForClose($sessName, $tmuxSock, $tmuxBin, $agentId, $path, $ctx);
+
+                // NOW set the sentinel and unblock the shell's "Press ENTER" read
+                // so the relaunch loop exits cleanly instead of timing out after
+                // 10s. Order is critical: sentinel before Enter means the next
+                // loop iteration breaks; the Enter just wakes the blocking read.
+                @touch($closeFlag);
+                @shell_exec("$tmuxBin send-keys -t $escSess Enter 2>/dev/null");
+
+                // Poll for the tmux session to actually exit. Budget is per-session
+                // configurable via `graceful_close_timeout` (seconds, default 3 —
+                // the historical hardcoded value). Clamped to [1, 60] so a typo'd
+                // config value can't hang the close path. See ACTIVITY_TRAY.md.
+                $budget = (int)(getAICliConfig()['graceful_close_timeout'] ?? 3);
+                $budget = max(1, min(60, $budget ?: 3));
+                $exited = false;
+                for ($i = 0; $i < $budget * 10; $i++) {
+                    $still = trim((string) shell_exec("$tmuxBin has-session -t $escSess 2>/dev/null && echo y || echo n"));
+                    if ($still === 'n') { $exited = true; break; }
+                    usleep(100000);
+                }
+                if ($exited) {
+                    aicli_log("gracefulClose: tmux session '$sessName' exited cleanly | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                } else {
+                    aicli_log("gracefulClose: tmux session '$sessName' did not exit within {$budget}s — falling back to hard stop | $ctx", AICLI_LOG_WARN, "TerminalHandler");
+                }
+            } else {
+                aicli_log("gracefulClose: no tmux session found for $ctx — proceeding to hard stop (session may have already died)", AICLI_LOG_WARN, "TerminalHandler");
+            }
+
+            // Bug #1071 follow-up: always try the disk-based fallback when no
+            // resume id was captured from the pane (covers the case where the
+            // tmux session was already gone by the time gracefulClose ran).
+            if (empty($capturedId)) {
+                $diskId = self::discoverLatestSessionId($agentId, $path);
+                if ($diskId) {
+                    $capturedId = $diskId;
+                    aicli_log("gracefulClose: no live tmux pane to scrape -- discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                    if (!empty($path) && !empty($agentId)) {
+                        // Disk-only (no pane to scrape): guarded on a shared folder (RESUME_IDENTITY_PER_WORKSPACE.md V3).
+                        $resumeSaved = \AICliAgents\Services\ConfigService::saveDiskFallbackResumeId($path, $agentId, $capturedId, (string)$id);
+                        if ($resumeSaved) aicli_log("gracefulClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                    }
+                }
+            }
+
+            // Whether the tmux session exited cleanly or not, reap every process
+            // that inherited this workspace's exact environment before tearing down
+            // ttyd + sockets + pid files. This catches an agent plugin that detached
+            // from tmux and would otherwise outlive a user-closed workspace.
+            $reapedPids = \AICliAgents\Services\ProcessManager::terminateSessionDescendants($safeId);
+            if ($reapedPids !== []) {
+                aicli_log("gracefulClose: reaped detached session descendants=" . implode(',', $reapedPids) . " | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+            }
+            // WORKSPACE_LIFECYCLE_EVENTS.md: this is the graceful-close path, so
+            // the `stopped` event this teardown emits carries that reason (not
+            // the generic 'stop' default) even when the quiesce above fell back
+            // to a hard kill.
+            stopAICliTerminal($id, true, 'graceful_close');
+            // Fix 2026-09-12: an operator closed this workspace on purpose (the
+            // drawer's Close button, a delete, or the CLI's graceful_close action).
+            // Auto-launch must not bring it straight back on the next page load.
+            // See docs/specs/2026-04-27-auto-launch-workspaces-design.md.
+            self::recordCloseOnPurpose($safeId);
+        } finally {
+            // #661: the sentinel and the close mark must not outlive this close, whether it ended
+            // well or threw half way. A flag left behind makes the next start of this workspace
+            // exit its relaunch loop at once (aicli-shell.sh reads it).
+            @unlink($closeFlag);
+            \AICliAgents\Services\TerminalService::clearClosing((string)$id);
         }
-        // WORKSPACE_LIFECYCLE_EVENTS.md: this is the graceful-close path, so
-        // the `stopped` event this teardown emits carries that reason (not
-        // the generic 'stop' default) even when the quiesce above fell back
-        // to a hard kill.
-        stopAICliTerminal($id, true, 'graceful_close');
-        // Fix 2026-09-12: an operator closed this workspace on purpose (the
-        // drawer's Close button, a delete, or the CLI's graceful_close action).
-        // Auto-launch must not bring it straight back on the next page load.
-        // See docs/specs/2026-04-27-auto-launch-workspaces-design.md.
-        self::recordCloseOnPurpose($safeId);
-        @unlink("/tmp/unraid-aicliagents/close-$safeId.flag");
 
         $resumeStr = $capturedId ? "resume_id=$capturedId" : "resume_id=none";
-        \AICliAgents\Services\TerminalService::clearClosing((string)$id);
         aicli_log("gracefulClose: DONE $resumeStr | $ctx", AICLI_LOG_INFO, "TerminalHandler");
 
         // Quiescent-lifecycle (2026-05-31): workspace close NO LONGER forces a

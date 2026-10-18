@@ -961,13 +961,15 @@ class UpgradeRelaunchService
      * - not running                → start (relaunched)
      * - running + healthy          → skip (live agent reopened; don't tear down)
      * - running + zombie           → stop then start (relaunched)
+     * - zombie the stop did not remove → failed (the entry stays, #661)
+     * - start refused / not up     → failed (the entry stays, #584)
      * - missing sessionId/path     → skip
      * `chatId='auto'` when the entry hadResume. Uses the entry's OWN agentId.
      *
      * @param array    $entry     {sessionId, workspacePath, agentId, hadResume}
      * @param string   $origin    passed through to $starter as its 5th arg (the
      *        `started` event's origin tag — see TerminalService::startTerminal).
-     * @return string  'relaunched' | 'skipped'
+     * @return string  'relaunched' | 'skipped' | 'failed'
      */
     private static function relaunchOne(
         array $entry,
@@ -999,6 +1001,13 @@ class UpgradeRelaunchService
             // relaunch below lands (stopTerminal kills ttyd, making isTtydBound
             // false — the guard startTerminal checks before rebuilding the session).
             $stopper($sid);
+            // #661: a zombie that the teardown could not remove still holds its socket. The start
+            // below would stop at "already running", and the probe after it would read the zombie
+            // as the new session. Keep the entry for the next sweep instead of counting a relaunch.
+            if ($isRunning($sid) && !$isHealthy($sid)) {
+                LogService::log("relaunchOne: $sid is a zombie session that could not be removed; the entry stays for the next sweep", LogService::LOG_WARN, "UpgradeRelaunchService");
+                return 'failed';
+            }
         }
         $agentId = (string)($entry['agentId'] ?? '');
         $chatId  = !empty($entry['hadResume']) ? 'auto' : '';
@@ -1029,7 +1038,12 @@ class UpgradeRelaunchService
         try {
             if (AutoLaunchSuppression::isSuppressed($sid)) return false;
             // No registry file yet = nothing to compare with: keep the old behaviour.
-            if (!is_file(ConfigService::getUserStatePath() . '/workspaces.json')) return true;
+            $registry = ConfigService::getUserStatePath() . '/workspaces.json';
+            if (!is_file($registry)) return true;
+            // #661: getWorkspaces() turns a torn or corrupt file into an EMPTY list, and an empty
+            // list would read as "every workspace was deleted". Read the file here first, so an
+            // unreadable registry fails open as the comment above says.
+            if (!is_array(json_decode((string)@file_get_contents($registry), true))) return true;
             $sessions = ConfigService::getWorkspaces()['sessions'] ?? null;
             if (!is_array($sessions)) return true;
             foreach ($sessions as $s) {

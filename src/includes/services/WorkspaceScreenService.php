@@ -73,8 +73,16 @@ final class WorkspaceScreenService
             // Keep the newest lines: cut at a line break inside the last MAX_BYTES.
             $tail = substr($text, -self::MAX_BYTES);
             $nl = strpos($tail, "\n");
-            $text = $nl !== false ? substr($tail, $nl + 1) : $tail;
-            if (function_exists('mb_scrub')) $text = mb_scrub($text, 'UTF-8');
+            if ($nl !== false) {
+                $text = substr($tail, $nl + 1);
+            } else {
+                // One very long row (a wrapped line joined by capture -J): the cut can fall inside
+                // a multi-byte character. Drop the leftover leading bytes of it (at most 3) so the text stays
+                // valid UTF-8 without needing the mbstring extension.
+                $skip = 0;
+                while ($skip < 3 && $skip < strlen($tail) && (ord($tail[$skip]) & 0xC0) === 0x80) $skip++;
+                $text = substr($tail, $skip);
+            }
             $truncated = true;
         }
         $outLines = $text === '' ? [] : explode("\n", $text);

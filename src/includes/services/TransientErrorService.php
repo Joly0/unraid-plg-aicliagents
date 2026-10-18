@@ -32,6 +32,9 @@ namespace AICliAgents\Services;
  */
 final class TransientErrorService
 {
+    /** @var null|callable():void Test seam called after a poll reads state and before commit. */
+    public static $beforeStateWrite = null;
+
     public const SOURCE = 'transient-error';
     public const DEFAULT_BACKOFF_MINUTES = [1, 5, 15];
     public const DEFAULT_MAX_CONTINUES = 3;
@@ -541,6 +544,7 @@ final class TransientErrorService
             if (is_array($s) && isset($s['id'])) $names[(string)$s['id']] = (string)($s['name'] ?? $s['id']);
         }
         $map = ConfigService::getScheduledContinueMap();
+        $stateBeforePoll = self::readState();
         $result = self::pollSessions(
             $sessions,
             static fn(string $agentId, string $sid): string => $captures[$sid] ?? TmuxService::capturePaneRaw($agentId, $sid),
@@ -553,21 +557,37 @@ final class TransientErrorService
             static function (string $sid, string $agentId, string $event, array $info) use ($names): void {
                 self::record($sid, $names[$sid] ?? $sid, $agentId, $event, $info);
             },
-            self::readState(),
+            $stateBeforePoll,
             $settings
         );
-        self::writeState($result['state']);
+        if (is_callable(self::$beforeStateWrite)) {
+            call_user_func(self::$beforeStateWrite);
+        }
+        $lock = self::lockStateFile();
+        try {
+            // Without the lock (a holder stuck past the deadline), nothing newer is read back.
+            $latest = $lock !== false ? self::readState() : $stateBeforePoll;
+            $result['state'] = self::preserveConcurrentState($stateBeforePoll, $result['state'], $latest);
+            self::writeState($result['state']);
+        } finally {
+            self::unlockStateFile($lock);
+        }
         return $result;
     }
 
     /** scheduled-continue.php calls this after it typed the continue into the pane. */
     public static function recordSent(string $sid, string $name, string $agentId, array $entry): void
     {
-        $state = self::readState();
-        if (is_array($state[$sid] ?? null)) {
-            $state[$sid]['phase'] = 'sent';
-            $state[$sid]['updated'] = time();
-            self::writeState($state);
+        $lock = self::lockStateFile();
+        try {
+            $state = self::readState();
+            if (is_array($state[$sid] ?? null)) {
+                $state[$sid]['phase'] = 'sent';
+                $state[$sid]['updated'] = time();
+                self::writeState($state);
+            }
+        } finally {
+            self::unlockStateFile($lock);
         }
         self::record($sid, $name, $agentId, 'sent', [
             'attempt' => (int)($entry['attempt'] ?? 0),
@@ -580,8 +600,13 @@ final class TransientErrorService
     /** scheduled-continue.php calls this when the send-time check dropped the entry. */
     public static function recordDropped(string $sid, string $name, string $agentId): void
     {
-        $state = self::readState();
-        if (isset($state[$sid])) { unset($state[$sid]); self::writeState($state); }
+        $lock = self::lockStateFile();
+        try {
+            $state = self::readState();
+            if (isset($state[$sid])) { unset($state[$sid]); self::writeState($state); }
+        } finally {
+            self::unlockStateFile($lock);
+        }
         self::record($sid, $name, $agentId, 'reset', []);
     }
 
@@ -697,6 +722,56 @@ final class TransientErrorService
     {
         $env = getenv('AICLI_TRANSIENT_ERROR_STATE');
         return ($env !== false && $env !== '') ? $env : self::STATE_PATH;
+    }
+
+    /**
+     * Poll work happens outside this lock. At commit time, keep state changes
+     * that another poll or the send-time ticker made after our initial read.
+     *
+     * @param array<string,array<string,mixed>> $before
+     * @param array<string,array<string,mixed>> $calculated
+     * @param array<string,array<string,mixed>> $latest
+     * @return array<string,array<string,mixed>>
+     */
+    private static function preserveConcurrentState(array $before, array $calculated, array $latest): array
+    {
+        foreach (array_unique(array_merge(array_keys($before), array_keys($latest))) as $sid) {
+            $hadBefore = array_key_exists($sid, $before);
+            $hasLatest = array_key_exists($sid, $latest);
+            if ($hadBefore === $hasLatest && (!$hadBefore || $before[$sid] === $latest[$sid])) continue;
+            if ($hasLatest) $calculated[$sid] = $latest[$sid];
+            else unset($calculated[$sid]);
+        }
+        return $calculated;
+    }
+
+    /**
+     * Takes the state lock with LOCK_NB in a poll loop, so a stuck holder cannot
+     * block a php-fpm worker or the supervisor tick for longer than the deadline.
+     *
+     * @return resource|false
+     */
+    private static function lockStateFile()
+    {
+        $path = self::statePath() . '.lock';
+        @mkdir(dirname($path), 0755, true);
+        $handle = @fopen($path, 'c');
+        if ($handle === false) return false;
+        $deadline = microtime(true) + 2.0;
+        do {
+            if (@flock($handle, LOCK_EX | LOCK_NB)) return $handle;
+            usleep(20000);
+        } while (microtime(true) < $deadline);
+        @fclose($handle);
+        return false;
+    }
+
+    /** @param resource|false $handle */
+    private static function unlockStateFile($handle): void
+    {
+        if ($handle === false) return;
+        @flock($handle, LOCK_UN);
+        @fclose($handle);
     }
 
     /** @return array<string,array<string,mixed>> */

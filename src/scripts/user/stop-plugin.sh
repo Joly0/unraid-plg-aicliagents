@@ -21,6 +21,7 @@ source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 source "$EMHTTP_DEST/src/scripts/storage/atomic_write_layer.sh" 2>/dev/null || true
 # R2 (CAPTURE_RESUME_ALL_CLOSE_PATHS): the shutdown-capture bridge.
 source "$EMHTTP_DEST/src/scripts/storage/capture_resume.sh" 2>/dev/null || true
+source "$EMHTTP_DEST/src/scripts/user/stop-session-agents.sh" 2>/dev/null || true
 
 # Budget (secs) for the pre-kill resume capture when this script is invoked
 # DIRECTLY (not via event/stopping). When event/stopping already captured it
@@ -117,20 +118,23 @@ safe_pterm() {
         waited=$((waited + 1))
     done
 }
-# 1a. Hard-kill the retry-loop wrappers FIRST so nothing respawns an agent
-#     while we are gracefully stopping it (they carry no data to flush).
-status "Stopping agent retry loops..."
-safe_pkill 'aicli-run-'                                    # Retry loop scripts
-safe_pkill 'aicli-shell'                                   # Shell wrappers
-# 1b. Graceful SIGTERM to the agents — they write SQLite DBs + chat history
-#     into the HOME overlay, so give them a window to flush cleanly before the
-#     home bake, otherwise the shutdown delta captures a torn mid-write state.
-#     Path-anchored node pattern so we never match an unrelated host service.
-status "Gracefully stopping agents (SIGTERM, then bake-safe wait)..."
-safe_pterm 'node .*(unraid-aicliagents|/\.aicli/)' 5
-# 1c. SIGKILL any straggler that ignored SIGTERM, plus the ttyd terminals.
-safe_pkill 'node .*(unraid-aicliagents|/\.aicli/)'
-safe_pkill 'ttyd.*(aicliterm|temp-terminal)-'
+stop_plugin_agents() {
+    # Hard-kill retry wrappers first so they cannot respawn an agent.
+    status "Stopping agent retry loops..."
+    safe_pkill 'aicli-run-'
+    safe_pkill 'aicli-shell'
+
+    # Match the session environment, not a runtime name. This gives Node and
+    # native agents the same flush window before the home bake.
+    status "Gracefully stopping agents (SIGTERM, then bake-safe wait)..."
+    stop_session_agent_processes 5
+
+    # Catch a Node process that did not inherit the workspace session id, then
+    # stop ttyd terminals after their agents have had the flush window.
+    safe_pkill 'node .*(unraid-aicliagents|/\.aicli/)'
+    safe_pkill 'ttyd.*(aicliterm|temp-terminal)-'
+}
+stop_plugin_agents
 # 1d. Stop the per-user Secret Service daemons + their private session buses
 #     (Bug #1042) so the keyring file is quiescent before the home bake, and
 #     so a plugin upgrade picks up a new daemon binary on the next launch.
