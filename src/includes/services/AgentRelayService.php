@@ -104,12 +104,43 @@ class AgentRelayService {
         $test = getenv('AICLI_RELAY_STATE_DIR');
         return ($test !== false && $test !== '') ? rtrim($test, '/') : ConfigService::getUserStatePath() . '/relay';
     }
+    public static float $lockWait = 3.0;
     private static function cleanId(string $id): string { return preg_match('/^[A-Za-z0-9_-]{1,128}$/', $id) ? $id : ''; }
     private static function path(string $part): string { return self::baseDir() . '/' . ltrim($part, '/'); }
     private static function readJson(string $file, array $fallback): array {
         $v = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
         return is_array($v) ? $v : $fallback;
     }
+    /**
+     * R-057 (#635): every Relay read-modify-write runs under one exclusive lock on a
+     * sidecar file, so two callers cannot both read the old record and the last write
+     * win (a cancelled request turning into a resolved one, two joins losing one).
+     * The lock is taken with LOCK_NB in a poll loop with a deadline, never a blocking
+     * flock: the state folder may sit on a FUSE share, where a blocked lock can stall
+     * the whole host. One lock name covers one kind of record. A name is never taken
+     * again inside its own callback: flock on a second handle of the same file would
+     * wait for itself until the deadline.
+     *
+     * Returns the callback result, or $busy when the lock was not free in time.
+     * $lockWait (seconds) is the deadline; tests shorten it.
+     */
+    private static function locked(string $name, callable $fn, $busy = null) {
+        $dir = self::path('system/locks');
+        if (!is_dir($dir)) @mkdir($dir, 0775, true);
+        $handle = @fopen("$dir/" . preg_replace('/[^A-Za-z0-9_-]/', '_', $name) . '.lock', 'c');
+        if ($handle === false) return $busy;
+        try {
+            $deadline = microtime(true) + self::$lockWait;
+            while (!@flock($handle, LOCK_EX | LOCK_NB)) {
+                if (microtime(true) >= $deadline) return $busy;
+                usleep(15000);
+            }
+            try { return $fn(); } finally { @flock($handle, LOCK_UN); }
+        } finally {
+            fclose($handle);
+        }
+    }
+    private static function busy(): array { return ['status'=>'error','message'=>'The Relay is busy. Try again in a moment.','busy'=>true]; }
     private static function matches(string $topic, string $filter): bool {
         return substr($filter, -2) === '.*' ? strpos($topic, substr($filter, 0, -1)) === 0 : $topic === $filter;
     }
@@ -787,6 +818,7 @@ class AgentRelayService {
         }
         $managed = ConfigService::getManagedWorkspaces();
         $rebound = [];
+        $reboundActors = [];
         $matchedSessions = [];
         foreach ($actors as $topic => $actor) {
             $sid = is_array($actor) ? (string)($actor['session_id'] ?? '') : (string)$actor;
@@ -796,27 +828,75 @@ class AgentRelayService {
             $newId = self::uniqueIdentityMatch($sessions, (string)($snap['path'] ?? ''), (string)($snap['agentId'] ?? ''));
             if ($newId === null || $newId === $sid) continue; // none / ambiguous / self
             $startOnBoot = is_array($actor) ? (bool)($actor['start_on_boot'] ?? true) : true;
-            $actors[$topic] = ['session_id' => $newId, 'start_on_boot' => $startOnBoot, 'paused' => false];
+            $reboundActors[$topic] = ['session_id' => $newId, 'start_on_boot' => $startOnBoot, 'paused' => false];
             $rebound[$topic] = ['from' => $sid, 'to' => $newId];
             foreach ($sessions as $session) {
                 if (is_array($session) && (string)($session['id'] ?? '') === $newId) { $matchedSessions[$topic] = $session; break; }
             }
         }
         if ($rebound === []) return [];
-        AtomicWriteService::writeJson(self::path('actors.json'), ['schema' => self::SCHEMA, 'actors' => $actors]);
+        // R-057: re-read actors.json under the lock and change only the rebound topics,
+        // so an assignment saved while this ran is not lost.
+        self::locked('actors', function () use ($reboundActors, $rebound): void {
+            $current = self::actors()['actors'] ?? [];
+            foreach ($reboundActors as $topic => $new) {
+                $now = $current[$topic] ?? null;
+                $nowSid = is_array($now) ? (string)($now['session_id'] ?? '') : (string)$now;
+                if ($nowSid === $rebound[$topic]['from']) $current[$topic] = $new;
+            }
+            AtomicWriteService::writeJson(self::path('actors.json'), ['schema' => self::SCHEMA, 'actors' => $current]);
+        });
         foreach ($rebound as $topic => $move) {
+            // R-054 (#632): open work for the old id follows the owner to the new id.
+            self::moveActorWork($topic, $move['from'], $move['to']);
             self::ensureActorSubscription($topic); // subscribe the new owner id
             if (isset($matchedSessions[$topic])) ConfigService::rememberRelayManagedWorkspace($matchedSessions[$topic]);
             ConfigService::forgetManagedWorkspace($move['from']);
         }
         return $rebound;
     }
+    /**
+     * R-054 (#632): when an owner is re-adopted under a new workspace id, its open
+     * requests on the topic and its unread event deliveries move to the new id. Without
+     * this the request keeps the old actor id, the new actor never sees it and cannot
+     * answer it, and the sender sees "pending" and then "timed out".
+     */
+    private static function moveActorWork(string $topic, string $from, string $to): void {
+        $from=self::cleanId($from); $to=self::cleanId($to); if ($from==='' || $to==='' || $from===$to) return;
+        self::ensureRequestIndex();
+        self::locked('requests', function () use ($topic,$from,$to): void {
+            foreach (glob(self::path("requests/_by/$from/req_*.json")) ?: [] as $entry) {
+                $id=basename($entry,'.json'); $file=self::path("requests/$id.json"); $r=self::readJson($file,[]);
+                if (($r['actor_session'] ?? '')!==$from || ($r['topic'] ?? '')!==$topic) continue;
+                if (!in_array((string)($r['state'] ?? ''),['pending','acknowledged'],true)) continue;
+                $r['actor_session']=$to;
+                if (!AtomicWriteService::writeJson($file,$r)) continue;
+                self::indexRequest($r);
+                if (($r['sender_session'] ?? '')!==$from) @unlink($entry);
+                self::moveDelivery($from,$to,$id);
+            }
+        });
+        foreach (glob(self::path("deliveries/$from/rel_*.json")) ?: [] as $f) {
+            $d=self::readJson($f,[]);
+            if (($d['state'] ?? '')!=='pending' || !empty($d['request_file'])) continue;
+            $m=self::readJson(self::path((string)($d['message_file'] ?? '')),[]);
+            if (($m['topic'] ?? '')!==$topic) continue;
+            self::moveDelivery($from,$to,basename($f,'.json'));
+        }
+    }
+    private static function moveDelivery(string $from, string $to, string $id): void {
+        $src=self::path("deliveries/$from/$id.json"); $d=self::readJson($src,[]); if (!$d) return;
+        if (AtomicWriteService::writeJson(self::path("deliveries/$to/$id.json"),$d)) @unlink($src);
+    }
     public static function setActor(string $topic, string $sessionId, bool $startOnBoot = true): array {
         $topicRecord=array_values(array_filter(self::topicCatalog(), fn($record) => ($record['topic'] ?? '') === $topic));
         if (!$topicRecord || !empty($topicRecord[0]['subscription_only'])) return ['status'=>'error','message'=>'Choose an active, concrete Relay topic.'];
         if (trim($sessionId) === '') {
-            $d = self::actors(); unset($d['actors'][$topic]);
-            return AtomicWriteService::writeJson(self::path('actors.json'), ['schema'=>self::SCHEMA,'actors'=>$d['actors']]) ? ['status'=>'ok','cleared'=>true] : ['status'=>'error','message'=>'Could not clear actor'];
+            // R-057: actors.json is read, changed and written back under the 'actors' lock.
+            return self::locked('actors', function () use ($topic): array {
+                $d = self::actors(); unset($d['actors'][$topic]);
+                return AtomicWriteService::writeJson(self::path('actors.json'), ['schema'=>self::SCHEMA,'actors'=>$d['actors']]) ? ['status'=>'ok','cleared'=>true] : ['status'=>'error','message'=>'Could not clear actor'];
+            }, self::busy());
         }
         $sessionId=self::cleanId($sessionId);
         if ($sessionId === '') return ['status'=>'error','message'=>'Choose a valid saved workspace.'];
@@ -825,8 +905,11 @@ class AgentRelayService {
             // Actor boot/recovery must survive a user intentionally closing all
             // browser workspaces while the server is unattended.
             if (!ConfigService::rememberRelayManagedWorkspace($workspace)) return ['status'=>'error','message'=>'Could not preserve the actor workspace on the server.'];
-            $d=self::actors(); $d['actors'][$topic]=['session_id'=>$sessionId,'start_on_boot'=>$startOnBoot,'paused'=>false];
-            if (!AtomicWriteService::writeJson(self::path('actors.json'), ['schema'=>self::SCHEMA,'actors'=>$d['actors']])) return ['status'=>'error','message'=>'Could not save actor'];
+            $saved=self::locked('actors', function () use ($topic,$sessionId,$startOnBoot): bool {
+                $d=self::actors(); $d['actors'][$topic]=['session_id'=>$sessionId,'start_on_boot'=>$startOnBoot,'paused'=>false];
+                return AtomicWriteService::writeJson(self::path('actors.json'), ['schema'=>self::SCHEMA,'actors'=>$d['actors']]);
+            }, false);
+            if (!$saved) return ['status'=>'error','message'=>'Could not save actor'];
             // An actor must receive regular topic events as well as direct
             // requests. Keep its existing self-management choice intact.
             if (!self::ensureActorSubscription($topic)) return ['status'=>'error','message'=>'Actor saved, but its topic subscription could not be saved.'];
@@ -863,9 +946,8 @@ class AgentRelayService {
     /** Idempotent repair for actor assignments created before automatic subscription existed. */
     private static function ensureActorSubscription(string $topic): bool {
         $sessionId=self::actorFor($topic); if ($sessionId==='') return false;
-        $sub=self::subscriptions($sessionId);
-        return in_array($topic, $sub['subscriptions'], true)
-            || self::saveSubscriptions($sessionId, array_merge($sub['subscriptions'], [$topic]), $sub['agent_self_manage']);
+        return in_array($topic, self::subscriptions($sessionId)['subscriptions'], true)
+            || self::updateSubscriptions($sessionId, static fn(array $now): array => array_merge($now, [$topic]));
     }
     /**
      * #111: the newest deliverable that is still PENDING for this actor on this
@@ -1008,6 +1090,9 @@ class AgentRelayService {
 
     /** Explicit user close: retain the assignment/audit record but disable all automatic starts. */
     public static function pauseActorWorkspace(string $sessionId): array {
+        return self::locked('actors', fn() => self::pauseActorWorkspaceUnlocked($sessionId), self::busy());
+    }
+    private static function pauseActorWorkspaceUnlocked(string $sessionId): array {
         $sessionId=self::cleanId($sessionId); $d=self::actors(); $changed=[];
         if (!isset($d['actors']) || !is_array($d['actors'])) $d['actors']=[];
         foreach ($d['actors'] as $topic=>&$actor) {
@@ -1021,16 +1106,21 @@ class AgentRelayService {
     }
     /** Settings launch: re-enable one actor workspace and use the normal terminal launch path. */
     public static function launchActorWorkspace(string $sessionId): array {
-        $sessionId=self::cleanId($sessionId); $d=self::actors(); $topics=[];
-        if (!isset($d['actors']) || !is_array($d['actors'])) $d['actors']=[];
-        foreach ($d['actors'] as $topic=>&$actor) {
-            $sid=is_array($actor)?self::cleanId((string)($actor['session_id'] ?? '')):self::cleanId((string)$actor);
-            if ($sid!==$sessionId) continue;
-            if (!is_array($actor)) $actor=['session_id'=>$sid,'start_on_boot'=>true];
-            $actor['paused']=false; $topics[]=$topic;
-        } unset($actor);
-        if ($topics===[]) return ['status'=>'error','message'=>'This workspace is not a Relay actor.'];
-        if (!AtomicWriteService::writeJson(self::path('actors.json'),$d)) return ['status'=>'error','message'=>'Could not re-enable Relay actor'];
+        $sessionId=self::cleanId($sessionId);
+        $topics=[]; $failed=self::locked('actors', function () use ($sessionId,&$topics): ?array {
+            $d=self::actors();
+            if (!isset($d['actors']) || !is_array($d['actors'])) $d['actors']=[];
+            foreach ($d['actors'] as $topic=>&$actor) {
+                $sid=is_array($actor)?self::cleanId((string)($actor['session_id'] ?? '')):self::cleanId((string)$actor);
+                if ($sid!==$sessionId) continue;
+                if (!is_array($actor)) $actor=['session_id'=>$sid,'start_on_boot'=>true];
+                $actor['paused']=false; $topics[]=$topic;
+            } unset($actor);
+            if ($topics===[]) return ['status'=>'error','message'=>'This workspace is not a Relay actor.'];
+            if (!AtomicWriteService::writeJson(self::path('actors.json'),$d)) return ['status'=>'error','message'=>'Could not re-enable Relay actor'];
+            return null;
+        }, self::busy());
+        if ($failed!==null) return $failed;
         // Fix 2026-09-12: this is the Relay tab's "Start now" button — an
         // explicit operator start overrides any earlier close. See
         // docs/specs/2026-04-27-auto-launch-workspaces-design.md.
@@ -1069,7 +1159,11 @@ class AgentRelayService {
     private static function activeTopics(): array {
         return array_column(array_filter(self::topicCatalog(), fn($topic) => $topic['state'] === 'active'), 'topic');
     }
+    // R-057 (#635): each topic edit reads topics.json, changes it and writes it back, so it runs under the 'topics' lock.
     public static function saveTopic(string $topic, string $description): array {
+        return self::locked('topics', fn() => self::saveTopicUnlocked($topic, $description), self::busy());
+    }
+    private static function saveTopicUnlocked(string $topic, string $description): array {
         $topic = trim($topic); $description = trim($description);
         if (!self::validTopic($topic) || substr($topic, -2) === '.*') return ['status'=>'error','message'=>'Topic must use lowercase dot-separated segments (for example local.llm.health).'];
         if (strlen($description) > 280) return ['status'=>'error','message'=>'Description must be 280 characters or fewer.'];
@@ -1079,6 +1173,9 @@ class AgentRelayService {
         return self::writeCustomTopics($topics) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not save topic'];
     }
     public static function archiveTopic(string $topic): array {
+        return self::locked('topics', fn() => self::archiveTopicUnlocked($topic), self::busy());
+    }
+    private static function archiveTopicUnlocked(string $topic): array {
         $topics = self::customTopics();
         if (isset(self::BUILTIN_TOPICS[$topic])) {
             $topics[$topic] = ['description'=>(string)($topics[$topic]['description'] ?? self::BUILTIN_TOPICS[$topic]), 'state'=>'archived', 'builtin_override'=>true, 'updated_at'=>gmdate('c')];
@@ -1089,14 +1186,16 @@ class AgentRelayService {
         return self::writeCustomTopics($topics) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not archive topic'];
     }
     public static function removeTopic(string $topic): array {
+        return self::locked('topics', fn() => self::removeTopicUnlocked($topic), self::busy());
+    }
+    private static function removeTopicUnlocked(string $topic): array {
         $topics = self::customTopics();
         if (isset(self::BUILTIN_TOPICS[$topic])) {
             $pruned = 0;
             foreach (glob(self::path('subscriptions/*.json')) ?: [] as $file) {
-                $session = basename($file, '.json'); $sub = self::subscriptions($session);
-                if (!in_array($topic, $sub['subscriptions'], true)) continue;
-                $sub['subscriptions'] = array_values(array_diff($sub['subscriptions'], [$topic]));
-                if (self::saveSubscriptions($session, $sub['subscriptions'], $sub['agent_self_manage'])) $pruned++;
+                $session = basename($file, '.json');
+                if (!in_array($topic, self::subscriptions($session)['subscriptions'], true)) continue;
+                if (self::updateSubscriptions($session, static fn(array $now): array => array_values(array_diff($now, [$topic])))) $pruned++;
             }
             $topics[$topic] = ['description'=>self::BUILTIN_TOPICS[$topic], 'state'=>'removed', 'builtin_override'=>true, 'updated_at'=>gmdate('c')];
             return self::writeCustomTopics($topics) ? ['status'=>'ok','pruned_subscriptions'=>$pruned] : ['status'=>'error','message'=>'Could not remove topic'];
@@ -1120,6 +1219,9 @@ class AgentRelayService {
     }
     /** Creates or edits a topic owned by this opted-in workspace. */
     public static function agentSaveTopic(string $sessionId, string $topic, string $description): array {
+        return self::locked('topics', fn() => self::agentSaveTopicUnlocked($sessionId, $topic, $description), self::busy());
+    }
+    private static function agentSaveTopicUnlocked(string $sessionId, string $topic, string $description): array {
         $sessionId = self::cleanId($sessionId);
         if (!self::agentCanManage($sessionId)) return ['status'=>'error','message'=>'This workspace is not allowed to manage Relay topics.'];
         $topic = trim($topic); $description = trim($description);
@@ -1132,6 +1234,9 @@ class AgentRelayService {
         return self::writeCustomTopics($topics) ? ['status'=>'ok','topic'=>$topic] : ['status'=>'error','message'=>'Could not save topic'];
     }
     public static function agentArchiveTopic(string $sessionId, string $topic): array {
+        return self::locked('topics', fn() => self::agentArchiveTopicUnlocked($sessionId, $topic), self::busy());
+    }
+    private static function agentArchiveTopicUnlocked(string $sessionId, string $topic): array {
         $sessionId = self::cleanId($sessionId); if (!self::agentCanManage($sessionId)) return ['status'=>'error','message'=>'This workspace is not allowed to manage Relay topics.'];
         $topics = self::customTopics();
         if (!isset($topics[$topic]) || !is_array($topics[$topic]) || ($topics[$topic]['owner_session_id'] ?? '') !== $sessionId) return ['status'=>'error','message'=>'Only this topic owner can archive it.'];
@@ -1147,13 +1252,11 @@ class AgentRelayService {
     public static function agentJoinTopic(string $sessionId, string $topic): array {
         $sessionId=self::cleanId($sessionId); if (!self::agentCanManage($sessionId)) return ['status'=>'error','message'=>'This workspace is not allowed to manage Relay subscriptions.'];
         if (!in_array($topic, self::activeTopics(), true)) return ['status'=>'error','message'=>'Topic is not active or does not exist.'];
-        $current=self::subscriptions($sessionId); $current['subscriptions'][]=$topic;
-        return self::saveSubscriptions($sessionId, $current['subscriptions'], true) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not join topic'];
+        return self::updateSubscriptions($sessionId, static fn(array $now): array => array_merge($now, [$topic]), true) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not join topic'];
     }
     public static function agentLeaveTopic(string $sessionId, string $topic): array {
         $sessionId=self::cleanId($sessionId); if (!self::agentCanManage($sessionId)) return ['status'=>'error','message'=>'This workspace is not allowed to manage Relay subscriptions.'];
-        $current=self::subscriptions($sessionId); $next=array_values(array_diff($current['subscriptions'], [$topic]));
-        return self::saveSubscriptions($sessionId, $next, true) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not leave topic'];
+        return self::updateSubscriptions($sessionId, static fn(array $now): array => array_values(array_diff($now, [$topic])), true) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not leave topic'];
     }
     public static function subscriptions(string $sessionId): array {
         $sessionId = self::cleanId($sessionId); if ($sessionId === '') return [];
@@ -1196,11 +1299,25 @@ class AgentRelayService {
         ]);
     }
     public static function saveSubscriptions(string $sessionId, array $topics, bool $selfManage): bool {
+        return self::updateSubscriptions($sessionId, static fn(array $current): array => $topics, $selfManage);    }
+    /**
+     * R-057 (#635): change a session's subscription list as ONE locked read-modify-write.
+     * $change gets the current topic list and returns the wanted list, so two joins at
+     * the same time both land instead of one overwriting the other.
+     *
+     * @param callable(array):array $change
+     */
+    public static function updateSubscriptions(string $sessionId, callable $change, ?bool $selfManage = null): bool {
         $sessionId = self::cleanId($sessionId); if ($sessionId === '') return false;
-        $current = self::subscriptions($sessionId)['subscriptions'];
-        $allowed = array_merge(self::activeTopics(), $current); // an archived topic may still be explicitly unsubscribed
-        $clean = array_values(array_unique(array_filter(array_map('strval', $topics), fn($t) => in_array($t, $allowed, true))));
-        $existing=self::readJson(self::path("subscriptions/$sessionId.json"),[]); $direct=array_key_exists('direct_delivery',$existing) ? (bool)$existing['direct_delivery'] : true; return AtomicWriteService::writeJson(self::path("subscriptions/$sessionId.json"), ['schema'=>self::SCHEMA,'subscriptions'=>$clean,'agent_self_manage'=>$selfManage,'direct_delivery'=>$direct]);
+        return (bool)self::locked('subscriptions', function () use ($sessionId,$change,$selfManage): bool {
+            $now = self::subscriptions($sessionId);
+            $current = $now['subscriptions'];
+            $topics = $change($current);
+            $selfManage = $selfManage ?? $now['agent_self_manage'];
+            $allowed = array_merge(self::activeTopics(), $current); // an archived topic may still be explicitly unsubscribed
+            $clean = array_values(array_unique(array_filter(array_map('strval', $topics), fn($t) => in_array($t, $allowed, true))));
+            $existing=self::readJson(self::path("subscriptions/$sessionId.json"),[]); $direct=array_key_exists('direct_delivery',$existing) ? (bool)$existing['direct_delivery'] : true; return AtomicWriteService::writeJson(self::path("subscriptions/$sessionId.json"), ['schema'=>self::SCHEMA,'subscriptions'=>$clean,'agent_self_manage'=>$selfManage,'direct_delivery'=>$direct]);
+        }, false);
     }
     public static function publish(string $topic, string $severity, string $summary, string $source = 'manager-test', string $excludeSessionId = ''): array {
         if (!in_array($topic, self::activeTopics(), true) || !in_array($severity, self::SEVERITIES, true)) return ['status'=>'error','message'=>'Invalid or archived topic, or invalid severity'];
@@ -1271,20 +1388,31 @@ class AgentRelayService {
         $summary=trim($summary); if ($summary==='' || strlen($summary)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Request summary must be 1–2048 bytes.'];
         if ($clientRequestId!=='' && !preg_match(self::CLIENT_REQUEST_ID_PATTERN,$clientRequestId)) return ['status'=>'error','message'=>'client_request_id must be 1–128 characters: letters, digits, . _ : -'];
         $idemFile=$clientRequestId!=='' ? self::path("requests/_idem/$sender/".hash('sha256',$clientRequestId).'.json') : '';
-        if ($idemFile!=='') {
-            $prior=(string)(self::readJson($idemFile,[])['id'] ?? '');
-            $existing=$prior!=='' ? self::requestRecord($prior) : null;
-            if ($existing!==null && ($existing['sender_session'] ?? '')===$sender) {
-                return ['status'=>'ok','id'=>$prior,'actor_session'=>(string)($existing['actor_session'] ?? ''),'ack_deadline'=>(string)($existing['ack_deadline'] ?? ''),'state'=>(string)($existing['state'] ?? ''),'duplicate'=>true];
-            }
-        }
         $ackSeconds=max(30,min(3600,$ackSeconds)); $resolveSeconds=max($ackSeconds,min(86400,$resolveSeconds));
-        $created=gmdate('c'); $id='req_'.bin2hex(random_bytes(12));
-        $request=['schema'=>self::SCHEMA,'id'=>$id,'topic'=>$topic,'sender_session'=>$sender,'actor_session'=>$actor,'summary'=>$summary,'state'=>'pending','created_at'=>$created,'ack_deadline'=>gmdate('c',time()+$ackSeconds),'resolve_deadline'=>gmdate('c',time()+$resolveSeconds)];
-        foreach (['origin','sender_name'] as $k) if (isset($origin[$k]) && is_string($origin[$k]) && $origin[$k]!=='') $request[$k]=$origin[$k];
-        if ($clientRequestId!=='') $request['client_request_id']=$clientRequestId;
-        if (!AtomicWriteService::writeJson(self::path("requests/$id.json"),$request)) return ['status'=>'error','message'=>'Could not persist request'];
-        if ($idemFile!=='') AtomicWriteService::writeJson($idemFile,['id'=>$id,'created_at'=>$created]);
+        // R-057 (#635): the idempotency check and the write are one locked step, so two
+        // calls with the same client_request_id cannot both create a request.
+        $made=self::locked('requests', function () use ($idemFile,$sender,$actor,$topic,$summary,$ackSeconds,$resolveSeconds,$clientRequestId,$origin): array {
+            if ($idemFile!=='') {
+                $prior=(string)(self::readJson($idemFile,[])['id'] ?? '');
+                $existing=$prior!=='' ? self::requestRecord($prior) : null;
+                if ($existing!==null && ($existing['sender_session'] ?? '')===$sender) {
+                    return ['duplicate'=>['status'=>'ok','id'=>$prior,'actor_session'=>(string)($existing['actor_session'] ?? ''),'ack_deadline'=>(string)($existing['ack_deadline'] ?? ''),'state'=>(string)($existing['state'] ?? ''),'duplicate'=>true]];
+                }
+            }
+            $created=gmdate('c'); $id='req_'.bin2hex(random_bytes(12));
+            $request=['schema'=>self::SCHEMA,'id'=>$id,'topic'=>$topic,'sender_session'=>$sender,'actor_session'=>$actor,'summary'=>$summary,'state'=>'pending','created_at'=>$created,'ack_deadline'=>gmdate('c',time()+$ackSeconds),'resolve_deadline'=>gmdate('c',time()+$resolveSeconds)];
+            foreach (['origin','sender_name'] as $k) if (isset($origin[$k]) && is_string($origin[$k]) && $origin[$k]!=='') $request[$k]=$origin[$k];
+            if ($clientRequestId!=='') $request['client_request_id']=$clientRequestId;
+            if (!AtomicWriteService::writeJson(self::path("requests/$id.json"),$request)) return ['error'=>true];
+            self::indexRequest($request);
+            self::recordRequestIndexCount();
+            if ($idemFile!=='') AtomicWriteService::writeJson($idemFile,['id'=>$id,'created_at'=>$created]);
+            return ['request'=>$request];
+        });
+        if ($made===null) return self::busy();
+        if (isset($made['duplicate'])) return $made['duplicate'];
+        if (isset($made['error'])) return ['status'=>'error','message'=>'Could not persist request'];
+        $request=$made['request']; $id=$request['id']; $created=$request['created_at'];
         $delivery=['schema'=>self::SCHEMA,'message_id'=>$id,'request_file'=>"requests/$id.json",'state'=>'pending','created_at'=>$created];
         AtomicWriteService::writeJson(self::path("deliveries/$actor/$id.json"),$delivery);
         self::ensureActorReady($topic);
@@ -1294,15 +1422,22 @@ class AgentRelayService {
     }
     public static function respondRequest(string $actor, string $id, string $state, string $note=''): array {
         $actor=self::cleanId($actor); if (!preg_match(self::REQUEST_ID_PATTERN,$id) || !in_array($state,['acknowledged','resolved','failed'],true)) return ['status'=>'error','message'=>'Invalid request response.'];
-        $file=self::path("requests/$id.json"); $r=self::readJson($file,[]);
-        if (($r['actor_session'] ?? '') !== $actor) return ['status'=>'error','message'=>'Only the assigned actor can respond.'];
-        // A closed request never changes again: a cancelled request cannot be
-        // resolved, and a resolved one cannot be re-opened by a late acknowledge.
-        if (in_array((string)($r['state'] ?? ''), self::REQUEST_CLOSED, true)) return ['status'=>'error','message'=>'This request is already closed ('.$r['state'].').','state'=>$r['state']];
-        if (($r['state'] ?? '')==='pending' && $state==='resolved') return ['status'=>'error','message'=>'Acknowledge the request before resolving it.'];
-        $note=trim($note); if (strlen($note)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Response note must be 2048 bytes or fewer.'];
-        $r['state']=$state; $r['note']=$note; $r[$state.'_at']=gmdate('c');
-        return AtomicWriteService::writeJson($file,$r) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not save response'];
+        $file=self::path("requests/$id.json");
+        // R-057 (#635): read, check and write under one lock, so a cancel that lands
+        // in between is seen here and cannot be overwritten.
+        return self::locked('requests', function () use ($file,$actor,$state,$note): array {
+            $r=self::readJson($file,[]);
+            if (($r['actor_session'] ?? '') !== $actor) return ['status'=>'error','message'=>'Only the assigned actor can respond.'];
+            // A closed request never changes again: a cancelled request cannot be
+            // resolved, and a resolved one cannot be re-opened by a late acknowledge.
+            if (in_array((string)($r['state'] ?? ''), self::REQUEST_CLOSED, true)) return ['status'=>'error','message'=>'This request is already closed ('.$r['state'].').','state'=>$r['state']];
+            if (($r['state'] ?? '')==='pending' && $state==='resolved') return ['status'=>'error','message'=>'Acknowledge the request before resolving it.'];
+            $note=trim($note); if (strlen($note)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Response note must be 2048 bytes or fewer.'];
+            // R-052 (#630): updated_at is what the sender's unread inbox compares with its cursor.
+            $now=gmdate('c');
+            $r['state']=$state; $r['note']=$note; $r[$state.'_at']=$now; $r['updated_at']=$now;
+            return AtomicWriteService::writeJson($file,$r) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not save response'];
+        }, self::busy());
     }
     public static function requestStatus(string $sender, string $id): array {
         $sender=self::cleanId($sender); $r=self::requestRecord($id) ?? [];
@@ -1320,6 +1455,34 @@ class AgentRelayService {
     }
 
     /**
+     * R-056 (#634): per-session request index, like the direct-message index. An entry
+     * `requests/_by/<session>/<request id>.json` exists for the sender and for the actor
+     * of each request, so an inbox read opens only that session's requests and not every
+     * request file in the store. The marker counts the request files it covers; a request
+     * written by an older generation (no entry) changes the count, and the next read
+     * backfills it. Entries are never rewritten once they exist.
+     */
+    const REQUEST_INDEX_MARKER = 'requests/_index.json';
+    private static function indexRequest(array $r): void {
+        $id=(string)($r['id'] ?? ''); if (!preg_match(self::REQUEST_ID_PATTERN,$id)) return;
+        foreach (['sender_session','actor_session'] as $k) {
+            $sid=self::cleanId((string)($r[$k] ?? '')); if ($sid==='') continue;
+            $p=self::path("requests/_by/$sid/$id.json");
+            if (!is_file($p)) AtomicWriteService::writeJson($p,['id'=>$id]);
+        }
+    }
+    private static function recordRequestIndexCount(?int $count=null): void {
+        $count ??= count(glob(self::path('requests/req_*.json')) ?: []);
+        AtomicWriteService::writeJson(self::path(self::REQUEST_INDEX_MARKER),['schema'=>self::SCHEMA,'built_at'=>gmdate('c'),'request_count'=>$count]);
+    }
+    private static function ensureRequestIndex(): void {
+        $files=glob(self::path('requests/req_*.json')) ?: [];
+        if (count($files)===(int)(self::readJson(self::path(self::REQUEST_INDEX_MARKER),[])['request_count'] ?? -1)) return;
+        foreach ($files as $file) { $r=self::readJson($file,[]); if (!empty($r['id'])) self::indexRequest($r); }
+        self::recordRequestIndexCount(count($files));
+    }
+
+    /**
      * RELAY_LINKED_BOXES.md Phase 2: only the original sender may cancel, and
      * only while the request is open (pending or acknowledged). A repeated cancel
      * is harmless. A foreign or unknown id gets the same "not found" reply, so
@@ -1327,17 +1490,23 @@ class AgentRelayService {
      * (grant revoked, remote removed) is cancelOpenRequests().
      */
     public static function cancelRequest(string $sender, string $id, string $note = ''): array {
-        $sender=self::cleanId($sender); $r=self::requestRecord($id);
-        if ($sender==='' || $r===null || ($r['sender_session'] ?? '')!==$sender) return ['status'=>'error','message'=>'Request not found.'];
-        $note=trim($note); if (strlen($note)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Cancel note must be 2048 bytes or fewer.'];
-        $state=(string)($r['state'] ?? '');
-        if ($state==='cancelled') return ['status'=>'ok','id'=>$id,'state'=>'cancelled','already'=>true];
-        if (in_array($state, self::REQUEST_CLOSED, true)) return ['status'=>'error','message'=>'This request is already closed ('.$state.') and cannot be cancelled.','state'=>$state];
-        return self::markCancelled($r, 'sender', 'sender', $note) ? ['status'=>'ok','id'=>$id,'state'=>'cancelled'] : ['status'=>'error','message'=>'Could not save the cancel.'];
+        $sender=self::cleanId($sender);
+        $note=trim($note);
+        return self::locked('requests', function () use ($sender,$id,$note): array {
+            $r=self::requestRecord($id);
+            if ($sender==='' || $r===null || ($r['sender_session'] ?? '')!==$sender) return ['status'=>'error','message'=>'Request not found.'];
+            if (strlen($note)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Cancel note must be 2048 bytes or fewer.'];
+            $state=(string)($r['state'] ?? '');
+            if ($state==='cancelled') return ['status'=>'ok','id'=>$id,'state'=>'cancelled','already'=>true];
+            if (in_array($state, self::REQUEST_CLOSED, true)) return ['status'=>'error','message'=>'This request is already closed ('.$state.') and cannot be cancelled.','state'=>$state];
+            return self::markCancelled($r, 'sender', 'sender', $note) ? ['status'=>'ok','id'=>$id,'state'=>'cancelled'] : ['status'=>'error','message'=>'Could not save the cancel.'];
+        }, self::busy());
     }
 
+    /** Caller holds the 'requests' lock. */
     private static function markCancelled(array $r, string $by, string $reason, string $note = ''): bool {
-        $r['state']='cancelled'; $r['cancelled_at']=gmdate('c'); $r['cancelled_by']=$by; $r['cancel_reason']=$reason;
+        $now=gmdate('c');
+        $r['state']='cancelled'; $r['cancelled_at']=$now; $r['updated_at']=$now; $r['cancelled_by']=$by; $r['cancel_reason']=$reason; // R-052: updated_at feeds the sender's unread inbox
         if ($note!=='') $r['cancel_note']=$note;
         return AtomicWriteService::writeJson(self::path('requests/'.$r['id'].'.json'),$r);
     }
@@ -1358,7 +1527,14 @@ class AgentRelayService {
             if (($r['sender_session'] ?? '')!==$sender || !in_array((string)($r['state'] ?? ''),['pending','acknowledged'],true)) continue;
             if ($topics!==null && !in_array((string)($r['topic'] ?? ''),$topics,true)) continue;
             if (!preg_match(self::REQUEST_ID_PATTERN,(string)($r['id'] ?? ''))) continue;
-            if (self::markCancelled($r,'administrator',$reason)) $out[]=(string)$r['id'];
+            // R-057: take the request lock per file and look again, so an actor's
+            // resolve that landed after the scan is not overwritten.
+            $done=self::locked('requests', function () use ($file,$reason): ?string {
+                $fresh=self::readJson($file,[]);
+                if (!in_array((string)($fresh['state'] ?? ''),['pending','acknowledged'],true)) return null;
+                return self::markCancelled($fresh,'administrator',$reason) ? (string)$fresh['id'] : null;
+            });
+            if ($done!==null) $out[]=$done;
         }
         return $out;
     }
@@ -2173,8 +2349,10 @@ class AgentRelayService {
     /** Move the cursor forward only; an older time never replaces a newer one. */
     private static function advanceReadCursor(string $sid, string $iso): void {
         $t=strtotime($iso); if ($t===false) return;
-        $cur=self::readCursor($sid); if ($cur!=='' && strtotime($cur)>=$t) return;
-        AtomicWriteService::writeJson(self::path("system/read-cursors/$sid.json"),['read_at'=>gmdate('c',$t)]);
+        self::locked('cursors', function () use ($sid,$t): void {
+            $cur=self::readCursor($sid); if ($cur!=='' && strtotime($cur)>=$t) return;
+            AtomicWriteService::writeJson(self::path("system/read-cursors/$sid.json"),['read_at'=>gmdate('c',$t)]);
+        });
     }
     /** Any inbox read tells the notice ledger that this workspace has looked. */
     private static function noticeRead(string $sid): void {
@@ -2208,8 +2386,13 @@ class AgentRelayService {
         $assignments=self::agentAssignments($sessionId);
         $actorTopics=array_column($assignments, 'topic');
         // #118: filter first, sort newest-first on created_at, then limit (see inbox()).
-        $mine=[]; foreach (glob(self::path('requests/req_*.json')) ?: [] as $file) {
+        // R-056 (#634): read only this session's requests, through the per-session index,
+        // not every request file in the store.
+        self::ensureRequestIndex();
+        $mine=[]; foreach (glob(self::path("requests/_by/$sessionId/req_*.json")) ?: [] as $entry) {
+            $file=self::path('requests/'.basename($entry));
             $r=self::readJson($file,[]);
+            if (empty($r['id'])) continue;
             if (($r['actor_session'] ?? '')===$sessionId || ($r['sender_session'] ?? '')===$sessionId) {
                 $r['relay_role']=($r['actor_session'] ?? '')===$sessionId ? 'actor' : 'sender';
                 $r['_file']=basename($file); $mine[]=$r;
@@ -2238,6 +2421,11 @@ class AgentRelayService {
             $event['relay_role']=in_array($topic,$actorTopics,true) ? 'actor' : 'fyi';
         }
         unset($event);
+        // R-053 (#631): an event the session has now read is no longer waiting for it.
+        // The rows above keep the state as it was when read; the stored delivery moves on.
+        foreach ($events as $event) {
+            if (($event['delivery']['state'] ?? '')==='pending') self::setState($sessionId,(string)($event['delivery']['message_id'] ?? ''),'acknowledged');
+        }
         if ($since!=='') [$direct,$dh]=self::unreadDirect($sessionId,$since); else { $direct=self::directMessages($sessionId,$limit,$cursor); $dh=0; }
         $hidden+=$dh;
         $out=['events'=>$events,'requests'=>$requests,'direct_messages'=>$direct];
@@ -2331,7 +2519,111 @@ class AgentRelayService {
     }
     public static function setState(string $sessionId, string $messageId, string $state): bool {
         $sessionId=self::cleanId($sessionId); if ($sessionId==='' || !preg_match('/^rel_[a-f0-9]{24}$/',$messageId) || !in_array($state,['acknowledged','deferred'],true)) return false;
-        $file=self::path("deliveries/$sessionId/$messageId.json"); $d=self::readJson($file, []); if (!$d) return false;
-        $d['state']=$state; $d['updated_at']=gmdate('c'); return AtomicWriteService::writeJson($file,$d);
+        $file=self::path("deliveries/$sessionId/$messageId.json");
+        return (bool)self::locked('deliveries', function () use ($file,$state): bool {
+            $d=self::readJson($file, []); if (!$d) return false;
+            $d['state']=$state; $d['updated_at']=gmdate('c'); return AtomicWriteService::writeJson($file,$d);
+        }, false);
+    }
+
+    const RETENTION_DEFAULT_DAYS = 60;
+    const PRUNE_INTERVAL_SECONDS = 3600;
+    /** Days a closed or read item is kept; 0 means keep everything. */
+    public static function retentionDays(): int {
+        $days = (int)(self::settings()['retention_days'] ?? self::RETENTION_DEFAULT_DAYS);
+        return $days <= 0 ? 0 : max(7, min(3650, $days));
+    }
+    /**
+     * R-056 (#634): retention. Without it every event, delivery, request and direct
+     * message stayed for ever and each inbox read grew with the whole history.
+     *
+     * Settings key `retention_days` (default 60; 0 keeps everything; a positive value is
+     * held between 7 and 3650). Removed, once older than the window:
+     *  - a request that is resolved, failed or cancelled, and a request still open long
+     *    after its resolve deadline passed (nobody will answer it now), with its delivery,
+     *    index entries and idempotency record;
+     *  - a topic-event delivery that was read (any state but pending), then the event
+     *    itself once no delivery points at it;
+     *  - a direct message the recipient has read, with its index entries.
+     * Kept: anything newer than the window, a request that is open and not yet past its
+     * deadline, a direct message still queued for a linked box, and unread items (a
+     * pending delivery or a direct message newer than the recipient's read cursor) until
+     * they are twice the window old. Rate-limited to once an hour by system/last-prune.json.
+     *
+     * @return array{status:string,skipped?:string,removed?:array<string,int>}
+     */
+    public static function pruneStore(?int $now = null, bool $force = false): array {
+        $now ??= time(); $days = self::retentionDays();
+        if ($days === 0) return ['status'=>'ok','skipped'=>'retention is off'];
+        $stampFile = self::path('system/last-prune.json');
+        if (!$force && $now - (int)(self::readJson($stampFile, [])['at'] ?? 0) < self::PRUNE_INTERVAL_SECONDS) return ['status'=>'ok','skipped'=>'pruned recently'];
+        $cutoff = $now - $days * 86400; $hard = $now - 2 * $days * 86400;
+        $removed = ['requests'=>0,'deliveries'=>0,'events'=>0,'direct_messages'=>0];
+        $time = static fn($v): int => is_string($v) && $v !== '' ? (int)(strtotime($v) ?: 0) : 0;
+
+        // Requests, with their deliveries and index entries.
+        foreach (glob(self::path('requests/req_*.json')) ?: [] as $file) {
+            $r = self::readJson($file, []); $id = (string)($r['id'] ?? '');
+            if (!preg_match(self::REQUEST_ID_PATTERN, $id)) continue;
+            $closed = in_array((string)($r['state'] ?? ''), self::REQUEST_CLOSED, true);
+            $last = 0; foreach (['created_at','updated_at','resolved_at','failed_at','cancelled_at'] as $k) $last = max($last, $time($r[$k] ?? ''));
+            $stale = $closed ? ($last > 0 && $last < $cutoff) : ($time($r['resolve_deadline'] ?? '') > 0 && $time($r['resolve_deadline'] ?? '') < $cutoff);
+            if (!$stale) continue;
+            $gone = self::locked('requests', function () use ($file, $id, $closed): bool {
+                // Look again under the lock: an open request may have been answered since the scan.
+                $fresh = self::readJson($file, []);
+                if ((string)($fresh['id'] ?? '') !== $id) return false;
+                if (in_array((string)($fresh['state'] ?? ''), self::REQUEST_CLOSED, true) !== $closed) return false;
+                return @unlink($file);
+            }, false);
+            if (!$gone) continue;
+            $removed['requests']++;
+            foreach (['actor_session','sender_session'] as $k) {
+                $sid = self::cleanId((string)($r[$k] ?? '')); if ($sid === '') continue;
+                @unlink(self::path("requests/_by/$sid/$id.json"));
+                if ($k === 'actor_session' && @unlink(self::path("deliveries/$sid/$id.json"))) $removed['deliveries']++;
+            }
+        }
+        foreach (glob(self::path('requests/_idem/*/*.json')) ?: [] as $f) {
+            $t = $time(self::readJson($f, [])['created_at'] ?? '');
+            if ($t > 0 && $t < $cutoff) @unlink($f);
+        }
+        self::recordRequestIndexCount();
+
+        // Event deliveries, then the events nothing points at any more.
+        $referenced = [];
+        foreach (glob(self::path('deliveries/*/*.json')) ?: [] as $f) {
+            $d = self::readJson($f, []); $t = $time($d['created_at'] ?? '');
+            $isRequest = !empty($d['request_file']);
+            if ($isRequest) { // the request may be gone already (removed above, or by hand)
+                if (!is_file(self::path((string)$d['request_file'])) && $t > 0 && $t < $cutoff && @unlink($f)) $removed['deliveries']++;
+                continue;
+            }
+            $unread = ($d['state'] ?? '') === 'pending';
+            if ($t > 0 && $t < $cutoff && (!$unread || $t < $hard) && @unlink($f)) { $removed['deliveries']++; continue; }
+            $mid = (string)($d['message_id'] ?? ''); if ($mid !== '') $referenced[$mid] = true;
+        }
+        foreach (glob(self::path('messages/*/rel_*.json')) ?: [] as $f) {
+            $m = self::readJson($f, []); $t = $time($m['created_at'] ?? '');
+            if ($t > 0 && $t < $cutoff && !isset($referenced[(string)($m['id'] ?? basename($f, '.json'))]) && @unlink($f)) $removed['events']++;
+        }
+        foreach (glob(self::path('messages/*'), GLOB_ONLYDIR) ?: [] as $dir) @rmdir($dir); // empty day folders only
+
+        // Direct messages the recipient has read.
+        $cursors = [];
+        foreach (glob(self::path('direct/dm_*/msg_*.json')) ?: [] as $f) {
+            $m = self::readJson($f, []); $t = $time($m['created_at'] ?? '');
+            if ($t === 0 || $t >= $cutoff || ($m['remote_state'] ?? '') === 'queued') continue;
+            $to = self::cleanId((string)($m['recipient_session'] ?? ''));
+            $cursors[$to] ??= $to === '' ? 0 : $time(self::readCursor($to));
+            if ($t > $cursors[$to] && $t >= $hard) continue; // unread: kept up to twice the window
+            foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) foreach (glob(self::path("direct/$box/*/*_" . basename($f))) ?: [] as $entry) @unlink($entry);
+            if (@unlink($f)) $removed['direct_messages']++;
+        }
+        foreach (glob(self::path('direct/dm_*'), GLOB_ONLYDIR) ?: [] as $dir) @rmdir($dir); // empty threads only
+        if ($removed['direct_messages'] > 0) self::recordDirectIndexCount();
+
+        AtomicWriteService::writeJson($stampFile, ['schema'=>self::SCHEMA,'at'=>$now,'retention_days'=>$days,'removed'=>$removed]);
+        return ['status'=>'ok','removed'=>$removed];
     }
 }

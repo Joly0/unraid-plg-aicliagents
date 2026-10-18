@@ -56,62 +56,42 @@ if ($server === false) {
 }
 fwrite(STDERR, "relay-http: listening on https://$bind:$port using $cert ({$profile['source']})\n");
 
-/** Read a full HTTP request (headers + body) with a bounded read. */
-function relayHttpRead($conn): array {
-    $raw = '';
-    while (!str_contains($raw, "\r\n\r\n")) {
-        $chunk = @fread($conn, 8192);
-        if ($chunk === false || $chunk === '') return ['', '/', [], ''];
-        $raw .= $chunk;
-        if (strlen($raw) > RelayHttpService::MAX_BODY_BYTES * 2) break;
-    }
-    [$head, $body] = array_pad(explode("\r\n\r\n", $raw, 2), 2, '');
-    $lines = explode("\r\n", $head);
-    $requestLine = explode(' ', (string)array_shift($lines));
-    $method = (string)($requestLine[0] ?? '');
-    $path = (string)($requestLine[1] ?? '/');
-    $headers = [];
-    foreach ($lines as $line) {
-        $pos = strpos($line, ':');
-        if ($pos === false) continue;
-        $headers[strtolower(trim(substr($line, 0, $pos)))] = trim(substr($line, $pos + 1));
-    }
-    // Honour Content-Length so a body split across packets is read in full.
-    $expected = (int)($headers['content-length'] ?? 0);
-    $expected = min($expected, RelayHttpService::MAX_BODY_BYTES + 1);
-    while (strlen($body) < $expected) {
-        $chunk = @fread($conn, 8192);
-        if ($chunk === false || $chunk === '') break;
-        $body .= $chunk;
-    }
-    return [$method, $path, $headers, $body];
+// R-055 (#633): many connections at once, each non-blocking and each with an overall
+// deadline (see relay-http-lib.php). One slow client no longer stops the others.
+require_once __DIR__ . '/relay-http-lib.php';
+
+/** @return array{status:int,body:string,headers?:array<string,string>} */
+function relayHttpHandle(string $method, string $path, array $headers, string $body, string $peer): array {
+    return RelayHttpService::handleRequest($method, $headers, $body, $peer, $path);
 }
+
+stream_set_blocking($server, false);
+/** @var array<int,array> $conns open connections, by resource id */
+$conns = [];
 
 while (true) {
-    $conn = @stream_socket_accept($server, 30, $peerName);
-    if ($conn === false) continue;   // accept timeout: loop so the daemon stays responsive to signals
-
-    // Bound every phase so one slow or hostile client cannot stall the loop.
-    stream_set_timeout($conn, 10);
-    if (@stream_socket_enable_crypto($conn, true, STREAM_CRYPTO_METHOD_TLS_SERVER) !== true) { @fclose($conn); continue; }
-
-    [$method, $path, $headers, $body] = relayHttpRead($conn);
-    $peer = strtok((string)$peerName, ':') ?: 'unknown';
-
-    $result = $method === ''
-        ? ['status' => 400, 'body' => json_encode(['error' => 'malformed request'])]
-        : RelayHttpService::handleRequest($method, $headers, $body, $peer, $path);
-
-    $payload = (string)$result['body'];
-    // Linked-box responses carry a signature header (RELAY_LINKED_BOXES.md §3).
-    $extra = '';
-    foreach ((array)($result['headers'] ?? []) as $hk => $hv) {
-        if (preg_match('/^[A-Za-z0-9-]{1,64}$/', (string)$hk) && preg_match('/^[\x20-\x7E]{0,256}$/', (string)$hv)) $extra .= "$hk: $hv\r\n";
+    $read = [$server];
+    $write = [];
+    foreach ($conns as $conn) {
+        if ($conn['phase'] === 'write') $write[] = $conn['sock']; else $read[] = $conn['sock'];
     }
-    @fwrite($conn, "HTTP/1.1 {$result['status']}\r\n"
-        . "Content-Type: application/json\r\n"
-        . $extra
-        . "Content-Length: " . strlen($payload) . "\r\n"
-        . "Connection: close\r\n\r\n" . $payload);
-    @fclose($conn);
+    $except = null;
+    // A one-second wake-up lets the deadline sweep run when no socket is ready.
+    $ready = @stream_select($read, $write, $except, 1);
+    if ($ready === false) { usleep(100000); continue; }   // interrupted by a signal
+
+    foreach ($read as $sock) {
+        if ($sock === $server) {
+            while (($new = @stream_socket_accept($server, 0, $peerName)) !== false) {
+                if (count($conns) >= RELAY_HTTP_MAX_CONNECTIONS) { @fclose($new); continue; }
+                stream_set_blocking($new, false);
+                $conns[(int)$new] = relayHttpNewConn($new, strtok((string)$peerName, ':') ?: 'unknown', true, time());
+            }
+            continue;
+        }
+        relayHttpAdvance($conns, (int)$sock, 'relayHttpHandle');
+    }
+    foreach ($write as $sock) relayHttpAdvance($conns, (int)$sock, 'relayHttpHandle');
+    relayHttpSweepDeadlines($conns, time());
 }
+

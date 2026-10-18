@@ -107,7 +107,8 @@ switch ($action) {
     // tests/lib/e2e-sessions.sh close and by the boot sweep.
     // #546: the supervisor's periodic sweep of subscriptions left by closed sessions
     // (a fresh file, a topic owner, a workspace, a DM peer and a remote client are kept).
-    case 'sweep-orphans': $result = ['status'=>'ok', 'swept'=>AgentRelayService::sweepOrphanedSubscriptions(600)]; break;
+    // R-056 (#634): the same periodic run also applies the store retention (once an hour at most).
+    case 'sweep-orphans': $result = ['status'=>'ok', 'swept'=>AgentRelayService::sweepOrphanedSubscriptions(600), 'pruned'=>AgentRelayService::pruneStore()]; break;
     case 'purge-test-traces': $result = ['status'=>'ok', 'purged'=>AgentRelayService::purgeTestSessionTraces()]; break;
     case 'http-listener-reconcile': $result = AgentRelayService::ensureHttpListener(); break;
     default: $result = ['status'=>'error', 'message'=>'Unknown action. Use topics, subscriptions, inbox, contacts, direct, reply, create, update, archive, delete, join, leave, publish, request, request-status, cancel-request, ack, resolve, fail, drain-all, peer-sync, sweep-orphans, or purge-test-traces. Message shapes: "direct <recipient_session_id> <message>" and "reply <thread_id> <message> <recipient_session_id>".'];
