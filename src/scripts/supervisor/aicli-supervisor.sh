@@ -2657,6 +2657,7 @@ _op_history() {
     local runner="${STORAGE_DIR:-}/history-move.php"
     [ "$op" = "removeold" ] && runner="${STORAGE_DIR:-}/remove-old-versions.php"
     [ "$op" = "cleantmp" ] && runner="${STORAGE_DIR:-}/clean-agent-tmp.php"   # AGENT_TEMP_FOLDER.md R5
+    [ "$op" = "migratepath" ] && runner="${STORAGE_DIR:-}/migrate-paths.php"   # STORAGE_TARGET_PICKER.md, #652: the path move runs here, not in the web request
     if [ -z "$id" ] || [ -z "$job_id" ] || [ ! -f "$runner" ] || ! command -v php >/dev/null 2>&1; then
         log_error "History job for $entity cannot run: missing id, job id, runner or php"
         _OP_EXIT=1
@@ -4801,7 +4802,7 @@ _work_tick() {
                     backup)
                         _op_backup_home "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
-                    historymove|historyback|removeold|cleantmp)
+                    historymove|historyback|removeold|cleantmp|migratepath)
                         _op_history "$req_op" "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
                     restore)

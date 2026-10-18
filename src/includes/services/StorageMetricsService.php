@@ -128,25 +128,10 @@ class StorageMetricsService {
         }
 
         // 2. Discover Homes from Home Storage Path
-        $unraidUsers = UtilityService::getUnraidUsers();
-        foreach ($unraidUsers as $user) {
-            require_once __DIR__ . '/LayerManifestService.php';
-            $files = LayerManifestService::layerFilesOfEntity($homePath, 'home', (string)$user);   // R-002: exact entity
-            if (count($files) > 0 || is_dir(UtilityService::getWorkDir($user))) {
-                $mnt = "/tmp/unraid-aicliagents/work/$user/home";
-                $homes[$user] = self::getEntityStats('home', $user, $homePath, $mnt);
-            }
-        }
-
-        // 3. Fallback: Check active work directories for homes without deltas yet
-        $workBase = "/tmp/unraid-aicliagents/work";
-        if (is_dir($workBase)) {
-            foreach (glob("$workBase/*", GLOB_ONLYDIR) as $dir) {
-                $user = basename($dir);
-                if (!isset($homes[$user]) && !str_contains($user, '.migrated')) {
-                    $homes[$user] = self::getEntityStats('home', $user, $homePath, "$dir/home");
-                }
-            }
+        // (Sections 2 and 3 of the old code live in homeUserIds(), so BackupCronService
+        // can list the homes without the du/df work of getEntityStats.)
+        foreach (self::homeUserIds($homePath) as $user) {
+            $homes[$user] = self::getEntityStats('home', $user, $homePath, "/tmp/unraid-aicliagents/work/$user/home");
         }
 
         // 4. Identify Migration Artifacts (Leftovers)
@@ -418,19 +403,13 @@ class StorageMetricsService {
             $fsize = @filesize($sqsh);
             $physicalSize += $fsize;
             $bname = basename($sqsh);
-            $ts = '00000000T000000Z';
-            if (preg_match('/_(?:delta|consolidated)_(\d{8}T\d{6}Z)/', $bname, $m)) {
-                $ts = $m[1];
-            } elseif (preg_match('/_delta_(\d{10,})/', $bname, $m)) {
-                $ts = $m[1];
-            } elseif (preg_match('/_v(\d{10,})_/', $bname, $m)) {
-                $ts = $m[1];
-            }
+            [$ts, $seq] = self::layerOrderKey($bname);
             $layerFiles[] = [
                 'path' => $sqsh,
                 'name' => $bname,
                 'size_bytes' => $fsize,
                 'timestamp' => $ts,
+                'seq' => $seq,
                 'is_delta' => strpos($bname, 'delta') !== false
             ];
         }
@@ -438,7 +417,8 @@ class StorageMetricsService {
         usort($layerFiles, function($a, $b) {
             if ($a['is_delta'] && !$b['is_delta']) return -1;
             if (!$a['is_delta'] && $b['is_delta']) return 1;
-            return strcmp($b['timestamp'], $a['timestamp']);
+            $c = strcmp($b['timestamp'], $a['timestamp']);
+            return $c !== 0 ? $c : ($b['seq'] <=> $a['seq']);
         });
 
         // WP #271 follow-up: surface the deferred-consolidation status so the
@@ -457,6 +437,57 @@ class StorageMetricsService {
             'consolidate_pending'  => ($pendingSince !== null),
             'consolidate_pending_since' => $pendingSince,
         ];
+    }
+
+    /**
+     * R-134: the ids of the homes the Storage tab draws a card for, without any
+     * du/df/mount work. Homes of Unraid users that have layers or a work folder,
+     * then any other work folder (a home with no layer yet; '.migrated' folders skipped).
+     * $workBase is a test seam.
+     *
+     * @return string[]
+     */
+    public static function homeUserIds(?string $homePath = null, string $workBase = '/tmp/unraid-aicliagents/work'): array
+    {
+        require_once __DIR__ . '/LayerManifestService.php';
+        $homePath = $homePath ?? StoragePathResolver::homePersistPath('');
+        $ids = [];
+        foreach (UtilityService::getUnraidUsers() as $user) {
+            $files = LayerManifestService::layerFilesOfEntity($homePath, 'home', (string)$user);   // R-002: exact entity
+            if (count($files) > 0 || is_dir(UtilityService::getWorkDir($user))) {
+                $ids[(string)$user] = true;
+            }
+        }
+        if (is_dir($workBase)) {
+            foreach (glob("$workBase/*", GLOB_ONLYDIR) ?: [] as $dir) {
+                $user = basename($dir);
+                if (!isset($ids[$user]) && !str_contains($user, '.migrated')) {
+                    $ids[$user] = true;
+                }
+            }
+        }
+        return array_map('strval', array_keys($ids));
+    }
+
+    /**
+     * R-131: the sort key of one layer file name: [timestamp string, sequence].
+     * The current name {type}_{id}_{kind}_{seq10}_{dt}.sqsh (LayerManifestService::parseLayerName)
+     * gives the dt and the sequence. The timestamp is a STRING so a legacy epoch
+     * ("1776318800") and a canonical dt ("20260506T143022Z") sort together by lex compare.
+     *
+     * @return array{0: string, 1: int}
+     */
+    public static function layerOrderKey(string $bname): array
+    {
+        require_once __DIR__ . '/LayerManifestService.php';
+        if (LayerManifestService::parseLayerName($bname) !== null
+            && preg_match('/_(\d{10})_(\d{8}T\d{6}Z)\.sqsh$/', $bname, $m) === 1) {
+            return [$m[2], (int)$m[1]];
+        }
+        if (preg_match('/_(?:delta|consolidated)_(\d{8}T\d{6}Z)/', $bname, $m)) return [$m[1], 0];
+        if (preg_match('/_delta_(\d{10,})/', $bname, $m)) return [$m[1], 0];
+        if (preg_match('/_v(\d{10,})_/', $bname, $m)) return [$m[1], 0];
+        return ['00000000T000000Z', 0];
     }
 
     /**

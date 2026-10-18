@@ -126,7 +126,16 @@ class BootIntegrityService {
         );
 
         if ($hostMismatch) {
-            return ['state' => self::STATE_HOST_MISMATCH, 'evidence' => $evidence];
+            // R-139: a USB flash moved to another machine halts for review only when this
+            // entity has something to review (layers the manifest expects, layers on disk,
+            // sibling layers, or legacy data). An entity with none of these is genuine_fresh
+            // on any host, and halting it helped nobody.
+            $hasLegacy = empty($expectedLayers) && empty($activeFiles) && empty($siblingFiles)
+                && self::hasLegacyData($persistPath, $type, $id);
+            if (self::hostMismatchHalts($expectedLayers, $activeFiles, $siblingFiles, $hasLegacy)) {
+                return ['state' => self::STATE_HOST_MISMATCH, 'evidence' => $evidence];
+            }
+            $evidence['host_mismatch_ignored'] = true;
         }
 
         if (empty($expectedLayers)) {
@@ -207,6 +216,20 @@ class BootIntegrityService {
             return ['state' => self::STATE_PATH_DRIFT, 'evidence' => $evidence];
         }
         return ['state' => self::STATE_TOTAL_LOSS, 'evidence' => $evidence];
+    }
+
+    /**
+     * R-139: pure. After a host change, does this entity have anything to review?
+     * False means it is empty on every side (no expected layers, no layer files,
+     * no sibling layers, no legacy data) and so it is genuine_fresh.
+     *
+     * @param array<int,mixed> $expectedLayers
+     * @param array<int,mixed> $activeFiles
+     * @param array<int,mixed> $siblingFiles
+     */
+    public static function hostMismatchHalts(array $expectedLayers, array $activeFiles, array $siblingFiles, bool $hasLegacy): bool
+    {
+        return !empty($expectedLayers) || !empty($activeFiles) || !empty($siblingFiles) || $hasLegacy;
     }
 
     /**

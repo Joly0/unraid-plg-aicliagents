@@ -91,6 +91,24 @@ final class UpperPlacementService
         return $out;
     }
 
+    /**
+     * R-130: size in MB of the zram device mounted at ZRAM_BASE; 0 when nothing is
+     * mounted there. Before the device is mounted, ZRAM_BASE is a plain folder on
+     * the RAM root, and disk_total_space() of that folder reports the whole RAM
+     * disk, not the zram device. Seam: 'mounts' (a /proc/mounts-style table),
+     * 'zram_disk_total' (callable returning bytes).
+     */
+    public static function zramDeviceMb(array $seams = []): int
+    {
+        $mounts = $seams['mounts'] ?? (is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '');
+        if (is_callable($mounts)) $mounts = $mounts();
+        if (!StorageMountService::mountTableHasTarget((string)$mounts, StoragePathResolver::ZRAM_BASE)) return 0;
+        $bytes = isset($seams['zram_disk_total'])
+            ? (float)$seams['zram_disk_total']()
+            : (float)@disk_total_space(StoragePathResolver::ZRAM_BASE);
+        return (int)floor($bytes / 1048576);
+    }
+
     /** Read-only: what a change to $target would do, and whether it is allowed. */
     public static function preflight(string $target, ?array $config = null, array $seams = []): array
     {
@@ -115,8 +133,11 @@ final class UpperPlacementService
 
         if ($moves !== []) {
             if ($target === 'zram') {
-                $zramMb = (int)($seams['zram_total_mb'] ?? (int)floor((float)@disk_total_space(StoragePathResolver::ZRAM_BASE) / 1048576));
-                if ($zramMb <= 0 || $totalMb > (int)floor($zramMb * self::ZRAM_MAX_SHARE)) {
+                $zramMb = isset($seams['zram_total_mb']) ? (int)$seams['zram_total_mb'] : self::zramDeviceMb($seams);
+                if ($zramMb <= 0) {
+                    return ['status' => 'error', 'message' => 'The RAM layer device is not mounted yet, so there is no way to check that the writable layers fit in RAM. Start the array (or save a home once) so the device exists, then try again.'];
+                }
+                if ($totalMb > (int)floor($zramMb * self::ZRAM_MAX_SHARE)) {
                     return ['status' => 'error', 'message' => "The writable layers hold $totalMb MB and the RAM layer device holds $zramMb MB. Moving them to RAM would not fit (limit "
                         . (int)floor(self::ZRAM_MAX_SHARE * 100) . ' % of the device). Save and merge the homes first, or keep the disk layer.'];
                 }
@@ -221,12 +242,19 @@ final class UpperPlacementService
                 return ['saved' => (bool)$r->saved || (bool)$r->ok, 'exit' => $r->exit, 'reason' => $r->deferReason];
             };
             $reasons = [];
-            foreach ($moves as $h) {
-                $r = $persist($h['id']);
-                if (empty($r['saved'])) $reasons[$h['id']] = ($r['reason'] ?? '') ?: ('save exit ' . ($r['exit'] ?? '?'));
+            try {
+                foreach ($moves as $h) {
+                    $r = $persist($h['id']);
+                    if (empty($r['saved'])) $reasons[$h['id']] = ($r['reason'] ?? '') ?: ('save exit ' . ($r['exit'] ?? '?'));
+                }
+                $after = self::homeStates($target, $config, $seams);
+            } catch (\Throwable $e) {
+                // R-130: the setting was saved early (the bake reads it). An exception must
+                // not leave it out of step with the data, so put the old value back.
+                $save(['storage_upper_mode' => $prev]);
+                LogService::log('Writable-layer move failed: ' . $e->getMessage(), LogService::LOG_ERROR, 'UpperPlacementService');
+                return ['status' => 'error', 'message' => 'The move stopped on an error. The setting is back to ' . self::label($prev) . '; your data is where it was and nothing was deleted.', 'moved' => []];
             }
-
-            $after = self::homeStates($target, $config, $seams);
             $failed = [];
             foreach ($after as $h) {
                 if ($h['needs_move']) $failed[$h['id']] = $reasons[$h['id']] ?? self::convergeReason($h['id'], $seams);

@@ -1381,7 +1381,7 @@ class SupervisorService {
                 && strpos($opId, 'user_restore_home_') !== 0) continue;
             if (isset($liveOpIds[$opId])) continue;
             $st = (string)($a['status'] ?? '');
-            if ($st === 'running' || $st === 'stalled') {
+            if ($st === 'running' || $st === 'stalled' || $st === ActivityService::STATUS_WAITING) {   // R-137: a waiting row of a reaped job too
                 ActivityService::finish($opId, '');
             }
         }

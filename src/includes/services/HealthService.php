@@ -564,7 +564,7 @@ class HealthService {
         $mounted = [];
         if (preg_match_all('#^\S+\s+/tmp/unraid-aicliagents/work/([^/\s]+)/home\s+overlay\b#m', $mounts, $m)) {
             foreach ($m[1] as $user) {
-                $mounted["home/$user"] = self::hasLayers('home', $user, StoragePathResolver::homePersistPath(''));
+                $mounted["home/$user"] = self::hasLayers('home', (string)$user, StoragePathResolver::homePersistPath((string)$user));
             }
         }
         // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through

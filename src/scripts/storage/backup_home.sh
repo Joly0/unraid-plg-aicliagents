@@ -663,6 +663,14 @@ _backup_prune() {
 
     local names=() entry name
     shopt -s nullglob
+    # R-133: "Delete snapshot" moves a snapshot to .deleting-<name>-<hex> and then
+    # removes it. A crash or a failed rmdir leaves that tree, and no list or prune
+    # sees it (the dot name matches no snapshot shape). Sweep them here. rm -rf
+    # never follows a symbolic link; only a real directory directly in $base counts.
+    for entry in "$base"/.deleting-*; do
+        [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+        rm -rf -- "$entry" 2>/dev/null || true
+    done
     for entry in "$base"/*/; do
         entry="${entry%/}"
         name="$(basename "$entry")"

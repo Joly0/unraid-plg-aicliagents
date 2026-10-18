@@ -592,7 +592,7 @@ class TerminalHandler {
         }
 
         // Check 1: Is the home storage path available?
-        $homePath = $config['home_storage_path'] ?? $persistPath;
+        $homePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);   // R-046: the one resolver
         if (!\AICliAgents\Services\StorageMountService::isPathAvailable($homePath)) {
             $classification = \AICliAgents\Services\StorageMountService::classifyPath($homePath);
 
@@ -742,7 +742,7 @@ class TerminalHandler {
         // #614: the UI offers an Emergency Session only while home storage is down. Check it
         // here too, on the server: a direct call must not swap the home of a healthy box.
         $persistPathEm = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
-        $homePathEm = $config['home_storage_path'] ?? $persistPathEm;
+        $homePathEm = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);   // R-046: the one resolver
         $homeUp = is_callable(self::$homeAvailableProbe)
             ? (bool)call_user_func(self::$homeAvailableProbe, (string)$homePathEm)
             : \AICliAgents\Services\StorageMountService::isPathAvailable((string)$homePathEm);

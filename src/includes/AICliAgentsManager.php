@@ -214,6 +214,7 @@ use AICliAgents\Services\StorageMountService;
 use AICliAgents\Services\StorageMetricsService;
 use AICliAgents\Services\FileStorage;
 use AICliAgents\Services\StorageMigrationService;
+use AICliAgents\Services\StoragePathResolver;
 use AICliAgents\Services\InstallerService;
 use AICliAgents\Services\TerminalService;
 use AICliAgents\Services\AutoLaunchSuppression;
@@ -419,7 +420,7 @@ function aicli_migrate_agent_storage($path) {
  */
 function aicli_migrate_home_path() {
     $cfg = getAICliConfig();
-    $homePath = $cfg['home_storage_path'] ?? ($cfg['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents');
+    $homePath = StoragePathResolver::homePersistPathFromConfig($cfg);   // R-046: the one resolver
     return StorageMigrationService::migratePersistence($homePath);
 }
 

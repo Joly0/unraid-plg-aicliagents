@@ -232,6 +232,15 @@ function saveAICliAgentsManager(form, silent = false) {
 
                 // Execute migration (pass both old and new paths — execute_migrate saves config AFTER copying)
                 $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=execute_migrate&agent_storage_path=' + encodeURIComponent(newAgentPath) + '&home_storage_path=' + encodeURIComponent(newHomePath) + '&old_agent_path=' + encodeURIComponent(curAgentPath) + '&old_home_path=' + encodeURIComponent(curHomePath) + '&csrf_token=' + csrf, function(r) {
+                    if (r.status === 'queued') {
+                        // F18 (#652): the copy runs in a supervisor job and goes on when this page closes.
+                        // Save the settings of the form EXCEPT the two paths (the job saves those after the copy).
+                        var rest = $(form).serializeArray().filter(function (f) { return f.name !== 'agent_storage_path' && f.name !== 'home_storage_path'; });
+                        $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=' + csrf, $.param(rest));
+                        hideMigrateOverlay();
+                        swal({ title: "Storage move started", text: r.message || "The files are copied in the background. Watch the activity tray.", type: "info", confirmButtonText: "OK" }, function() { safeReload(); });
+                        return;
+                    }
                     if (r.status === 'ok') {
                         // Now save all non-path form settings (migration already saved the paths)
                         var params = $(form).serialize();

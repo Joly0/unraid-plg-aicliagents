@@ -50,7 +50,8 @@ class HistoryHandler
     {
         $user = trim((string)($_REQUEST['user'] ?? ''));
         if ($user === '' || $user === '0') $user = 'root';
-        if (preg_match('/^[A-Za-z0-9._-]+$/', $user) !== 1) return ['invalid_user', $user];
+        // R-138: a home id never starts with a dot, so "." and ".." cannot name the store base.
+        if (preg_match('/^[A-Za-z0-9_][A-Za-z0-9._-]*$/', $user) !== 1) return ['invalid_user', $user];
         return [null, $user];
     }
 

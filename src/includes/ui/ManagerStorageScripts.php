@@ -751,8 +751,8 @@ function graduateStorage(type, id, physicalMb) {
             }
             aicli_log_to_server("User requested move-off-USB for " + type + "/" + id + " → " + chosen, 2);
             aicliAjax('graduate_storage', { type: type, target: chosen }, function(r) {
-                if (r && r.status === 'ok') {
-                    swal({ title: "Move started", text: "The data is being copied and verified, then the path is switched. Watch progress on this tab.", type: "success", timer: 4000, showConfirmButton: false });
+                if (r && (r.status === 'ok' || r.status === 'queued')) {
+                    swal({ title: "Move started", text: "The data is being copied and verified, then the path is switched. This goes on if you close the page. Watch progress in the activity tray.", type: "success", timer: 4000, showConfirmButton: false });
                 } else {
                     swal("Move failed", (r && r.message) || "Unknown error. Check debug.log.", "error");
                 }

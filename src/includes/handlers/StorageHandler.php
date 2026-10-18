@@ -2214,18 +2214,21 @@ class StorageHandler {
     }
 
     /**
-     * Execute storage path migration with per-file progress via Nchan.
+     * #652: the one entry for a storage path move (action execute_migrate). It does not copy
+     * anything: it checks, closes the sessions, queues the saves and queues the supervisor
+     * job (op migratepath) that does the copy, so the move goes on when the browser closes.
+     *
+     * Only one move runs at a time: a refusal while another move holds the lock, while it
+     * is queued, or while the crash-safe marker of an earlier move is still there (that
+     * move must finish or resume first). A client that sends old paths which differ from
+     * the live settings (a stale tab) is refused before anything is touched. The old paths
+     * are never taken from the client.
+     *
+     * @param array<string,callable> $seams test seams for queuePathMove()
      */
-    /**
-     * #652: the one entry for a storage path move. Only one move runs at a time:
-     * a non-blocking lock, and a refusal while the crash-safe marker of an earlier
-     * move is still there (that move must finish or resume first). A client that
-     * sends old paths which differ from the live settings (a stale tab) is
-     * refused before anything is touched. The old paths are never taken from
-     * the client.
-     */
-    public static function executeMigrateExclusive(): array {
+    public static function executeMigrateExclusive(array $seams = []): array {
         require_once __DIR__ . '/../services/FileStorage.php';
+        require_once __DIR__ . '/../services/StoragePathMoveJobService.php';
         $config = getAICliConfig();
         foreach (['old_agent_path' => 'agent_storage_path', 'old_home_path' => 'home_storage_path'] as $param => $key) {
             if (isset($_GET[$param]) && (string)$_GET[$param] !== (string)($config[$key] ?? '/boot/config/plugins/unraid-aicliagents/persistence')) {
@@ -2233,6 +2236,7 @@ class StorageHandler {
                 return ['status' => 'error', 'message' => 'The storage settings changed since this page was loaded. Reload the page and try again.'];
             }
         }
+        // The lock is held by the job while it copies. Here it is only probed.
         $lock = \AICliAgents\Services\FileStorage::acquireMigrationLock();
         if ($lock === null) {
             return ['status' => 'error', 'message' => 'Another storage move is already running. Wait for it to finish.'];
@@ -2241,44 +2245,27 @@ class StorageHandler {
             if (\AICliAgents\Services\FileStorage::isMigrationInProgress()) {
                 return ['status' => 'error', 'message' => 'An earlier storage move did not finish. It must finish or resume first.'];
             }
-            return self::executeMigrate();
         } finally {
             \AICliAgents\Services\FileStorage::releaseMigrationLock($lock);
         }
+        if (\AICliAgents\Services\StoragePathMoveJobService::hasPending()) {
+            return ['status' => 'error', 'message' => 'Another storage move is already queued. Wait for it to finish.'];
+        }
+        return self::queuePathMove($config, (string)($_GET['agent_storage_path'] ?? ''), (string)($_GET['home_storage_path'] ?? ''), $seams);
     }
 
     /**
-     * #652: wait until the supervisor has drained the queued saves and merges of
-     * each entity ([type, id] pairs). $budgetSec is the total wait. Returns null
-     * when all finished, else a plain message. $drain is the test seam; it has the
-     * shape of SupervisorService::waitForOpsToDrain(type, id, timeoutSec).
-     * @param array<int,array{0:string,1:string}> $entities
+     * Check the new paths, close the sessions, queue the saves, queue the move job.
+     * Returns at once with status `queued`; the copy runs in runPathMove() under the supervisor.
+     * The tray row `storage_migrate` shows "waiting" until the job starts, then the steps.
+     *
+     * @param array<string,mixed> $config the live settings (the old paths are taken from here)
+     * @param array<string,callable> $seams test seams: validate (fn(kind, path, config): array), mounted (fn(path): bool),
+     *        evict (fn(): void), enqueue (fn(type, id, op, reason, prio, jobId): bool)
      */
-    public static function waitForPreMigrationJobs(array $entities, int $budgetSec, ?callable $drain = null): ?string {
-        $drain = $drain ?? static function (string $t, string $i, int $sec): array {
-            return \AICliAgents\Services\SupervisorService::waitForOpsToDrain($t, $i, $sec);
-        };
-        $deadline = time() + max(1, $budgetSec);
-        $seen = [];
-        foreach ($entities as [$type, $id]) {
-            if (isset($seen["$type/$id"])) continue;
-            $seen["$type/$id"] = true;
-            $left = $deadline - time();
-            $res = $left > 0 ? $drain($type, $id, $left) : ['status' => 'timeout'];
-            if (($res['status'] ?? '') === 'timeout') {
-                return "The save of unsaved changes for $type $id did not finish in time. Nothing was moved. Try again when the server is quiet.";
-            }
-        }
-        return null;
-    }
-
-    private static function executeMigrate() {
-        set_time_limit(600);
-        $config = getAICliConfig();
-        $newAgentPath = $_GET['agent_storage_path'] ?? '';
-        $newHomePath = $_GET['home_storage_path'] ?? '';
+    public static function queuePathMove(array $config, string $newAgentPath, string $newHomePath, array $seams = []): array {
         // #652: the old paths are the live settings (the move saves the new paths only
-        // after the copy). The browser's old_* values are never used, only compared above.
+        // after the copy). The browser's old_* values are never used, only compared.
         $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
         $oldHomePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
 
@@ -2298,8 +2285,10 @@ class StorageHandler {
         // StorageTargetService::resolveViaShareConfig) /mnt/user share onto
         // its direct pool path even when the browser sent the raw share path.
         require_once __DIR__ . '/../services/StorageTargetService.php';
+        $validate = $seams['validate'] ?? static fn(string $kind, string $path, array $cfg): array =>
+            \AICliAgents\Services\StorageTargetService::validateTarget($kind, $path, $cfg);
         if ($newAgentPath !== '' && $newAgentPath !== $oldAgentPath) {
-            $__mcVerdict = \AICliAgents\Services\StorageTargetService::validateTarget('agent', (string)$newAgentPath, $config);
+            $__mcVerdict = $validate('agent', (string)$newAgentPath, $config);
             if (!$__mcVerdict['ok']) {
                 aicli_log("Storage Migration: refusing invalid agent target $newAgentPath — {$__mcVerdict['message']}", AICLI_LOG_ERROR);
                 return ['status' => 'error', 'message' => $__mcVerdict['message']];
@@ -2310,7 +2299,7 @@ class StorageHandler {
             }
         }
         if ($newHomePath !== '' && $newHomePath !== $oldHomePath) {
-            $__mcVerdict = \AICliAgents\Services\StorageTargetService::validateTarget('home', (string)$newHomePath, $config);
+            $__mcVerdict = $validate('home', (string)$newHomePath, $config);
             if (!$__mcVerdict['ok']) {
                 aicli_log("Storage Migration: refusing invalid home target $newHomePath — {$__mcVerdict['message']}", AICLI_LOG_ERROR);
                 return ['status' => 'error', 'message' => $__mcVerdict['message']];
@@ -2322,26 +2311,36 @@ class StorageHandler {
         }
         unset($__mcVerdict);
 
-        // Follow-on #1: a settings path change is an EXPLICIT, crash-safe TOLD
-        // migration. migratePath() marker-BRACKETS this proven copy flow (it does
-        // NOT replace it), so an interrupted copy leaves a resumable
-        // .migration_inprogress.json for boot rather than a drifted path the
-        // supervisor/boot discovers and halts on — which is what makes the
-        // path_drift discovery-halt + op_mount LEGACY_FOUND probing redundant.
-        require_once __DIR__ . '/../services/FileStorage.php';
-        $__migResult = null;
-        $__migWork = function () use (&$__migResult, $config, $oldAgentPath, $newAgentPath, $oldHomePath, $newHomePath) {
         // Issue #56: validation and execution are separated by UI/request time.
         // Recheck the backing mounts immediately before evicting sessions or
         // creating destination directories so an array-stop race fails closed.
+        $mounted = $seams['mounted'] ?? static fn(string $p): bool => \AICliAgents\Services\StorageMountService::isBackingMountAvailable($p);
         foreach ([['agent', $newAgentPath, $oldAgentPath], ['home', $newHomePath, $oldHomePath]] as [$kind, $newPath, $oldPath]) {
-            if ($newPath && $newPath !== $oldPath
-                && !\AICliAgents\Services\StorageMountService::isBackingMountAvailable((string)$newPath)) {
-                $__migResult = ['status' => 'error', 'message' => ucfirst($kind) . " target storage is not mounted: $newPath"];
+            if ($newPath && $newPath !== $oldPath && !$mounted((string)$newPath)) {
                 aicli_log("Storage Migration: refusing unavailable $kind target $newPath", AICLI_LOG_ERROR);
-                return false;
+                return ['status' => 'error', 'message' => ucfirst($kind) . " target storage is not mounted: $newPath"];
             }
         }
+
+        require_once __DIR__ . '/../services/StoragePathMoveJobService.php';
+        $jobSvc = \AICliAgents\Services\StoragePathMoveJobService::class;
+        $moveJobId = \AICliAgents\Services\SupervisorService::generateJobId($jobSvc::OP, $jobSvc::TYPE, $jobSvc::ID);
+        // One claim for the whole move: a second request is refused until this move ends.
+        if (!$jobSvc::claim($moveJobId)) {
+            return ['status' => 'error', 'message' => 'Another storage move is already queued. Wait for it to finish.'];
+        }
+        $enqueue = $seams['enqueue'] ?? static fn(string $t, string $i, string $o, string $r, int $p, string $j): bool =>
+            \AICliAgents\Services\SupervisorService::enqueue($t, $i, $o, $r, $p, $j);
+        // From here a failure must give the claim back and end the tray row.
+        $fail = function (string $message, int $progress) use ($jobSvc, $moveJobId): array {
+            $jobSvc::cleanup($moveJobId);
+            $row = self::migrationFailureRow($message, $progress, false);
+            \AICliAgents\Services\ActivityService::fail('storage_migrate', $row['error'], $row['recovery'], [
+                'type' => 'migrate', 'label' => self::$migrateLabel, 'step' => $row['step'], 'meta' => ['cancel' => 'none'],
+            ]);
+            return ['status' => 'error', 'message' => $message];
+        };
+
         // 1. Evict all sessions
         $__target = (string)($newHomePath ?: $newAgentPath);
         self::$migrateLabel = $__target !== '' ? "Moving storage to $__target" : 'Moving storage';
@@ -2352,15 +2351,18 @@ class StorageHandler {
             'step' => 'Closing sessions', 'progress' => 5, 'meta' => ['cancel' => 'none'],
         ]);
         self::migrateProgress('Stopping active sessions...', 5, [], 'Closing sessions');
-        // R3 (CAPTURE_RESUME_ALL_CLOSE_PATHS): a storage-path migration is an
-        // orderly, user-initiated action — time is available, so run the FULL
-        // clean capture (quiesce + scrape, authoritative resume id) for every
-        // live session BEFORE the hard evict, so chat continuity survives the
-        // migration. Generous-but-bounded budget; never throws (shutdown-safe).
-        aicli_log("Storage Migration: Capturing resume ids before evict (R3)...", AICLI_LOG_INFO);
-        \AICliAgents\Services\TerminalService::captureResumeForShutdown(null, 60);
-        aicli_log("Storage Migration: Evicting active sessions...", AICLI_LOG_INFO);
-        \AICliAgents\Services\ProcessManager::evictAll();
+        $evict = $seams['evict'] ?? static function (): void {
+            // R3 (CAPTURE_RESUME_ALL_CLOSE_PATHS): a storage-path migration is an
+            // orderly, user-initiated action — time is available, so run the FULL
+            // clean capture (quiesce + scrape, authoritative resume id) for every
+            // live session BEFORE the hard evict, so chat continuity survives the
+            // migration. Generous-but-bounded budget; never throws (shutdown-safe).
+            aicli_log("Storage Migration: Capturing resume ids before evict (R3)...", AICLI_LOG_INFO);
+            \AICliAgents\Services\TerminalService::captureResumeForShutdown(null, 60);
+            aicli_log("Storage Migration: Evicting active sessions...", AICLI_LOG_INFO);
+            \AICliAgents\Services\ProcessManager::evictAll();
+        };
+        $evict();
 
         // 2. Enqueue bakes at OLD paths before copying — supervisor flushes dirty ZRAM
         //    so we copy the complete final state (Phase 3.3: no synchronous I/O in handler).
@@ -2369,28 +2371,27 @@ class StorageHandler {
 
         self::migrateProgress('Flushing dirty ZRAM layers before migration...', 10, [], 'Saving unsaved changes');
         aicli_log("Storage Migration: Enqueuing pre-migration bakes via supervisor...", AICLI_LOG_INFO);
-        // #652: remember each entity that gets a pre-migration job, so the copy below
-        // starts only after the supervisor has finished them.
-        $__preJobs = [];
-        if (!\AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_migrate', 5)) {
-            $__migResult = ['status' => 'error', 'message' => 'Could not queue the save of unsaved changes. Nothing was moved.'];
-            return false;
+        // F18 (#652): the move job runs on the same supervisor, after these jobs (priority 5 runs
+        // before the move's priority 6). It reads the ledger entry of the home save and refuses
+        // to copy when that save did not finish.
+        $preBakeId = \AICliAgents\Services\SupervisorService::generateJobId('bake', 'home', (string)$user);
+        if (!$enqueue('home', (string)$user, 'bake', 'pre_migrate', 5, $preBakeId)) {
+            return $fail('Could not queue the save of unsaved changes. Nothing was moved.', 10);
         }
-        $__preJobs[] = ['home', $user];
+        $preJobs = [$preBakeId];
 
         // Enqueue pre-migration consolidations at OLD path (skip if on Flash)
         $oldAgentOnFlash = (strpos($oldAgentPath, '/boot/') === 0 || strpos($oldAgentPath, '/boot') === 0);
         if ($newAgentPath && $newAgentPath !== $oldAgentPath && !$oldAgentOnFlash) {
             $seenAgents = [];
-            foreach (glob("$oldAgentPath/agent_*.sqsh") as $sqsh) {
+            foreach (glob("$oldAgentPath/agent_*.sqsh") ?: [] as $sqsh) {
                 if (preg_match('/agent_(.*?)_(v\d+|delta)/', basename($sqsh), $m)) {
                     $aid = $m[1];
                     if (isset($seenAgents[$aid])) continue;
                     $seenAgents[$aid] = true;
                     if (count(glob("$oldAgentPath/agent_{$aid}_*.sqsh")) > 1) {
                         self::migrateProgress("Queuing consolidation for agent: $aid...", 15, [], 'Merging agent layers first');
-                        \AICliAgents\Services\SupervisorService::enqueue('agent', $aid, 'consolidate', 'pre_migrate', 5);
-                        $__preJobs[] = ['agent', $aid];
+                        $enqueue('agent', (string)$aid, 'consolidate', 'pre_migrate', 5, '');
                     }
                 }
             }
@@ -2398,22 +2399,72 @@ class StorageHandler {
         // Enqueue pre-migration consolidation for home at OLD path (skip if on Flash)
         $oldHomeOnFlash = (strpos($oldHomePath, '/boot/') === 0 || strpos($oldHomePath, '/boot') === 0);
         if ($newHomePath && $newHomePath !== $oldHomePath && !$oldHomeOnFlash) {
-            if (count(glob("$oldHomePath/home_{$user}_*.sqsh")) > 1) {
+            if (count(glob("$oldHomePath/home_{$user}_*.sqsh") ?: []) > 1) {
                 self::migrateProgress('Queuing home layer consolidation...', 20, [], 'Merging home layers first');
-                \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'consolidate', 'pre_migrate', 5);
+                $enqueue('home', (string)$user, 'consolidate', 'pre_migrate', 5, '');
             }
         }
 
-        // #652: the copy must start only after the saves and merges above are done,
-        // or the last changes stay in the old folder. If they do not finish, stop
-        // here: nothing has been copied or changed.
-        self::migrateProgress('Waiting for the saves to finish...', 22, [], 'Saving unsaved changes');
-        $__waitError = self::waitForPreMigrationJobs($__preJobs, 420);
-        if ($__waitError !== null) {
-            aicli_log("Storage Migration: $__waitError", AICLI_LOG_ERROR);
-            $__migResult = ['status' => 'error', 'message' => $__waitError];
-            return false;
+        // 3. Queue the move itself. The options file is written BEFORE the job is queued, so the
+        //    job always finds it.
+        if (!$jobSvc::writeOptions($moveJobId, [
+            'new_agent' => $newAgentPath, 'new_home' => $newHomePath, 'pre_jobs' => $preJobs,
+            'label' => self::$migrateLabel, 'queued_at' => time(),
+        ])) {
+            return $fail('Could not save the options of the move. Nothing was copied.', 22);
         }
+        if (!$enqueue($jobSvc::TYPE, $jobSvc::ID, $jobSvc::OP, 'user_migrate', $jobSvc::PRIORITY, $moveJobId)) {
+            return $fail('Could not queue the move. Nothing was copied.', 22);
+        }
+        // The row waits for the supervisor to reach the move: it has no worker that heartbeats it yet.
+        \AICliAgents\Services\ActivityService::wait('storage_migrate', 'Waiting for the saves to finish', 22);
+        if (!isset($seams['enqueue'])) \AICliAgents\Services\SupervisorService::wake();
+        aicli_log("Storage Migration: queued move job $moveJobId", AICLI_LOG_INFO);
+        return [
+            'status' => 'queued', 'job_id' => $moveJobId,
+            'message' => 'The storage move is queued. Your workspaces were closed. The files are copied in the background, so you can close this page. Watch the activity tray for progress.',
+        ];
+    }
+
+    /**
+     * F18 (#652): the copy of a storage path move. It runs ONLY in the supervisor job (op migratepath,
+     * scripts/storage/migrate-paths.php through StoragePathMoveJobService::run), which holds the move
+     * lock and has checked that the saves finished. The paths are the ones queuePathMove() validated
+     * and resolved; this method reads no request. Progress goes to the tray row `storage_migrate`.
+     * Returns the result array (status ok|error).
+     */
+    public static function runPathMove(string $newAgentPath, string $newHomePath): array {
+        $config = getAICliConfig();
+        $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $oldHomePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+
+        // Follow-on #1: a settings path change is an EXPLICIT, crash-safe TOLD
+        // migration. migratePath() marker-BRACKETS this proven copy flow (it does
+        // NOT replace it), so an interrupted copy leaves a resumable
+        // .migration_inprogress.json for boot rather than a drifted path the
+        // supervisor/boot discovers and halts on — which is what makes the
+        // path_drift discovery-halt + op_mount LEGACY_FOUND probing redundant.
+        require_once __DIR__ . '/../services/FileStorage.php';
+        $__migResult = null;
+        $__migWork = function () use (&$__migResult, $config, $oldAgentPath, $newAgentPath, $oldHomePath, $newHomePath) {
+        // Issue #56: the mounts can change between the queue and the start. Recheck them
+        // before the destination directories are created.
+        foreach ([['agent', $newAgentPath, $oldAgentPath], ['home', $newHomePath, $oldHomePath]] as [$kind, $newPath, $oldPath]) {
+            if ($newPath && $newPath !== $oldPath
+                && !\AICliAgents\Services\StorageMountService::isBackingMountAvailable((string)$newPath)) {
+                $__migResult = ['status' => 'error', 'message' => ucfirst($kind) . " target storage is not mounted: $newPath"];
+                aicli_log("Storage Migration: refusing unavailable $kind target $newPath", AICLI_LOG_ERROR);
+                return false;
+            }
+        }
+        $__target = (string)($newHomePath ?: $newAgentPath);
+        self::$migrateLabel = $__target !== '' ? "Moving storage to $__target" : 'Moving storage';
+        // The sessions were closed and the saves were queued before this job was queued.
+        self::$migrateLastProgress = 22;
+        self::$migrateSettingsSaved = false;
+        \AICliAgents\Services\ActivityService::register('storage_migrate', 'migrate', self::$migrateLabel, [
+            'step' => 'Starting the copy', 'progress' => 22, 'meta' => ['cancel' => 'none'],
+        ]);
 
         // 3. Build file list (after consolidation — minimal set)
         $files = [];

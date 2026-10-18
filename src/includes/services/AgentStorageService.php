@@ -113,6 +113,11 @@ class AgentStorageService
      */
     private static function treeBytes(string $dir, ?callable $du = null): int
     {
+        // R-141: `du` on a symbolic link measures the link, not the folder. Resolve it first.
+        if (is_link($dir)) {
+            $real = realpath($dir);
+            if ($real !== false) $dir = $real;
+        }
         if ($du !== null) return (int)$du($dir);
         if (!is_dir($dir)) return 0;
         require_once __DIR__ . '/MeasureDeadline.php';
@@ -173,7 +178,17 @@ class AgentStorageService
             $active = null;
             if (is_link($entry)) {
                 $link = (string)readlink($entry);
-                if (preg_match('#^\.versions/' . preg_quote($id, '#') . '/([^/]+)$#', $link, $lm)) $active = $lm[1];
+                if (preg_match('#^\.versions/' . preg_quote($id, '#') . '/([^/]+)$#', $link, $lm)) {
+                    $active = $lm[1];
+                } else {
+                    // R-141: a link that is not in the relative form (an absolute path, or a
+                    // path with extra segments) still points at a version folder. Resolve it.
+                    $real = realpath($entry);
+                    $realVersions = realpath($ptRoot . '/.versions/' . $id);
+                    if ($real !== false && $realVersions !== false && dirname($real) === $realVersions) {
+                        $active = basename($real);
+                    }
+                }
             }
             $versions = $ptRoot . '/.versions/' . $id;
             $current = 0; $previous = 0;

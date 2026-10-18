@@ -285,20 +285,35 @@ class StorageStateAuditService {
     }
 
     /** @return array<string,int> defer/bake marker basename => age seconds. */
-    private static function deferMarkerAges(): array {
+    public static function deferMarkerAges(?string $runtimeDir = null, ?string $lockDir = null): array {
         $ages = [];
         $now = time();
-        $rt = getenv('AICLI_RUNTIME_DIR') ?: StoragePathResolver::MOUNT_ROOT;
+        $rt = $runtimeDir ?? (getenv('AICLI_RUNTIME_DIR') ?: StoragePathResolver::MOUNT_ROOT);
         $rt = rtrim($rt, '/');
         foreach (@glob("$rt/.bake_defer_reason_*") ?: [] as $f) {
             $mt = @filemtime($f);
             if ($mt !== false) $ages[basename($f)] = max(0, $now - $mt);
         }
-        foreach (@glob('/var/run/aicli-bake-*.lock') ?: [] as $f) {
+        foreach (@glob(rtrim($lockDir ?? '/var/run', '/') . '/aicli-bake-*.lock') ?: [] as $f) {
+            // R-132: a bake lock file stays on disk after the bake ends. Only a lock that
+            // a process still holds can be a stale marker, so skip a free one. The probe
+            // is a shared lock, non-blocking, on a read-only handle: it creates nothing.
+            if (!self::lockIsHeld($f)) continue;
             $mt = @filemtime($f);
             if ($mt !== false) $ages[basename($f)] = max(0, $now - $mt);
         }
         return $ages;
+    }
+
+    /** R-132: does a process hold an exclusive flock on this file right now? */
+    private static function lockIsHeld(string $file): bool {
+        $fh = @fopen($file, 'r');
+        if ($fh === false) return false;
+        $wouldBlock = 0;
+        $got = @flock($fh, LOCK_SH | LOCK_NB, $wouldBlock);
+        if ($got) @flock($fh, LOCK_UN);
+        @fclose($fh);
+        return !$got && (int)$wouldBlock === 1;
     }
 
     /**

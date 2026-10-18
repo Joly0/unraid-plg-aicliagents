@@ -70,9 +70,9 @@ class TaskService {
         } elseif ($res === 2 && !$result->saved) {
             // #357: nothing was written (the storage lock stayed busy, or a
             // database copy was locked). Never report this as saved.
-            return ['status' => 'not_saved', 'message' => self::deferReasonMessage('home', $username)];
+            return ['status' => 'not_saved', 'message' => self::deferReasonMessage('home', $username, false, (string)$result->deferReason)];
         } elseif ($res === 2) {
-            return ['status' => 'busy', 'message' => self::deferReasonMessage('home', $username)];
+            return ['status' => 'busy', 'message' => self::deferReasonMessage('home', $username, true, (string)$result->deferReason)];
         } else {
             return ['status' => 'error', 'message' => 'Persistence (Bake) failed. Check debug.log for details.'];
         }
@@ -87,7 +87,7 @@ class TaskService {
      * was the original meaning of exit-2 before WP #935 added defer-eligible
      * SQLite failures, and remains the most common case (active terminal).
      */
-    private static function deferReasonMessage(string $type, string $id): string {
+    private static function deferReasonMessage(string $type, string $id, bool $saved = true, string $fallbackReason = ''): string {
         $sanitisedId = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
         $marker = "/tmp/unraid-aicliagents/.bake_defer_reason_{$type}_{$sanitisedId}";
         $reason = '';
@@ -98,6 +98,8 @@ class TaskService {
             }
             @unlink($marker);
         }
+        // The persist call may have read and removed the marker already; its result keeps the reason.
+        if ($reason === '') $reason = trim($fallbackReason);
         switch ($reason) {
             // #357: both reasons mean NO layer was written — say so plainly.
             case 'sqlite_backup_deferred':
@@ -127,6 +129,11 @@ class TaskService {
                 return 'Already safe: this home\'s changes live on the storage device, not in RAM, so nothing was lost and no new layer was written while a session is open. A compact layer is written when every session on this home has closed.';
             case 'mount_busy':
             default:
+                // R-136: the "persisted to Flash" text is true only when a layer was written.
+                // A not-saved result with no marker (or an unknown one) wrote nothing.
+                if (!$saved && $reason !== 'mount_busy') {
+                    return 'Not saved yet: the save stopped before it wrote a new layer, and no reason was recorded. Your changes are still in RAM; try Persist again, or the next save captures them. The debug log has the detail.';
+                }
                 return 'Data persisted to Flash, but ZRAM could not be cleared because a terminal session is still active. Please close all terminal tabs for this user to fully reset RAM usage.';
         }
     }

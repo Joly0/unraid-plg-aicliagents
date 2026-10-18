@@ -852,7 +852,7 @@ final class FileStorage
      * an interrupted copy leaves an unambiguous marker for boot rather than tripping
      * normal ops.
      *
-     * The real path-change consumer (StorageHandler::executeMigrate) owns a rich,
+     * The real path-change consumer (StorageHandler::runPathMove, run by the supervisor job) owns a rich,
      * proven copy flow (per-file progress, agent+home, pre/post consolidation), so
      * it passes that work as $work and migratePath simply MARKER-BRACKETS it — it
      * does NOT replace the logic. With no $work, falls back to the proven

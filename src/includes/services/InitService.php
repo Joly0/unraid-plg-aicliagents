@@ -194,7 +194,7 @@ class InitService {
         // Clean stale emergency mode state — only if HOME storage is back (not agent storage)
         if (file_exists(StorageMountService::EMERGENCY_FLAG)) {
             $config = ConfigService::getConfig();
-            $homePath = $config['home_storage_path'] ?? $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+            $homePath = StoragePathResolver::homePersistPathFromConfig($config);   // R-046: the one resolver
             if (StorageMountService::isPathAvailable($homePath)) {
                 // Storage is back — kill emergency sessions, clean up artifacts, notify UI
                 LogService::log("Emergency mode cleanup: storage now available. Killing emergency sessions...", LogService::LOG_INFO, "InitService");

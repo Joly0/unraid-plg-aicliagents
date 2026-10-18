@@ -68,11 +68,20 @@ class ConsolidateState {
         }
         $flag = self::flagPath($user);
         @mkdir(dirname($flag), 0777, true);
-        @file_put_contents($flag, (string)json_encode([
+        // R-135: write a temp file and rename it over the marker. A plain
+        // file_put_contents truncates first, so a reader (or clearHomeConsolidating,
+        // which reads the epoch) saw an empty file in the middle of the write.
+        $body = (string)json_encode([
             'user'       => self::safeUser($user),
             'started_at' => time(),
             'epoch'      => $epoch,
-        ]));
+        ]);
+        $tmp = $flag . '.' . bin2hex(random_bytes(4)) . '.tmp';
+        if (@file_put_contents($tmp, $body) === strlen($body) && @rename($tmp, $flag)) {
+            return $epoch;
+        }
+        @unlink($tmp);
+        @file_put_contents($flag, $body);
         return $epoch;
     }
 
@@ -117,7 +126,8 @@ class ConsolidateState {
      * still-active job, reports in progress.
      */
     public static function isHomeConsolidating(string $user): bool {
-        if (trim($user) === '') return false;
+        // R-135: an empty user means root here, exactly as in markHomeConsolidating()
+        // (both go through safeUser). It used to return false while the mark wrote root.
         $flag = self::flagPath($user);
         if (!is_file($flag)) return false;
 

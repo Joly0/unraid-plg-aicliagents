@@ -66,9 +66,9 @@ class BackupCronService {
      */
     private static function usersWithHome(): array {
         try {
-            $status = StorageMetricsService::getStatus();
-            $homes = is_array($status['homes'] ?? null) ? $status['homes'] : [];
-            return array_keys($homes);
+            // R-134: the id list only. getStatus() runs du and df for every home and
+            // this runs on every settings save.
+            return StorageMetricsService::homeUserIds();
         } catch (\Throwable $e) {
             LogService::log('BackupCronService could not enumerate home users: ' . $e->getMessage(), LogService::LOG_ERROR, 'BackupCronService');
             return [];
@@ -103,10 +103,24 @@ class BackupCronService {
             return;
         }
 
-        $content = "# AICliAgents: home backup schedule (one line per home, each with its own schedule)\n" . implode('', $lines);
-        @file_put_contents(self::CRON_FILE, $content);
+        if (!self::writeCronFile($lines, self::CRON_FILE)) {
+            LogService::log('Home backup schedule: the cron file could not be written, so the schedule is NOT active.', LogService::LOG_ERROR, 'BackupCronService');
+            return;
+        }
         @exec('/usr/local/sbin/update_cron 2>/dev/null');
         LogService::log('Home backup cron updated for ' . count($lines) . ' home(s).', LogService::LOG_INFO, 'BackupCronService');
+    }
+
+    /**
+     * R-134: write the cron file and say whether it really landed (the write used
+     * to be ignored, and the log said "updated" after a full disk or a read-only mount).
+     *
+     * @param string[] $lines
+     */
+    public static function writeCronFile(array $lines, string $file): bool {
+        $content = "# AICliAgents: home backup schedule (one line per home, each with its own schedule)\n" . implode('', $lines);
+        $written = @file_put_contents($file, $content);
+        return $written !== false && $written === strlen($content);
     }
 
     /**

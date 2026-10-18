@@ -79,7 +79,7 @@ final class StorageBackendPolicyService
     public static function targetVerdicts(array $config): array
     {
         $agentPath = (string)($config['agent_storage_path'] ?? '');
-        $homePath = (string)($config['home_storage_path'] ?? $agentPath);
+        $homePath = StoragePathResolver::homePersistPathFromConfig($config);   // R-046: the one resolver
         $out = [];
         foreach (['agent' => $agentPath, 'home' => $homePath] as $kind => $path) {
             $probe = FileStorage::probeTarget($path);
