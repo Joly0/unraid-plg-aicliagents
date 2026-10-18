@@ -47,6 +47,10 @@ class HubHandler
     /** True when the drift key is one the projectors can make and the resolve action may take. */
     public static function driftKeyIsValid(string $key): bool
     {
+        // An 'instructions:' key is only ever the OpenCode-Claude shape. The generic shape also
+        // allows ':' and '/' (tree keys), so without this an entry outside ~/.claude such as
+        // 'instructions:/etc/passwd' would pass the generic check.
+        if (strncmp($key, 'instructions:', 13) === 0) return preg_match(self::COMPAT_DRIFT_KEY_RE, $key) === 1;
         if (preg_match(self::DRIFT_KEY_RE, $key) === 1 && strpos($key, '..') === false) return true;
         return preg_match(self::COMPAT_DRIFT_KEY_RE, $key) === 1;
     }
