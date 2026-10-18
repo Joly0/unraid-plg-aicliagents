@@ -1268,7 +1268,7 @@ class StorageHandler {
      * AJAX action.
      *
      * @param array{snapshot?:string,mode?:string,safety_snapshot?:mixed} $opts
-     * @return array{status:string,jobId?:string,opId?:string,safety_snapshot?:bool,message?:string}
+     * @return array{status:string,jobId?:string,opId?:string,safety_snapshot?:bool,message?:string,reason?:string}
      */
     public static function restoreHome(string $user, array $opts = []): array {
         if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
@@ -2168,7 +2168,7 @@ class StorageHandler {
      * R-174: a second click must not queue a second job. Returns an error row when a job of
      * the same kind is already queued, running or deferred for this entity, else null.
      * $find is the test seam; it has the signature of SupervisorService::findActiveJob.
-     * @return array<string,string>|null
+     * @return array{status:'error',reason:'already_queued',message:string}|null
      */
     public static function duplicateJobRefusal(string $type, string $id, string $op, string $what, ?callable $find = null): ?array {
         $find ??= [\AICliAgents\Services\SupervisorService::class, 'findActiveJob'];
