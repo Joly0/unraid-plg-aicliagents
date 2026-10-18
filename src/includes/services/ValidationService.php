@@ -55,6 +55,16 @@ class ValidationService {
     ];
 
     /**
+     * True when a value holds a NUL byte (chr 0). PHP 8 makes realpath(), fopen(),
+     * scandir(), mkdir() and similar calls throw ValueError on one, which would crash
+     * the request. Path checks call this before any filesystem call. Check the raw
+     * value: trim() removes a NUL at either end and would hide it.
+     */
+    public static function containsNulByte($value): bool {
+        return is_string($value) && strpos($value, "\0") !== false;
+    }
+
+    /**
      * Validates a filesystem path against a whitelist of allowed base directories.
      * Resolves symlinks and prevents traversal attacks.
      *
@@ -63,7 +73,7 @@ class ValidationService {
      * @return string|false The resolved canonical path, or false if invalid.
      */
     public static function validatePath($path, $allowedBases = null) {
-        if (empty($path) || !is_string($path)) {
+        if (empty($path) || !is_string($path) || self::containsNulByte($path)) {
             return false;
         }
 
@@ -112,7 +122,7 @@ class ValidationService {
     public static function validateReadPath($path) {
         $resolved = self::validatePath($path);
         if ($resolved !== false) return $resolved;
-        if (empty($path) || !is_string($path)) return false;
+        if (empty($path) || !is_string($path) || self::containsNulByte($path)) return false;
         $canon = realpath($path);
         if ($canon === false) {
             $parent = realpath(dirname($path));
@@ -154,7 +164,7 @@ class ValidationService {
      * @return string|false
      */
     public static function validateIntendedPath($path) {
-        if (empty($path) || !is_string($path)) {
+        if (empty($path) || !is_string($path) || self::containsNulByte($path)) {
             return false;
         }
         $tail = [];

@@ -80,7 +80,11 @@ class BundleHandler
             $rawAgentId    = $_POST['agentId'] ?? '';
             $acceptSecrets = !empty($_POST['accept_secrets']) && $_POST['accept_secrets'] !== '0' && $_POST['accept_secrets'] !== 'false';
 
-            // Validate the upload dir (must be under a known tmp location).
+            // Validate the upload dir (must be under a known tmp location). A NUL byte
+            // makes realpath() throw, so refuse it first.
+            if (!is_string($rawUploadDir) || ValidationService::containsNulByte($rawUploadDir)) {
+                return ['status' => 'error', 'message' => 'Invalid upload directory'];
+            }
             $uploadDir = realpath($rawUploadDir);
             if ($uploadDir === false || !is_dir($uploadDir)) {
                 return ['status' => 'error', 'message' => 'Invalid upload directory'];

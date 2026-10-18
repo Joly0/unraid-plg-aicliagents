@@ -103,6 +103,10 @@ class AssetSurfaceService {
         if ($validAgentId === false) {
             return ['status' => 'error', 'message' => 'invalid agentId'];
         }
+        // The workspace path becomes the base of the folder walk; a NUL byte would make realpath() throw.
+        if (ValidationService::containsNulByte($path)) {
+            return ['status' => 'error', 'message' => 'invalid workspace path'];
+        }
 
         $descriptor = self::descriptorFor($validAgentId);
 

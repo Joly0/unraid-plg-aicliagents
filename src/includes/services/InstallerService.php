@@ -1005,6 +1005,10 @@ class InstallerService {
      */
     public static function restoreAgentVersion(string $agentId, string $backupDir): array {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+        // A NUL byte in either value makes realpath() throw; refuse it as a bad backup.
+        if (ValidationService::containsNulByte($agentId) || ValidationService::containsNulByte($backupDir)) {
+            return ['status' => 'error', 'message' => 'Not a retained backup for this agent'];
+        }
         $config = ConfigService::getConfig();
         $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
 

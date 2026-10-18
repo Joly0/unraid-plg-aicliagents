@@ -429,6 +429,10 @@ class UtilityHandler {
         // Resolve canonical path first (prevent traversal), then choose a safe
         // direct pool scan only for a proven cache-only user share. The logical
         // path is retained in the response and in every child item.
+        // A non-text value or a NUL byte makes realpath() throw; refuse both before any filesystem call.
+        if (!is_string($rawPath) || ValidationService::containsNulByte($rawPath)) {
+            return ['status' => 'error', 'message' => 'Path not found or access denied'];
+        }
         $path = realpath($rawPath);
         if ($path === false || !is_dir($path) || !is_readable($path)) {
             return ['status' => 'error', 'message' => 'Path not found or access denied'];

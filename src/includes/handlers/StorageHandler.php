@@ -1058,6 +1058,11 @@ class StorageHandler {
         if ($target === '') {
             return ['ok' => false, 'message' => 'Home restore refused: no backup target is known to resolve this snapshot.'];
         }
+        // A NUL byte makes realpath() throw; refuse it before any filesystem call.
+        if (\AICliAgents\Services\ValidationService::containsNulByte($target)
+            || \AICliAgents\Services\ValidationService::containsNulByte($snapshotArg)) {
+            return ['ok' => false, 'message' => "Home restore refused: the snapshot path is not inside $user's own backup folder."];
+        }
         $root = rtrim($target, '/') . '/aicli-home-backup/' . $user;
         $realRoot = realpath($root);
         if ($realRoot === false) {

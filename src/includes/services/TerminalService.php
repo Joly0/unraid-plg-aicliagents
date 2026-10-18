@@ -838,7 +838,7 @@ class TerminalService {
      * Finds a recent chat session for a project path.
      */
     public static function findSession($path, $agentId = 'gemini-cli') {
-        if (empty($path)) return null;
+        if (empty($path) || !is_string($path) || ValidationService::containsNulByte($path)) return null;
 
         // D-334: Gemini-specific chat session discovery
         if ($agentId === 'gemini-cli') {
