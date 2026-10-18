@@ -72,6 +72,7 @@ The dialog checks the saved folder each time it opens. This catches a drive that
 A good folder is on a pool, on an Unassigned Devices drive, or on an array disk. Rules:
 
 - A folder under `/mnt/user` is not saved as you typed it. A home has many thousands of small files, and copying them through Unraid's shared-folder layer can freeze the server. The plugin saves the real pool or disk path of the share instead. If it cannot find one, it refuses the folder and gives the reason.
+- A folder in RAM or on the Unraid flash drive is refused. This includes `/tmp`, `/root`, `/dev/shm`, `/boot`, and a path that reaches them with `..`. A backup there is lost at reboot, or the flash drive cannot hold the "latest" link. Choose a folder on a pool, a disk or an Unassigned Devices drive.
 - The folder must be writable.
 - The folder must not be inside a home or inside the plugin's own storage folder.
 - The folder needs free space of at least 1.5 times the size of the home.
@@ -184,7 +185,7 @@ A restore puts a snapshot back into the home. It always runs as a cold job. It c
 6. Press **Restore**. Expect: "Queued — Watch the activity tray for progress."
 
 > [!WARNING]
-> A restore closes every workspace of that user. In **Replace** mode, it also removes everything in the home that the snapshot does not hold. That includes work done after the snapshot was taken. The safety snapshot keeps that work. Do not untick it unless you are sure.
+> A restore closes every workspace of that user. In **Replace** mode, it also removes everything in the home that the snapshot does not hold. That includes work done after the snapshot was taken. The safety snapshot keeps that work. Do not untick it unless you are sure. One exception: a folder that the backup left out on purpose (the list in **Advanced: excluded files**, for example a cache folder) is not removed. The restore leaves it in the home as it is.
 
 The plugin reopens the workspaces after the restore. A workspace that was working when it closed receives a Continue message. The dialog says so.
 
@@ -287,3 +288,10 @@ A backup is a job in the same queue as saves and merges. Only one storage job ru
 - [Plugin management tools for agents](agent-tools.md) — how an agent proposes a backup or a restore.
 - [Settings reference](settings-reference.md) — every setting on every tab.
 - [Workspaces](workspaces.md) — how workspaces close and reopen.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-18** — A **Replace** restore no longer removes the folders that the backup left out. Spec `docs/specs/HOME_RESTORE.md`, issue #658.
+
+</details>

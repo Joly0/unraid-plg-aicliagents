@@ -187,6 +187,7 @@ When you close a workspace, the plugin reads from the exit screen or from the fi
 - **Claude Code** shows the name of a conversation on exit when you named it. The plugin looks for the matching conversation in the project store of the folder and saves its identifier. So **Resume** opens the right conversation and not the picker of Claude Code. If several conversations have the same name and the plugin cannot decide, it keeps the name. Claude Code may then show its own list.
 - **Codex CLI** conversations come from the files of Codex. The plugin skips the helper threads that Codex keeps next to your own.
 - **OpenCode** resumes the newest conversation of this folder, not the newest conversation of any folder.
+- **Codex CLI**, **Kilo Code** and **Goose** continue their newest saved conversation when the agent exits and starts again in the same workspace. The workspace does not open a blank chat at each restart.
 
 The plugin keeps one resume record for each workspace. Two open workspaces with the same agent and the same folder do not take each other's conversation. When the plugin cannot tell which conversation belongs to which workspace, it prefers an empty start to the wrong conversation. For example, after a crash, a workspace that never closed cleanly can open empty. A workspace that you close and open again later on the same folder keeps working as described above.
 
@@ -296,10 +297,14 @@ Each workspace runs in a tmux session (the session manager that keeps a terminal
 | A row with **upgrading** or **storage** | The agent upgrades, or the plugin merges the home layers. | Wait. The row opens again by itself. |
 | A blank or white terminal after an update | The terminal bridge runs the old plugin version. | Use **Reconnect terminal** in the details card. |
 | **Could not reload**, **Could not restart** or **Could not continue** | The agent is busy, an upgrade runs, or no saved conversation exists. | Read the message, wait until the agent is idle, and try again. |
+| **Could not start this workspace** or **Could not close this workspace** | The server refused the request or did not answer. A failed close keeps the workspace row. | Read the message. Check the **Debug Console** for the reason, then try again when the agent is ready. |
 | **Storage Unavailable** after a reboot | The folder of the workspace is not mounted yet. | Wait. The page tries again every 10 seconds. |
 | "Viewport too narrow to pin the drawer" | The page is less than 700 pixels wide. | Make the window wider, or use the drawer without the pin. |
 | The terminal looks small on your desktop | A phone or a tablet is attached to the same workspace. | Close it on the other device, or set **Size when shared** to `largest`. |
 | **Could not create folder** | The server refused to create the folder. | Read the message in the dialog. Choose another name or folder. |
+| **Could not read this folder** in the picker | The server could not list the folder. | Read the reason. Choose another folder. |
+| **Could not stop** after **Close** on an untracked row | The server refused to stop the session, or the request failed. The row stays. | Read the message and press **Close** again. |
+| A red message at the top of **Manage Session** | The plugin could not read the settings of this workspace. Saving is off, so a save cannot erase them. | Close the dialog and open it again. |
 
 For other problems, see [Health, Activity and troubleshooting](health-and-troubleshooting.md).
 
@@ -313,3 +318,11 @@ For other problems, see [Health, Activity and troubleshooting](health-and-troubl
 - [Config Hub](config-hub.md): the config and assets panel of an agent.
 - [Agent Store](agent-store.md): the version of each agent.
 - [Home and agent storage](storage.md): the storage that keeps your workspaces and homes.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-18** — A failed start shows the server reason, and a failed close keeps the workspace row and shows an error. Spec `docs/specs/WORKSPACE_SERVER_AUTHORITY.md`, issue #671.
+- **2026-10-18** — The picker says why a folder could not be read, **Close** on an untracked row keeps the row and says why when the stop fails, and **Manage Session** shows a red message and turns saving off when it cannot read the settings. Issue #670.
+
+</details>

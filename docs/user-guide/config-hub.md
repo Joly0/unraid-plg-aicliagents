@@ -94,6 +94,12 @@ A remote server (http or sse) often wants a login. The editor has an **Authentic
 
 The Config Hub never stores a typed token. A header that carries a login must hold a key in braces. If you type the token itself, the editor and the Config Hub refuse it and tell you to store the secret first. The reason is that the shared copy is a plain file, and the history backup would copy it. At **Apply to agents**, the Config Hub puts the real value into the file of each agent, in the form that the agent reads. The shared copy and the history keep only the key in braces.
 
+The same rule holds for a variable of a local server whose name looks like a login (for example a name with `TOKEN`, `SECRET`, `PASSWORD` or `KEY`), and for a web address that has a login in it, for example `?api_key=...`. Write `{MY_KEY}` in place of the value. If you use **Adopt** on a file that holds the real value of one of your secrets, the Config Hub puts the key in braces back for you. The drift list never shows a real secret value.
+
+#### A server that you saved before this rule
+
+An older server can still hold a typed login. Each later change to it is refused, for example **Save Server**, a change of the agent ticks, or the on and off switch. The message ends with the steps to take. It also shows the button **Move to the secrets vault**. Press the button. The Config Hub puts each typed login into the secrets vault under a new name, such as `GITHUB_API_TOKEN`, and keeps only that name in braces in the server. If the vault already holds the same value, the Config Hub uses that name. The message lists the places and the vault names, and never a value. Then press **Apply to agents**.
+
 If a key in braces is not in your secrets, the editor warns you after you save. The agent would receive the text `{MY_TOKEN}` and the server would reject it.
 
 After you save, the values of headers show masked. Leave a masked value as it is to keep it.
@@ -153,7 +159,7 @@ When a file differs from what the Config Hub wrote, the banner **Config drift de
 | modified | Someone changed the value in the file. |
 | deleted | Someone removed an entry that the Config Hub manages. |
 | unmanaged_conflict | The file already had an entry with the same name, which the Config Hub did not write. |
-| write_failed | The file could not be read or parsed, so the Config Hub left it alone. |
+| write_failed | The Config Hub could not write the file, so it left it alone. The row names the reason, for example that the file has comments or a trailing comma (the Config Hub cannot rewrite such a file without losing them), that a link points nowhere, or that a folder is not writable. |
 
 Press **show values** to compare what is on disk with the value in the Config Hub.
 
@@ -166,6 +172,10 @@ Choose one button for each row.
 | **Release** | Stops managing this key. The Config Hub leaves the file as it is. It also removes the agent from the targets of that server, so that the next **Apply to agents** does not take the key back. | Your edit stays in the file. |
 
 For a file that the Config Hub writes as one managed block, **Adopt** does not work. This applies to the Codex CLI and Goose files, and to the instruction files. The Config Hub cannot read your edit back into separate keys. Use **Overwrite** or **Release** for those rows.
+
+The Codex CLI and Goose files hold the managed block beside your own entries. If you wrote an entry with the same name outside the block, the Config Hub does not write a second one, because the agent would refuse the file. The row shows the kind **unmanaged_conflict** and the text "Defined outside the managed block". **Overwrite** also refuses. Rename or remove your entry in the file, then press **Apply to agents**.
+
+On a row for the Relay guidance, the Relay skill or the Plugin management skill, **Release** only stops the Config Hub from tracking that row. It never changes the agent ticks that you chose for your own instructions and skills. **Adopt** takes an edited OpenCode or Kilo entry into the Config Hub, including its arguments and variables.
 
 ### Global instructions
 
@@ -259,7 +269,7 @@ A commit is one saved version. The Config Hub commits by itself, about 30 second
 - **Commit now** saves a version at once. You can type a short message. Use file names only. Never type a secret.
 - The timeline shows the last 20 commits. Press a commit to open it. It lists the files that changed.
 - **Diff** on a file shows how the file now differs from that commit. This is what **Restore** would change back.
-- **Restore** on a file sets that file back to the content of that commit. The restore is a commit too, so you can undo it.
+- **Restore** on a file sets that file back to the content of that commit. The restore is a commit too, so you can undo it. If you changed the file in the last 30 seconds, the Config Hub saves that change as its own commit first, so it is not lost. A second restore of the same version also answers "ok".
 - **Restore settings** (at the top of the card) copies the plugin settings from the last backup back over the live settings. The box names them: the main settings, the version pins and the list of secret names. Workspaces and the agent home are not touched. Reload the page afterwards.
 
 > [!WARNING]
@@ -313,6 +323,7 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 | A running agent does not show the change. | The agent read its files at start. | Restart the workspace, or press **Reload agent** when the agent is idle. |
 | **Config drift detected**. | Someone edited a managed file. | Choose **Adopt**, **Overwrite** or **Release** for each key. |
 | **Adopt** says it cannot work. | The file is a managed block. | Use **Overwrite** or **Release**. |
+| "The MCP server list (mcp.json) cannot be read" or "The Config Hub state (state.json) cannot be read". | The file is damaged, for example by a merge conflict. The Config Hub changed nothing and kept a copy next to the file, named with `.corrupt-` and a time. | Repair the file, or delete it to start with an empty list. Then press **Apply to agents**. |
 | "Projection failed". | A file could not be read or written. | Read the message. Fix the file, or choose **Overwrite**. |
 | The skill is refused with "SKILL.md required". | A skill must have a main file. | Add the file `SKILL.md`. |
 | "git is not installed on this server". | The History card needs git. | Install git with NerdTools. |
@@ -332,6 +343,9 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <details>
 <summary>Change history</summary>
 
+- **2026-10-18** — A **write_failed** row now says why. OpenCode instruction rows can be resolved. A Settings change made while a projection runs is no longer undone. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issues #666 (R-159, R-160, R-163).
+- **2026-10-18** — A server that holds an older typed login now gets a clear message and a one-click **Move to the secrets vault**. A damaged Config Hub file stops **Apply to agents** with a message instead of removing tools. A same-name entry in the Codex and Goose files is reported as a conflict. **Release** on a Relay or Plugin management row no longer clears your own ticks. **Adopt** works for OpenCode and Kilo. Restore keeps unsaved edits. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issues #590, #640, #641, #642, #644 and #647.
+- **2026-10-18** — A typed login in a variable or a web address is refused, Adopt keeps the key in braces, the drift list hides secret values, and starting one agent no longer removes shared skills or instructions of another. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issues #588, #589 and #590.
 - **2026-10-15** — A remote server can carry headers and a login (bearer token or custom header), and the editor has a **Test connection** button. A login must be a key in braces from the secrets. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #525. Idea from a pull request by Joly0.
 - **2026-10-15** — A server has an **On** and **Off** switch that keeps the choice of agents. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #524. Idea from a pull request by Joly0.
 

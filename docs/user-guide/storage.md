@@ -87,7 +87,7 @@ The plugin does not block `/mnt/user`, because some servers have no other choice
 3. Read the list. Each line shows a name, a path and small chips: the type of place, the free space, and warnings.
 4. Choose one line. Or choose **Custom path…** and type a path, for example one that starts with `/mnt/`. The **Browse** button next to the field opens a folder browser. The plugin checks a custom path when you leave the field. Expect: "Valid target", or a reason for the refusal.
 5. Press **Move storage here**. Expect: a confirmation titled **Migrate Storage?**. It shows the old and new paths and the list of files with their sizes.
-6. Press **Yes, Migrate**. Expect: a progress screen, then **Migration Complete**, then the page reloads.
+6. Press **Yes, Migrate**. Expect: your open workspaces close, and a message **Storage move started**. Press **OK**. The page reloads. The plugin copies the files in the background, so you can close the page. Watch the row **Moving storage to …** in the activity tray. The path setting changes when the copy is done.
 
 Press **Cancel** in the confirmation to keep the old place. The path field goes back to the old value. On a phone, the picker and the halt cards (below) fit the screen, and the halt buttons fill a full row.
 
@@ -215,7 +215,7 @@ The buttons are icons at the bottom of the card. On a phone, tap the icon. Hold 
 | Floppy disk | **Persist to storage** | Saves the writable layer into one new layer. | No |
 | Compress arrows | **Consolidate: save unsaved changes and merge all layers into one** | Saves the unsaved changes and merges all layers into one. | Yes, for a short time. Each workspace reopens by itself. |
 | Wrench | **Repair mount: this home is not mounted** | Unmounts and mounts the home's storage again. | It can interrupt open workspaces. |
-| Red trash can | **Delete home data (permanent)** | Deletes the whole home. | Not allowed while a workspace uses the home. |
+| Red trash can | **Delete home data (permanent)** | Deletes the whole home. | Not allowed while a workspace or a storage job uses the home. |
 
 All four icons lock while a job runs on that home. The lock comes from the server, so it holds on every device and browser tab. A home in plain folders shows only the wrench (when it is not mounted) and the trash can.
 
@@ -270,7 +270,7 @@ Repair changes no data. It mounts the same layers again.
 2. Press **Delete permanently**. For the primary homes (`root` and `aicliagent`), the dialog also asks you to type `DELETE` in a box. The plugin does not accept other text.
 3. Expect: **Deleted**.
 
-The plugin refuses to delete a home that a workspace is using. Close the workspaces first.
+The plugin refuses to delete a home that a workspace is using. Close the workspaces first. It also refuses while a save, backup, restore, merge or convert for that home is queued or running. Wait for the job to end in the activity tray, then try again.
 
 ### Job states on the card
 
@@ -326,7 +326,7 @@ Sometimes the plugin needs a merge, but workspaces hold the home. This happens w
 
 A banner on the terminal page reads "Storage reclaim needed" until the tidy-up is done. When the last workspace closes, it reads "Storage tidy-up starting". You can minimise the banner. If you close the workspaces yourself, the tidy-up starts by itself.
 
-For a home that can change to plain folders, the notice offers the conversion instead. Its title is "Convert this home to plain folders", and its button is **Convert to plain folders**. **Later** works the same way. The banner then reads "Home can change to plain folders". The notice stays when no workspace is open, because no automatic tidy-up runs for such a home. See "Convert a home to plain folders" above.
+For a home that can change to plain folders, the notice offers the conversion instead. Its title is "Convert this home to plain folders", and its button is **Convert to plain folders**. **Later** works the same way. The banner then reads "Home can change to plain folders". The notice stays when no workspace is open, because no automatic tidy-up runs for such a home. See "Convert a home to plain folders" above. When the plugin refuses the job, the row names the reason and the button works again. When the plugin does not answer, the row says "Could not reach the server."
 
 ### The field "Work folder for storage jobs"
 
@@ -337,6 +337,8 @@ This field is in the **Configuration** tab. It names a folder on a pool or an ar
 A tool such as npm or pip keeps downloaded files in cache folders. In a home with plain folders, these folders do not use the boot disk. They live in RAM, or in a folder on a pool. A cache is only a copy that a tool downloads again, so you lose nothing when it is empty.
 
 The folders are `.npm`, `.cache`, `.bun/install/cache`, `.claude/cache`, `.claude/shell-snapshots`, `.claude/telemetry` and `tmp` in the home. The folder `.claude/plugins` is not a cache: it holds your installed Claude Code plugins, and it stays on the boot disk.
+
+**Do not keep files you need in the folder `tmp` of your home.** The plugin treats `tmp` as a cache in every kind of home, also in a home with layers. A save leaves the files in `tmp` out of the saved layer, and the plugin can remove them when the home is idle. Put files that you want to keep in any other folder.
 
 Three fields in the **Configuration** tab control this:
 
@@ -372,7 +374,7 @@ A button is grey when the action cannot run now. Hold the mouse over it to read 
 | **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Consolidate (merge)". |
 | **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
 | **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
-| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), the layers of a home that no workspace uses, and the test homes that the smoke tests left. | **Remove**. |
+| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), the layers of a home that no workspace uses, and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. | **Remove**. |
 | **Plugin files** | The rest of the plugin folder: program files, saved copies of earlier versions, settings and state. | None. |
 
 A home in plain folders has the first three **Home** lines. A home with layers has the line **saved layers**.
@@ -437,7 +439,7 @@ The line **Home** *name*: **conversation history** of the card **Boot disk space
 4. Read the warning: "Moved sessions cannot be resumed, and are not reachable while the array is stopped."
 5. Select **Move sessions**. The Activity tray shows the progress, for example "Moving sessions: 12 of 140 files (3.0 GB)".
 
-The plugin copies each file, checks the copy, and only then removes the original. It never moves a file that a program has open or that changed in the last 24 hours. It never deletes a session. If the array is stopped, the dialog says "The array is stopped" and nothing moves.
+The plugin copies each file, checks the copy, and only then removes the original. It never moves a file that a program has open or that changed in the last 24 hours. It never deletes a session. If the array is stopped, the dialog says "The array is stopped" and nothing moves. If a move stops at one agent, the Activity tray names the agents that were not reached. Their sessions stay in the home.
 
 The folder you chose then holds `<user>/<agent>/…` with the moved files and a list, `MOVED.json`, with the size and the check value of each file.
 
@@ -559,6 +561,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 | The Consolidate icon is grey | The home has one layer and no unsaved changes. | Nothing to do. |
 | A message "Storage tidy-up in progress" blocks a button | A merge is running. | Wait a few minutes. The workspaces reopen by themselves. |
 | An amber note "Recent consolidate failure" shows on the **Home Storage** tab | A merge failed. The plugin retries by itself. After two failures in a row it halts automatic merges for that home. | Read the Debug Console log. Ask for help on the forum if the note stays. |
+| An Unraid notice "AICliAgents: not enough boot disk space to save the home", or the tray entry **Not enough boot disk space to save the home** | The boot disk has too little free space for the new layer, so the plugin wrote nothing. Your changes are still only in RAM and are lost if the server restarts. The plugin first tests the layer at the compression of your last saved layer, so it refuses only when even that size does not fit. | Free some space on the boot disk (the card **Boot disk space** shows what uses it), then press **Persist** again. The notice and the tray entry end by themselves after the next good save. |
 | **Not moved** after you change the writable layer | A home was in use or had no room. The setting went back. | Read the reason, free space or close the workspace, and try again. |
 | "Path must include a sub-directory under the Unassigned Device mount" | You chose the top folder of an Unassigned Devices drive. | Create a folder on the drive, for example `aicliagents`, and choose that folder. |
 | **Storage Unavailable** on the terminal page | The array is stopped, or the drive is gone. | Start the array or plug in the drive, or use **Emergency Session**. |
@@ -567,6 +570,8 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 | A workspace does not start and the Debug Console says "Layer … cannot be mounted" | One saved layer of the home cannot be read. The message names the layer and the reason. The plugin does not skip a layer in the middle of the stack, because the newer layers depend on it. The file is not changed. | Ask for help on the forum and give the layer name. Do not delete the file. |
 | A Health warning about pinned space | Old layers hold disk space. | Restart the workspaces that the text names, or restart the server. |
 | A card **Legacy Migration Artifacts** shows on the **Home Storage** tab | Old files from a past storage conversion are still on disk. | Check that your agents and workspaces work. Then press **Purge All Artifacts**. This deletes the files for good. |
+| A dialog or a button on the **Home Storage** tab shows "Could not reach the server" | The browser could not reach the plugin, or the server answered with an error. The message says which. | Check that the server is up and the Unraid login is still open. Reload the page and try again. A button that was waiting, such as **Measure now**, works again. |
+| A second click on **Back up now**, **Restore**, **Consolidate**, **Convert** or **Remove old versions** says the job "is already waiting or running" | The same job for the same home or agent is already in the queue. | Watch the Activity tray. Press the button again after the job ends. |
 
 ## Related pages
 
@@ -580,7 +585,11 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-18** — A save that is refused for lack of space says "Not enough boot disk space to save the home" in the Unraid notice, the tray and the **Persist** message, and says what to do. The plugin tests the new layer at the compression of your last layer before it refuses. The guide says that files in the `tmp` folder of a home are treated as a cache. Spec `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issues #599 and #658.
+- **2026-10-18** — A dialog or button of the Storage tab that waits for the server now shows "Could not reach the server" with the reason when the request fails. A repeated click on a job button says the job is already waiting or running. The Cancel button of a confirm dialog sends nothing. Issue #668.
+- **2026-10-18** — The Activity tray buttons **Convert to plain folders** and **Close all and tidy up** now show the reason in the row when the plugin refuses the job. Issue #656.
 - **2026-10-18** — **Convert to plain folders** is no longer refused because of a left-over empty marker file from the plugin. When the plain folder holds your own files, the Activity tray now names the folder and the first file in the way. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #577.
+- **2026-10-18** — A move of Home Storage or Agent Storage to another place runs in the background after **Yes, Migrate**. It goes on when you close the page, and the activity tray shows the steps. Spec `docs/specs/STORAGE_TARGET_PICKER.md`, issue #652.
 - **2026-10-17** — A save that finds no changes now says **Nothing to save**, not "Persisted". A save in an Emergency Session says **Not saved**, because the work is lost. The panel **Storage Unavailable** and the Emergency Session banner both say the work is lost. Spec `docs/specs/STORAGE_FAILURE_CASE_INTERNALIZATION.md`, issues #567 and #570.
 - **2026-10-17** — A damaged newest saved layer of a home is moved to the folder `.bad` and the home starts without it, with an Unraid notice; any other layer that cannot be mounted stops the start and the Debug Console names the layer and the reason. Spec `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issue #566.
 - **2026-10-17** — The storage picker offers a folder inside each pool, user share and array disk (for example `/mnt/cache/aicliagents`), not the bare disk. A new storage location that is a bare disk or pool is refused with a message that asks for a sub-folder. A location you saved earlier keeps working. Spec `docs/specs/STORAGE_TARGET_PICKER.md`, issue #563.

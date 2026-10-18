@@ -319,7 +319,7 @@ The **Args** panel holds extra flags that the plugin adds to the launch command 
 2. Type the flags, for example `--max-turns 10`.
 3. Press **Save**.
 
-The plugin rejects the characters `;`, `|`, `&`, `` ` `` and `$`. The new arguments apply the next time the agent starts. A workspace can set its own arguments in **Session settings**. Some agents also get fixed flags from the plugin. You cannot change those.
+The plugin rejects the characters `;`, `|`, `&`, `` ` `` and `$`. It also rejects `>`, `<`, `(`, `)`, `*` and a word that starts with `#`, unless they sit inside quotes, and it rejects a quote that is not closed. The new arguments apply the next time the agent starts. A workspace can set its own arguments in **Session settings**. Some agents also get fixed flags from the plugin. You cannot change those.
 
 ### Terminal defaults (Terminal)
 

@@ -120,7 +120,7 @@ The card holds the screen messages that let a workspace continue by itself: a te
 
 | Control | What it does | Default | Allowed values | At once |
 | :-- | :-- | :-- | :-- | :-- |
-| **Your patterns** list, with a switch, **Edit**, **Report** and **Delete** on each row | Turns a pattern on or off, edits it, prepares a report for the plugin authors, or deletes it. | Empty | Not applicable | The switch saves at once. **Delete** asks you to confirm in the row. **Report** opens a prefilled report page that you review and send yourself. |
+| **Your patterns** list, with a switch, **Edit**, **Report** and **Delete** on each row | Turns a pattern on or off, edits it, prepares a report for the plugin authors, or deletes it. | Empty | Not applicable | The switch saves at once. **Delete** asks you to confirm in the row. **Report** opens a prefilled report page that you review and send yourself. A saved pattern that the plugin now refuses stays in the list with the switch off and the note "Not in use" with the reason. Edit or delete it. |
 | **Add pattern** | Opens a dialog with the fields below. | Not applicable | Not applicable | Opens the dialog. |
 | **Name** | Names the pattern. | Empty | Text, up to 60 characters | Part of the dialog. |
 | **Agent** | Chooses which agent the pattern is for. | All agents | All agents, or one installed agent | Part of the dialog. |

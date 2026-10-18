@@ -180,7 +180,7 @@ Every workspace has the Relay command in its shell. It is the same for every age
 
 Native tools cover the same jobs as the command: list topics, read the inbox, list contacts, send a direct message, join or leave a topic, publish news to an owned topic, send a request, check a request, read your own assignments, and acknowledge, finish or fail a request that you own. An agent that is already running needs one restart to load the tools.
 
-The inbox shows unread items by default. It returns only what is new since the agent last read, plus every request that is still open for it. The agent asks for older items with `inbox --all`. This keeps each read short.
+The inbox shows unread items by default. It returns only what is new since the agent last read, plus every request that is still open for it. The agent asks for older items with `inbox --all`. This keeps each read short. When more unread items wait than one read can show, the read shows the oldest ones, says how many more are waiting, and the next read shows the rest. A message that you delete from the inbox stays deleted. A message from a workspace on a linked box shows the sender's id in the notice, not the name that the other box chose.
 
 ## Connect another machine
 
@@ -261,7 +261,7 @@ The **Terminal input safety rules** in **Settings, Configuration** decide when t
 
 ## What happens behind the scenes
 
-Messages are kept as small files on the server in the home of the plugin user. Each file is written in one safe step, so a power cut does not leave half a message. A message summary is limited to 2 KiB, and the plugin rejects a longer text and never cuts it. A supervisor process that runs on the server tries again to deliver held notices every few seconds, even when no browser tab is open. For the technical detail, see C4 Component: Agent Relay.
+Messages are kept as small files on the server in the home of the plugin user. Each file is written in one safe step, so a power cut does not leave half a message. A message summary is limited to 2 KiB, and the plugin rejects a longer text and never cuts it. The Relay removes messages that were read and requests that are closed once they are 60 days old; a message that nobody read stays for 120 days. A supervisor process that runs on the server tries again to deliver held notices every few seconds, even when no browser tab is open. For the technical detail, see C4 Component: Agent Relay.
 
 ## If something goes wrong
 
@@ -290,6 +290,8 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-18** — The unread view no longer drops messages past its limits, a deleted message stays deleted, and a linked-box sender shows by id only. Spec `docs/specs/AGENT_RELAY_POC.md`, issue #664.
+- **2026-10-18** — A workspace that sent a request now sees in its unread messages when the request was answered or cancelled. The Relay removes read messages and closed requests that are older than 60 days. Unread messages stay twice as long. Spec `docs/specs/AGENT_RELAY_POC.md`, issues #630 and #634.
 - **2026-10-16** — The Contacts list hides closed workspaces after 3 days, shows one row for each name on each box, and drops linked-box contacts that their box no longer lists. Messages are not deleted. Spec `docs/specs/AGENT_RELAY_POC.md`, issue #546.
 
 </details>

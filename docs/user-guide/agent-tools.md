@@ -95,7 +95,7 @@ These tools run at once and leave a line in the Activity tray. The line reads li
 | What it does | Tool | Shell command |
 | :-- | :-- | :-- |
 | Create a workspace. The folder must exist already. The tool never makes a folder. | `aicli_create_workspace` | `create-workspace` |
-| Change one field of a workspace: name, path, agent, position in the drawer, voice switch, spoken name, voice or speed | `aicli_update_workspace` | `update-workspace` |
+| Change one field of a workspace: name, path, agent, position in the drawer, mute voice, spoken name, voice or speed | `aicli_update_workspace` | `update-workspace` |
 | Set the launch arguments of a workspace. No arguments clears them. | `aicli_set_workspace_args` | `set-args` |
 | Set or clear one environment variable of a workspace. A secret goes to the encrypted vault. | `aicli_set_workspace_env` | `set-env` |
 | Turn auto-launch on or off for an agent | `aicli_set_auto_launch` | `auto-launch` |
@@ -162,6 +162,8 @@ The Notebook tools need both switches: **Plugin management tools** and the **Not
 | **Plugin management tools** (Settings, Configuration, Plugin management) | Turns all the tools, the skill and the MCP server on or off. | Off | Turn on when you want agents to manage the plugin for you. Turn off to remove the tools from every agent. |
 | **Notebook** (Settings, Configuration, Notebook) | Turns the Notebook drawer and the Notebook tools on or off. | On | Turn off if you do not want agents to make pages. |
 
+An agent can turn voice off, but it cannot turn voice on or unmute a workspace. It must ask you to change the switch. You can turn on voice with the speaker icon or in **Settings, Configuration, Agent voice**. You can unmute one workspace from its **...** menu.
+
 ## What happens behind the scenes
 
 The plugin keeps one list of tools and gives it three ways in: MCP, the shell command and, for a remote program, the Relay. The destructive jobs run only from the Approve click in the Manager, and the plugin stores the exact request when the agent proposes it. The plugin never looks up the request again at approval time, except to check that the target still exists. For the Activity tray, see [Health, Activity and troubleshooting](health-and-troubleshooting.md). For the Relay, see [Agent Relay](relay.md).
@@ -176,6 +178,7 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 | A proposal stays in the tray. | It waits for you. | Read it and press **Approve** or **Reject**. |
 | An approved upgrade shows "waiting". | A session still uses the old agent. | Close that session. The plugin finishes the upgrade at once after that. |
 | A change tool refuses a workspace id. | The id does not exist. A change tool never guesses. | Ask the agent to list the workspaces first. |
+| An agent says voice is off. | The global switch is off, or you muted that workspace. | Turn on **Voice (all devices)** or unmute the workspace from its **...** menu. |
 | A tool refuses a path. | The path must exist, be readable and be in an allowed place. | Make the folder first, then try again. |
 | An agent changed something you did not expect. | Every change has a line in the tray. | Open the tray to see which agent and workspace did it, and change the setting back. |
 
@@ -187,3 +190,10 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 - [The Notebook](notebook.md): the pages that agents make for you.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Activity tray in full.
 - [Settings reference](settings-reference.md): every setting on every tab.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-18** — Agents can turn voice off, but they must ask you to turn it on or unmute a workspace. Spec `docs/specs/VOICE_SWITCHES.md`, issue #665.
+
+</details>

@@ -84,7 +84,7 @@ A field that hides its value has an eye button. **Show value** shows the text th
    - **I'll do later**: the arguments stay saved. The agent uses them the next time it starts.
    - **Cancel (revert)**: the plugin puts the old arguments back.
 
-The plugin refuses `;`, `|`, `&`, the backtick, `$` and a line break, also inside quotes. The text under the field names the refused character.
+The plugin refuses `;`, `|`, `&`, the backtick, `$` and a line break, also inside quotes. It also refuses `>`, `<`, `(`, `)`, `*` and a word that starts with `#` when they are outside quotes, and a quote that is not closed. The text under the field names the refused character.
 
 > [!WARNING]
 > **Apply now** restarts the agent at once, also when the agent is working. The agent stops its current step. Choose **I'll do later** if the agent is in the middle of a task.
@@ -329,7 +329,7 @@ Open Settings, **Configuration** tab, card **Auto-continue patterns**. Each chan
 3. To check it, choose a running workspace and press **Test against a workspace screen**. The dialog marks the lines that match.
 4. Press **Save**. Expect: "Saved. The pattern is in use now."
 
-Each pattern has a switch **On** and the buttons **Edit**, **Report** and **Delete**. **Report** shows a preview. **Open on GitHub** opens a prefilled issue page, and you send it with your own GitHub sign-in. The plugin sends nothing by itself and hides secrets and `/mnt` paths in the preview. The list **Built-in patterns (read-only)** shows the patterns that come with the plugin. You can keep up to 64 patterns. The plugin refuses an unsafe expression and one that matches an empty line.
+Each pattern has a switch **On** and the buttons **Edit**, **Report** and **Delete**. **Report** shows a preview. **Open on GitHub** opens a prefilled issue page, and you send it with your own GitHub sign-in. The plugin sends nothing by itself and hides secrets and `/mnt` paths in the preview. The list **Built-in patterns (read-only)** shows the patterns that come with the plugin. You can keep up to 64 patterns. The plugin refuses an unsafe expression and one that matches an empty line. A pattern that you saved earlier, and that the plugin now refuses (for example because it matches ordinary text), stays in the list. Its switch is off and cannot be turned on. The row says "Not in use" and gives the reason. **Edit** the pattern to fix it, or **Delete** it.
 
 ### An agent that types into another workspace
 
@@ -393,8 +393,9 @@ The plugin saves the values of a workspace in files that belong to the pair of a
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
 | **Apply Now** is grey. | You changed nothing. | Change a value first. |
-| The **Args** tab refuses the text. | It holds `;`, `|`, `&`, a backtick, `$` or a line break. | Remove the character that the text names. |
-| A variable name is refused or changes. | A name holds capital letters, digits and the underscore. The plugin keeps some names for itself. | Choose another name. |
+| **Manage Session** shows "Save failed" and the server reason. | The server refused a save. The dialog stays open. | Read the reason, correct the problem and press **Apply Now** again. |
+| The **Args** tab refuses the text. | It holds `;`, `|`, `&`, a backtick, `$`, a line break, or `>`, `<`, `(`, `)`, `*` outside quotes, or an open quote. | Remove the character that the text names. |
+| A variable name is refused or changes. | A name holds capital letters, digits and the underscore. The plugin keeps some names for itself. | Choose another name. When one name is refused, nothing is saved and the old values stay. A secret name needs at least two characters. |
 | The agent uses an old value. | The agent did not restart. A busy agent is skipped. | Restart it when it is idle. In the Agent Store, use **Restart them now**. |
 | **Config / assets** says "No config surface found for this agent/workspace." | The plugin finds no known file for this agent. | Add a file with a **+ Add** row. |
 | The viewer shows "Read only", or "Truncated at 5 MB on read — save disabled". | The file is under `/tmp`, or it is larger than 5 MB. | Copy the file, or edit it with another tool. |
@@ -422,3 +423,10 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 - [Home and agent storage](storage.md): where the home of the agent is saved.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Activity tray and the Debug Console.
 - [Settings reference](settings-reference.md): every setting on every tab.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-18** — A refused save in Manage Session shows the server reason and keeps the dialog open for a retry. Spec `docs/specs/ENV_AND_SECRETS_TIERS.md`, issue #670.
+
+</details>

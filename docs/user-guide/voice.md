@@ -13,7 +13,7 @@ Words used on this page:
 - **Speech engine**: a program in a Docker container on your server. This page uses two: **Kokoro** (it turns text into a natural voice) and **Speaches** (it turns your speech into text).
 - **Browser voice**: the voice that your browser has built in. It needs no engine.
 - **Endpoint URL**: the web address of a speech engine, for example http://speech-server:8880.
-- **Voice mail**: the saved text of what the agents said, with a play button for each message.
+- **Voice mail**: the saved text of what the agents said, with a play button for each message. When an agent spoke for another workspace, the message also shows "(said by ...)" with the name of the agent's own workspace.
 
 ## Where to find it
 
@@ -284,3 +284,10 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 - [Plugin management tools for agents](agent-tools.md): the setting that lets an agent speak.
 - [Settings reference](settings-reference.md): every setting with its allowed values.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Health dot, the Activity tray and the Debug Console.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-18** — When an agent speaks for a different workspace, the voice mail message shows "(said by ...)" with the name of the workspace that really spoke. Spec `docs/specs/AGENT_VOICE.md`, issue #664.
+
+</details>
