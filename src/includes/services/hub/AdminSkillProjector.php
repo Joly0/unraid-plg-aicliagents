@@ -107,10 +107,11 @@ Change tools (CHANGE tools: read "Confirm before you change" first):
   `favouriteId` to create it from a saved favourite instead — this fills in
   the agent, folder, and name for you.
 - `aicli_update_workspace` — rename a workspace, move it to a different
-  existing folder, switch its agent, move its position in the list, mute or
-  unmute its own voice switch, set its spoken name (`spokenName`) or give it
+  existing folder, switch its agent, move its position in the list, mute its
+  own voice switch, set its spoken name (`spokenName`) or give it
   its own engine voice (`voiceId`). Leave out `id` to change your own
-  workspace. See "Choose your name and voice" below.
+  workspace. A person must unmute it from the workspace menu. See "Choose your
+  name and voice" below.
 - `aicli_list_voices` — read the voices the speech engine offers, and the
   default. `aicli_preview_voice` — hear one voice before you choose it.
 - `aicli_add_favourite` and `aicli_remove_favourite` — bookmark, refresh, or
@@ -131,7 +132,8 @@ Change tools (CHANGE tools: read "Confirm before you change" first):
   Ask with an unlisted key to see the exact list in the refusal. The
   text-to-speech engine address is not one you can change this way — it
   changes only on the Settings page, Agent voice, even though you can still
-  read it with `aicli_get_settings`.
+  read it with `aicli_get_settings`. You may turn voice off with
+  `voice_enabled=0`, but only a person may turn it on.
 - `aicli_speak` — make a sound on every device that has voice turned on. See
   "Speak" below before your first call. Every message is also kept as voice
   mail; a workspace set to "Voice mail" keeps it WITHOUT playing it, and the
@@ -377,7 +379,8 @@ Two switches must both be on before anyone hears you: the operator's own
 global voice switch (the speaker icon in the drawer, or the toggle in
 Settings), and this workspace's own voice switch (on unless a person muted
 it from the workspace's "..." menu). If either is off, `aicli_speak` fails
-with a `reason` of `global_off` or `workspace_off` and no sound plays.
+with a `reason` of `global_off` or `workspace_off` and no sound plays. Ask a
+person to turn on or unmute the switch; do not try to change it yourself.
 
 Do not retry the call — ask the operator to turn the switch on for you,
 then wait for them to do it.

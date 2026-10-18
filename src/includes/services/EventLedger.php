@@ -120,6 +120,8 @@ final class EventLedger {
     /**
      * Events with seq > $sinceSeq, oldest first, at most $limit (max 500).
      * $filter(array $event): bool keeps an event when it returns true.
+     * next_seq is the last scanned seq. A matching event beyond the limit is
+     * left unread, while non-matching events do not cause repeat scans.
      *
      * @return array{events:array,next_seq:int,truncated:bool,gap:bool,oldest_seq:int,head_seq:int,boot_id:string}
      */
@@ -131,6 +133,7 @@ final class EventLedger {
         $gap = ($head > 0) && (($sinceSeq + 1) < $oldest);
 
         $matches = [];
+        $scannedSeq = $sinceSeq;
         $truncated = false;
         foreach (self::chunkStarts($dir) as $chunkStart) {
             // A chunk holds seqs [chunkStart, chunkStart + CHUNK_SIZE - 1].
@@ -145,18 +148,19 @@ final class EventLedger {
                 if (!is_array($event) || !isset($event['seq'])) continue; // malformed line — skipped
                 $seq = (int)$event['seq'];
                 if ($seq <= $sinceSeq) continue;
-                if ($filter !== null && !$filter($event)) continue;
-                $matches[] = $event;
-                if (count($matches) > $limit) {
+                if ($filter !== null && !$filter($event)) {
+                    $scannedSeq = $seq;
+                    continue;
+                }
+                if (count($matches) >= $limit) {
                     $truncated = true;
                     break 2;
                 }
+                $matches[] = $event;
+                $scannedSeq = $seq;
             }
         }
-        if ($truncated) {
-            $matches = array_slice($matches, 0, $limit);
-        }
-        $nextSeq = $matches === [] ? $sinceSeq : (int)$matches[count($matches) - 1]['seq'];
+        $nextSeq = $scannedSeq;
 
         return [
             'events'     => $matches,

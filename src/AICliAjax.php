@@ -159,13 +159,14 @@ if (isset($_GET['action'])) {
         if (is_array($received)) $received = end($received);
         $received = trim((string)$received);
 
-        if (empty($expected) || $received !== $expected) {
+        $csrfRefusal = ValidationService::csrfTokenRefusal($expected, $_REQUEST, $_SERVER);
+        if ($csrfRefusal !== null) {
             // S10: log only the action and whether a token arrived. Printing the
             // expected or received token would put a live secret in the log.
             $gotToken = ($received !== '') ? 'yes' : 'no';
             aicli_log("CSRF check failed for action: $action (token received: $gotToken)", AICLI_LOG_ERROR, "AICliAjax");
             ob_end_clean();
-            echo json_encode(['status' => 'error', 'message' => 'Invalid CSRF Token']);
+            echo json_encode(['status' => 'error', 'message' => $csrfRefusal]);
             exit;
         }
     }

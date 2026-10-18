@@ -36,6 +36,15 @@ class ValidationService {
         return strtoupper($method) === 'POST' ? null : 'This action needs a POST request.';
     }
 
+    /** Return the dispatcher refusal when the request token does not match the server token. */
+    public static function csrfTokenRefusal(string $expected, array $request, array $server): ?string {
+        $received = $request['csrf_token'] ?? $server['HTTP_X_CSRF_TOKEN'] ?? '';
+        if (is_array($received)) $received = end($received);
+        $expected = trim($expected);
+        $received = trim((string)$received);
+        return $expected === '' || $received !== $expected ? 'Invalid CSRF Token' : null;
+    }
+
     /** Allowed base directories for filesystem operations. */
     private static $ALLOWED_PATH_BASES = [
         '/mnt',

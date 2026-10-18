@@ -167,7 +167,7 @@ class RedactionService {
         // Vendor token prefixes.
         $text = (string)preg_replace('/\bsk-[A-Za-z0-9_-]{16,}/',            "\u{AB}redacted:sk\u{BB}",   $text); // OpenAI/Anthropic
         $text = (string)preg_replace('/\bgh[pos]_[A-Za-z0-9]{16,}/',         "\u{AB}redacted:gh\u{BB}",   $text); // GitHub ghp_/gho_/ghs_
-        $text = (string)preg_replace('/\bxox[bp]-[A-Za-z0-9-]{8,}/',         "\u{AB}redacted:slack\u{BB}", $text);
+        $text = (string)preg_replace('/\bxox[abprs]-[A-Za-z0-9-]{10,}/',    "\u{AB}redacted:slack\u{BB}", $text);
         $text = (string)preg_replace('/\bAIza[0-9A-Za-z_-]{30,}/',           "\u{AB}redacted:aiza\u{BB}", $text);
         // #645: short vendor tokens that the long-run rules below never reach.
         $text = (string)preg_replace('/\bglpat-[A-Za-z0-9_-]{20,}/',         "\u{AB}redacted:gitlab\u{BB}", $text); // GitLab personal access token

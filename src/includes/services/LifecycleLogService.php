@@ -11,6 +11,7 @@
 namespace AICliAgents\Services;
 
 require_once __DIR__ . '/TraceContext.php';
+require_once __DIR__ . '/StorageTargetService.php';
 
 class LifecycleLogService {
     public const LEVEL_INFO     = 'info';
@@ -40,6 +41,12 @@ class LifecycleLogService {
         $path = StoragePathResolver::lifecycleLogPath();
         $dir  = dirname($path);
 
+        // A lock on a FUSE share can wait behind a stalled share worker.
+        $fs = strtolower(StorageTargetService::fstypeAt($path));
+        if ($path === '/mnt/user' || strncmp($path, '/mnt/user/', 10) === 0 || strncmp($fs, 'fuse', 4) === 0) {
+            return false;
+        }
+
         // Ensure directory exists (flash path, low-frequency)
         if (!is_dir($dir)) {
             @mkdir($dir, 0755, true);
@@ -61,7 +68,7 @@ class LifecycleLogService {
             return false;
         }
 
-        $locked = @flock($fd, LOCK_EX);
+        $locked = @flock($fd, LOCK_EX | LOCK_NB);
         if (!$locked) {
             @fclose($fd);
             return false;

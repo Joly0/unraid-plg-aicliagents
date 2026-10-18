@@ -20,6 +20,13 @@ const RELAY_HTTP_CONN_SECONDS = 15;
 /** Open connections at once. Further connections are closed at once. */
 const RELAY_HTTP_MAX_CONNECTIONS = 64;
 
+/** Return the address from PHP's remote socket name, without its port. */
+function relayHttpPeerAddress(string $peerName): string {
+    if (preg_match('/^\[([^]]+)\]:[0-9]+$/', $peerName, $match)) return $match[1];
+    if (preg_match('/^([^:]+):[0-9]+$/', $peerName, $match)) return $match[1];
+    return $peerName !== '' ? $peerName : 'unknown';
+}
+
 /** @return array{sock:resource,peer:string,phase:string,buf:string,out:string,deadline:int} */
 function relayHttpNewConn($sock, string $peer, bool $tls, int $now): array {
     return ['sock' => $sock, 'peer' => $peer, 'phase' => $tls ? 'tls' : 'read', 'buf' => '', 'out' => '', 'deadline' => $now + RELAY_HTTP_CONN_SECONDS];

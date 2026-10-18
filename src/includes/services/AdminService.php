@@ -55,6 +55,9 @@ namespace AICliAgents\Services;
 
 class AdminService {
 
+    /** Test seam for a failed backup target lookup. Unset in production. */
+    public static ?\Closure $backupTargetResolverForTests = null;
+
     /**
      * getLogs() hard cap on returned lines. TerminalHandler::getLog() (the
      * Debug Console's backing call) allows up to 2000 — that is a scrollable
@@ -812,7 +815,9 @@ class AdminService {
      * Events after `sinceSeq` (default: this session's stored cursor)
      * matching `kinds` (default: the stored subscription) and the stored
      * filter, oldest first. `ack` (default true) advances the cursor to the
-     * last event returned. An unsubscribed session with no explicit `kinds`
+     * last event scanned, including non-matching events. A reboot reset is
+     * acknowledged on the first read, even when no event matches. An
+     * unsubscribed session with no explicit `kinds`
      * gets an empty result, never the whole ledger.
      *
      * @param string[]|null $kinds
@@ -837,6 +842,7 @@ class AdminService {
             $since = $sinceSeq ?? ($reset ? 0 : (int)($sub['cursor']['seq'] ?? 0));
 
             if ($effectiveKinds === []) {
+                if ($ack && $reset) EventSubscriptionStore::ack($sid, $since, $liveBoot);
                 return [
                     'events' => [], 'next_seq' => $since, 'truncated' => false, 'gap' => false,
                     'oldest_seq' => EventLedger::oldestSeq(), 'head_seq' => EventLedger::headSeq(), 'reset' => $reset,
@@ -864,7 +870,7 @@ class AdminService {
             $result = EventLedger::read($since, $limit, $filterFn);
             $result['reset'] = $reset;
 
-            if ($ack && $result['events'] !== []) {
+            if ($ack && ((int)$result['next_seq'] > $since || $reset)) {
                 EventSubscriptionStore::ack($sid, (int)$result['next_seq'], $liveBoot);
             }
 
@@ -1723,17 +1729,18 @@ class AdminService {
             // path with no whitespace). When the concurrent backend work has landed
             // StorageTargetService::resolveBackupTarget(), defer to its real
             // FUSE/durability verdict too — the same check the card's own 'Check'
-            // button calls via backup_validate_target. Best-effort: a resolver that
-            // does not exist yet, or itself throws, must never block every OTHER
-            // Tier 2 setting from working.
+            // button calls via backup_validate_target. A lookup failure must
+            // refuse this path, while unrelated settings keep working.
             if ($key === 'backup_target' && $value !== '' && method_exists(StorageTargetService::class, 'resolveBackupTarget')) {
                 try {
-                    $resolved = StorageTargetService::resolveBackupTarget($value);
-                    if (is_array($resolved) && array_key_exists('ok', $resolved) && !$resolved['ok']) {
+                    $resolved = self::$backupTargetResolverForTests !== null
+                        ? (self::$backupTargetResolverForTests)($value)
+                        : StorageTargetService::resolveBackupTarget($value);
+                    if (!is_array($resolved) || empty($resolved['ok'])) {
                         return ['error' => (string)($resolved['message'] ?? "'$value' is not a usable backup target.")];
                     }
                 } catch (\Throwable $e) {
-                    // Best-effort only — see doc comment above.
+                    return ['error' => 'Could not check the backup target. No setting was changed.'];
                 }
             }
 

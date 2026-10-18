@@ -449,7 +449,7 @@ class VoiceService {
                     // here exactly as it always was.
                     if ($callerMode === VoiceMailService::MODE_OFF) {
                         return [
-                            'error'  => "Voice is off for this workspace. Turn it on from the workspace's ... menu.",
+                            'error'  => "Voice is off for this workspace. Unmute it from the workspace's ... menu.",
                             'mode'   => 'refused',
                             'reason' => 'workspace_off',
                         ];
@@ -499,7 +499,7 @@ class VoiceService {
             // not be told to wait (found live 2026-09-12).
             if (!$bypassSwitches) {
                 $recent = 0;
-                foreach ((glob($dir . '/*.mp3') ?: []) as $clip) {
+                foreach ((glob($dir . '/*.mp3.agent') ?: []) as $clip) {
                     $age = $now - (int)(@filemtime($clip) ?: 0);
                     if ($age >= 0 && $age < self::QUEUE_WINDOW_SECONDS) $recent++;
                 }
@@ -620,7 +620,7 @@ class VoiceService {
                 // R5: engine mode.
                 // R14: the engine says the intro and the message as one clip.
                 $spokenText = $intro !== '' ? $intro . ' ' . $text : $text;
-                $synth = self::synthesize($dir, $ttsUrl, $spokenText, $voiceId, $speed);
+                $synth = self::synthesize($dir, $ttsUrl, $spokenText, $voiceId, $speed, !$bypassSwitches);
                 // R14: an engine that does not know the workspace's voice answers with
                 // an HTTP error. Try once more with the voice it would use without the
                 // workspace voice. A transport error or timeout is not retried.
@@ -1326,7 +1326,7 @@ class VoiceService {
             self::sweepOldClips($dir);
             // VOICE_MAIL.md R14: a replay starts with the same intro as the live message.
             $spoken = trim($intro) !== '' ? trim($intro) . ' ' . self::capText($text) : self::capText($text);
-            $synth = self::synthesize($dir, $ttsUrl, $spoken, $voiceId, (string)($config['tts_speed'] ?? '1.0'));
+            $synth = self::synthesize($dir, $ttsUrl, $spoken, $voiceId, (string)($config['tts_speed'] ?? '1.0'), false);
             if (($synth['status'] ?? '') !== 'ok') {
                 return ['mode' => 'speech', 'message' => (string)($synth['message'] ?? 'The voice engine failed.')];
             }
@@ -1357,7 +1357,7 @@ class VoiceService {
             $dir = self::dir();
             if (!is_dir($dir)) @mkdir($dir, 0777, true);
             self::sweepOldClips($dir);
-            $synth = self::synthesize($dir, $ttsUrl, self::capText($text), $voiceId, $speed);
+            $synth = self::synthesize($dir, $ttsUrl, self::capText($text), $voiceId, $speed, false);
             if (($synth['status'] ?? '') !== 'ok') return ['mode' => 'speech', 'message' => (string)($synth['message'] ?? 'The voice engine failed.')];
             return ['mode' => 'audio', 'clipId' => (string)$synth['clipId']];
         } catch (\Throwable $e) {
@@ -1370,7 +1370,7 @@ class VoiceService {
     // ------------------------------------------------------------------
 
     /** @return array{status:string,clipId?:string,message?:string,httpStatus?:int} */
-    private static function synthesize(string $dir, string $ttsUrl, string $text, string $voiceId, string $speed): array {
+    private static function synthesize(string $dir, string $ttsUrl, string $text, string $voiceId, string $speed, bool $countForAgentQueue = true): array {
         $headers = ['Content-Type: application/json'];
         $key = self::apiKey();
         if ($key !== '') $headers[] = 'Authorization: Bearer ' . $key;
@@ -1419,6 +1419,14 @@ class VoiceService {
         // S9: a clip carries whatever the caller asked the engine to say —
         // treat it like any other secret-adjacent artifact on this host.
         @chmod($clipPath, 0600);
+        if ($countForAgentQueue) {
+            $queueMarker = $clipPath . '.agent';
+            if (!@touch($queueMarker, self::now()) || !@chmod($queueMarker, 0600)) {
+                @unlink($queueMarker);
+                @unlink($clipPath);
+                return ['status' => 'error', 'message' => 'Could not record the voice clip in the queue.'];
+            }
+        }
         return ['status' => 'ok', 'clipId' => $clipId];
     }
 
@@ -1589,7 +1597,15 @@ class VoiceService {
         $now = self::now();
         foreach ((glob($dir . '/*.mp3') ?: []) as $clip) {
             $age = $now - (int)(@filemtime($clip) ?: 0);
-            if ($age > self::CLIP_MAX_AGE_SECONDS) @unlink($clip);
+            if ($age > self::CLIP_MAX_AGE_SECONDS) {
+                @unlink($clip);
+                @unlink($clip . '.agent');
+            }
+        }
+        foreach ((glob($dir . '/*.mp3.agent') ?: []) as $marker) {
+            $clip = substr($marker, 0, -strlen('.agent'));
+            $age = $now - (int)(@filemtime($marker) ?: 0);
+            if (!is_file($clip) || $age > self::CLIP_MAX_AGE_SECONDS) @unlink($marker);
         }
     }
 

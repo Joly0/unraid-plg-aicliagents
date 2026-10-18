@@ -85,7 +85,7 @@ while (true) {
             while (($new = @stream_socket_accept($server, 0, $peerName)) !== false) {
                 if (count($conns) >= RELAY_HTTP_MAX_CONNECTIONS) { @fclose($new); continue; }
                 stream_set_blocking($new, false);
-                $conns[(int)$new] = relayHttpNewConn($new, strtok((string)$peerName, ':') ?: 'unknown', true, time());
+                $conns[(int)$new] = relayHttpNewConn($new, relayHttpPeerAddress((string)$peerName), true, time());
             }
             continue;
         }
