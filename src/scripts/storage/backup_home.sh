@@ -638,8 +638,11 @@ _backup_update_latest() {
     ln -sfn "$(basename "${3:-}")" "$base/latest" 2>/dev/null || true
 }
 
-# _backup_prune <target> <user> <keep> — remove the oldest snapshot dirs
-# beyond <keep>, never the newest (== the one `latest` points to).
+# _backup_prune <target> <user> <keep> [protect_dir] — remove the oldest snapshot
+# dirs beyond <keep>, never the newest (== the one `latest` points to).
+# [protect_dir] (#582) is a snapshot that must stay: a restore passes the snapshot
+# it is copying from, so the safety snapshot's prune cannot delete the source of
+# the restore. A protected snapshot is skipped, not replaced by another one.
 #
 # Pure bash globbing + `sort`, deliberately NOT `find -regex`: the UTC
 # timestamp directory name (YYYYMMDDTHHMMSSZ) sorts correctly as a plain
@@ -673,8 +676,15 @@ _backup_prune() {
     local total="${#dirs[@]}"
     local remove=$(( total - keep ))
     [ "$remove" -gt 0 ] || return 0
-    local i
+    local protect_real="" i
+    if [ -n "${4:-}" ]; then
+        protect_real="$(readlink -f -- "${4%/}" 2>/dev/null || printf '%s' "${4%/}")"
+    fi
     for (( i = 0; i < remove; i++ )); do
+        if [ -n "$protect_real" ] && \
+           [ "$(readlink -f -- "${dirs[$i]}" 2>/dev/null || printf '%s' "${dirs[$i]}")" = "$protect_real" ]; then
+            continue
+        fi
         rm -rf "${dirs[$i]}" 2>/dev/null || true
     done
 }
@@ -752,10 +762,42 @@ _backup_write_manifest() {
 # background subshell. Every exit here ends that subshell only.
 # ---------------------------------------------------------------------------
 
+# _backup_on_abort — #581: the supervisor (watchdog ceiling or stop) sent TERM to
+# the whole job group. Remove the partial snapshot, record the failure and open
+# the closed sessions again, as every other failure path does. The state it needs
+# is in the _BK_ABORT_* globals set by _backup_home_execute.
+_backup_on_abort() {
+    trap '' TERM INT HUP
+    if [ -n "${_BK_ABORT_SNAP:-}" ]; then
+        rm -rf "$_BK_ABORT_SNAP" "${_BK_ABORT_SNAP}.excludes" 2>/dev/null
+    fi
+    lifecycle_log "error" "supervisor" "backup_aborted" "{\"entity\":\"home/${_BK_ABORT_USER:-}\"}" 2>/dev/null || true
+    _backup_ledger "storage.backup.failed" "${_BK_ABORT_USER:-}" "home backup of ${_BK_ABORT_USER:-} failed: the backup was stopped before it finished" \
+        "$(printf '{"cause":"aborted","job_id":"%s","reason":"the backup was stopped before it finished"}' "${_BK_ABORT_JOB:-}")"
+    if [ "${_BK_ABORT_WARM:-1}" -eq 0 ]; then
+        job_ledger_set_phase "${_BK_ABORT_JOB:-}" "relaunching" 2>/dev/null || true
+        _backup_relaunch_home "${_BK_ABORT_USER:-}" "${BK_NUDGE:-0}"
+    fi
+    exit 143
+}
+
+# _backup_relaunch_after_kill <user> <job_id> — #581: the supervisor calls this when
+# the backup job died of KILL, so its own cleanup trap could not finish. A cold
+# backup closed the sessions: open them again. A warm backup closed nothing. Reads
+# the options sidecar (still there) for the quiesce mode and the nudge flag.
+_backup_relaunch_after_kill() {
+    local user="${1:-}" job_id="${2:-}"
+    _backup_load_options "$job_id" || return 0
+    [ "$BK_QUIESCE" = "warm" ] && return 0
+    _backup_relaunch_home "$user" "$BK_NUDGE"
+}
+
 # _backup_home_execute <user> <reason> <job_id>
 _backup_home_execute() {
     local user="${1:-}" reason="${2:-user_backup_home}" job_id="${3:-}"
     local entity="home/${user}"
+    _BK_ABORT_SNAP=""; _BK_ABORT_USER="$user"; _BK_ABORT_JOB="$job_id"; _BK_ABORT_WARM=1
+    trap '_backup_on_abort' TERM INT HUP
 
     if ! _backup_load_options "$job_id"; then
         lifecycle_log "error" "supervisor" "backup_no_options" "{\"entity\":\"$entity\"}" 2>/dev/null || true
@@ -782,6 +824,7 @@ _backup_home_execute() {
     home_mnt="$(home_mount "$user" 2>/dev/null)"
     hosting="$(_backup_hosting_mode "$user")"
     [ "$BK_QUIESCE" = "warm" ] && warm=1
+    _BK_ABORT_WARM="$warm"
 
     # R3/R4: cold mode closes every session, recording {sessionId, agentId,
     # workspacePath, hadResume, working}. R7: warm mode never closes anything.
@@ -820,6 +863,7 @@ _backup_home_execute() {
         exit 1
     fi
     chmod 0700 "$snap_dir" 2>/dev/null || true
+    _BK_ABORT_SNAP="$snap_dir"
     excludes_file="${snap_dir}.excludes"
     _backup_write_excludes_file "$excludes_file" "${BK_EXCLUDES[@]}"
     started_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -874,6 +918,7 @@ _backup_home_execute() {
         log_warn "Home backup for $entity: could not write backup.json (the snapshot tree is still on disk at $snap_dir)"
     fi
     rm -f "$excludes_file" 2>/dev/null || true
+    _BK_ABORT_SNAP=""
 
     # R9: only after a SUCCESSFUL snapshot does `latest` move and pruning run.
     _backup_update_latest "$BK_TARGET" "$user" "$snap_dir"
@@ -988,6 +1033,7 @@ _restore_safety_snapshot() {
     prev_dir="$(_backup_latest_snapshot_dir "$RS_TARGET" "$user")"
     mkdir -p "$snap_dir" 2>/dev/null || return 1
     chmod 0700 "$snap_dir" 2>/dev/null || true
+    _RS_ABORT_SNAP="$snap_dir"
     excludes_file="${snap_dir}.excludes"
     _backup_write_excludes_file "$excludes_file" "${RS_EXCLUDES[@]}"
     started_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1013,8 +1059,11 @@ _restore_safety_snapshot() {
     # (HOME_RESTORE.md: "a labelled snapshot also counts for retention like
     # any other") — it becomes the new `latest` and prune runs exactly as a
     # regular backup's does.
+    _RS_ABORT_SNAP=""
     _backup_update_latest "$RS_TARGET" "$user" "$snap_dir"
-    _backup_prune "$RS_TARGET" "$user" "${RS_KEEP:-5}"
+    # #582: the snapshot being restored must survive this prune. It may be the
+    # oldest one, and the new safety snapshot pushes the count over the limit.
+    _backup_prune "$RS_TARGET" "$user" "${RS_KEEP:-5}" "$RS_SNAPSHOT"
     RS_SAFETY_PATH="$snap_dir"
     return 0
 }
@@ -1117,10 +1166,30 @@ _restore_ledger() {
 # safety-snapshot, restoring, verifying, baking, relaunching.
 # ---------------------------------------------------------------------------
 
+# _restore_on_abort — #581: the supervisor sent TERM to the whole job group (watchdog
+# ceiling or stop). The home may be half written, so say so, keep the safety
+# snapshot path in the record, and open the closed sessions again.
+_restore_on_abort() {
+    trap '' TERM INT HUP
+    if [ -n "${_RS_ABORT_SNAP:-}" ]; then
+        rm -rf "$_RS_ABORT_SNAP" "${_RS_ABORT_SNAP}.excludes" 2>/dev/null
+    fi
+    local u="${_RS_ABORT_USER:-}" sp="${RS_SAFETY_PATH:-}"
+    lifecycle_log "error" "supervisor" "restore_aborted" "{\"entity\":\"home/${u}\"}" 2>/dev/null || true
+    _restore_ledger "storage.restore.failed" "$u" "home restore of $u failed: the restore was stopped before it finished" \
+        "$(printf '{"cause":"aborted","safety_snapshot_path":"%s"}' "$sp")"
+    _restore_write_last_record "$u" "0" "${RS_SNAPSHOT:-}" "${RS_MODE:-}" "$sp" "aborted" "home restore of $u failed: the restore was stopped before it finished"
+    job_ledger_set_phase "${_RS_ABORT_JOB:-}" "relaunching" 2>/dev/null || true
+    _restore_relaunch_home "$u" "1"
+    exit 143
+}
+
 # _restore_home_execute <user> <reason> <job_id>
 _restore_home_execute() {
     local user="${1:-}" reason="${2:-user_restore_home}" job_id="${3:-}"
     local entity="home/${user}"
+    _RS_ABORT_SNAP=""; _RS_ABORT_USER="$user"; _RS_ABORT_JOB="$job_id"; RS_SAFETY_PATH=""
+    trap '_restore_on_abort' TERM INT HUP
 
     if ! _restore_load_options "$job_id"; then
         lifecycle_log "error" "supervisor" "restore_no_options" "{\"entity\":\"$entity\"}" 2>/dev/null || true

@@ -735,6 +735,11 @@ _CHILD_OP=""
 _CHILD_ENTITY=""
 _CHILD_STARTED_AT=0
 _CHILD_MAX_DURATION=0
+# #581: seconds a stopped op gets to clean up (TERM) before KILL. Backup and restore
+# run a cleanup trap that opens the closed sessions again, so they get longer.
+_op_term_grace() {
+    case "${_CHILD_OP:-}" in backup|restore) echo 120 ;; *) echo 10 ;; esac
+}
 _LAST_COMPLETED_AT="null"
 # S-08 (#1353): the LAST op handler's child exit code + (mount) defer reason —
 # consumed by the job-ledger finaliser in _work_tick. The handlers keep their
@@ -801,6 +806,30 @@ _run_heartbeat() {
 }
 
 # ---------------------------------------------------------------------------
+# #581: stop an op child AND everything it started. Each op child leads its own
+# process group (set -m at the spawn), so one signal to -PID reaches rsync,
+# storagectl and the other grandchildren. Signalling only the direct child left
+# them running as orphans. TERM first, then KILL when the leader is still alive
+# after <grace> seconds. The leader's own TERM trap (backup and restore) removes
+# the partial snapshot and opens the closed sessions again within the grace.
+# ---------------------------------------------------------------------------
+_terminate_op_tree() {
+    local pid="$1" grace="${2:-10}" waited=0
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+    while [ "$waited" -lt "$grace" ]; do
+        _pid_alive "$pid" || return 0
+        sleep 1
+        waited=$(( waited + 1 ))
+    done
+    if _pid_alive "$pid" 2>/dev/null; then
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Watchdog: check if current child has exceeded its duration ceiling
 # ---------------------------------------------------------------------------
 _watchdog_check_child() {
@@ -817,16 +846,7 @@ _watchdog_check_child() {
         lifecycle_log "warn" "supervisor" "op_exceeded_ceiling" \
             "{\"op\":\"$_CHILD_OP\",\"entity\":\"$_CHILD_ENTITY\",\"elapsed\":$elapsed,\"ceiling\":$_CHILD_MAX_DURATION}" 2>/dev/null || true
 
-        kill -TERM "$_CHILD_PID" 2>/dev/null || true
-        local waited=0
-        while [ "$waited" -lt 10 ]; do
-            _pid_alive "$_CHILD_PID" || break
-            sleep 1
-            waited=$(( waited + 1 ))
-        done
-        if _pid_alive "$_CHILD_PID" 2>/dev/null; then
-            kill -KILL "$_CHILD_PID" 2>/dev/null || true
-        fi
+        _terminate_op_tree "$_CHILD_PID" "$(_op_term_grace)"
 
         _supervisor_notify "critical" "AICliAgents: Op timeout" \
             "Operation $_CHILD_OP for $_CHILD_ENTITY exceeded time ceiling (${elapsed}s). The supervisor killed the worker." \
@@ -1581,6 +1601,7 @@ _op_bake() {
     # must not keep the lock held (a bake can run for minutes). The `exec`
     # replaces the subshell with storagectl (Phase 5: it dispatches to op_bake),
     # so $! and the watchdog's kill -0/-TERM/-KILL still target the right PID.
+    set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         export MKSQUASHFS_ARGS="-comp $compression"
@@ -1590,6 +1611,7 @@ _op_bake() {
         exec bash "${STORAGE_DIR}/storagectl.sh" bake --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
+    set +m
 
     _CHILD_PID="$child_pid"
     _CHILD_OP="bake"
@@ -1786,11 +1808,13 @@ _op_consolidate() {
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake. A consolidate can run for many minutes; an
     # orphaned one must not block a fresh supervisor.
+    set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         exec bash "${STORAGE_DIR}/storagectl.sh" consolidate --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
+    set +m
 
     _CHILD_PID="$child_pid"
     _CHILD_OP="consolidate"
@@ -2123,6 +2147,7 @@ _op_mount() {
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake. op_mount defaults --owner to the id for homes,
     # so no owner threading is needed here.
+    set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         # The probe above already found the lock free, and a mount job that
@@ -2131,6 +2156,7 @@ _op_mount() {
         AICLI_MOUNT_LOCK_WAIT_S=0 exec bash "${STORAGE_DIR}/storagectl.sh" mount --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
+    set +m
 
     _CHILD_PID="$child_pid"
     _CHILD_OP="mount"
@@ -2277,11 +2303,13 @@ _op_graduate() {
 
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake.
+    set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         AICLI_GRADUATE_REASON="$reason" exec bash "${STORAGE_DIR}/storagectl.sh" graduate --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
+    set +m
 
     _CHILD_PID="$child_pid"
     _CHILD_OP="graduate"
@@ -2429,11 +2457,13 @@ _op_backup_home() {
     # function, not a separate program) so the watchdog's kill -0/-TERM/-KILL
     # and _wait_op_child still target a real PID, and an orphaned run does not
     # keep the single-instance lock fd held (Bug #757 pattern; see _op_bake).
+    set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         _backup_home_execute "$id" "$reason" "$job_id"
     ) &
     local child_pid=$!
+    set +m
 
     _CHILD_PID="$child_pid"
     _CHILD_OP="backup"
@@ -2465,6 +2495,11 @@ _op_backup_home() {
         log_error "Home backup failed: $entity (exit=$exit_code)"
         lifecycle_log "error" "supervisor" "backup_failed" \
             "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"exit_code\":$exit_code}" 2>/dev/null || true
+        # #581: exit 137 = the job was killed (KILL) before its own cleanup finished.
+        # Open the closed sessions again from here. A repeat call is a no-op.
+        if [ "$exit_code" -eq 137 ] && declare -f _backup_relaunch_after_kill >/dev/null 2>&1; then
+            _backup_relaunch_after_kill "$id" "$job_id"
+        fi
     fi
     # The options sidecar has done its job either way — never leak it.
     declare -f _backup_delete_options >/dev/null 2>&1 && _backup_delete_options "$job_id"
@@ -2509,11 +2544,13 @@ _op_history() {
 
     # Background subshell, like _op_backup_home: the watchdog and _wait_op_child
     # need a real PID, and the child must not hold the single-instance lock fd.
+    set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         exec nice -n 10 php -d display_errors=0 "$runner" "$job_id"
     ) &
     local child_pid=$!
+    set +m
 
     _CHILD_PID="$child_pid"
     _CHILD_OP="$op"
@@ -2588,11 +2625,13 @@ _op_restore_home() {
     # function, not a separate program) so the watchdog's kill -0/-TERM/-KILL
     # and _wait_op_child still target a real PID, and an orphaned run does not
     # keep the single-instance lock fd held (Bug #757 pattern; see _op_bake).
+    set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         _restore_home_execute "$id" "$reason" "$job_id"
     ) &
     local child_pid=$!
+    set +m
 
     _CHILD_PID="$child_pid"
     _CHILD_OP="restore"
@@ -2624,6 +2663,11 @@ _op_restore_home() {
         log_error "Home restore failed: $entity (exit=$exit_code)"
         lifecycle_log "error" "supervisor" "restore_failed" \
             "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"exit_code\":$exit_code}" 2>/dev/null || true
+        # #581: exit 137 = killed before the job's own cleanup finished. Open the
+        # closed sessions again from here. A repeat call is a no-op.
+        if [ "$exit_code" -eq 137 ] && declare -f _restore_relaunch_home >/dev/null 2>&1; then
+            _restore_relaunch_home "$id" "1"
+        fi
     fi
     # The options sidecar has done its job either way — never leak it.
     declare -f _restore_delete_options >/dev/null 2>&1 && _restore_delete_options "$job_id"
@@ -4742,7 +4786,7 @@ _do_start() {
     # Kill any running child
     if [ -n "$_CHILD_PID" ] && _pid_alive "$_CHILD_PID" 2>/dev/null; then
         log_warn "Stopping child pid $_CHILD_PID (op=$_CHILD_OP)"
-        kill -TERM "$_CHILD_PID" 2>/dev/null || true
+        _terminate_op_tree "$_CHILD_PID" "$(_op_term_grace)"
         wait "$_CHILD_PID" 2>/dev/null || true
     fi
 
