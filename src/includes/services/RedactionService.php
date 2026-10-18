@@ -125,6 +125,35 @@ class RedactionService {
             "\u{AB}Authorization line redacted\u{BB}",
             $text
         );
+        // PEM private key blocks (#645): the whole block, header to footer. An unterminated
+        // block (a truncated log) is cut to the end of the text.
+        $text = (string)preg_replace(
+            '/-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)/s',
+            "\u{AB}redacted:pem\u{BB}",
+            $text
+        );
+        // JSON form (#645): "api_key": "value". The lifecycle log and the JSON debug log are
+        // JSON, where the key is followed by a quote, so the assignment rule below sees no
+        // "=" or ":" after the key name. Keep the key, drop a string value. The escaped
+        // form (a JSON line inside a JSON string: \"api_key\":\"value\") is covered too.
+        // The (?!) keeps a layer-2 marker intact.
+        $text = (string)preg_replace(
+            '/("[A-Za-z0-9_.-]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_.-]*"\s*:\s*)(?!"\xC2\xAB)"(?:[^"\\\\]|\\\\.)*"/i',
+            '$1"' . "\u{AB}redacted\u{BB}" . '"',
+            $text
+        );
+        $text = (string)preg_replace(
+            '/(\\\\"[A-Za-z0-9_.-]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_.-]*\\\\"\s*:\s*)(?!\\\\"\xC2\xAB)\\\\"(?:[^"\\\\]|\\\\\\\\|\\\\(?!"))*\\\\"/i',
+            '$1\\\\"' . "\u{AB}redacted\u{BB}" . '\\\\"',
+            $text
+        );
+        // Flags with the value after a space (#645): --token abc, --api-key abc, --password=abc.
+        // A value that starts with "-" is the next flag, not a value.
+        $text = (string)preg_replace(
+            '/(--[A-Za-z0-9_-]*(?:key|token|secret|password|passwd|credential)[A-Za-z0-9_-]*)(\s+|=)(?!-)(?!\xC2\xAB)("[^"]*"|\'[^\']*\'|\S+)/i',
+            '$1$2' . "\u{AB}redacted\u{BB}",
+            $text
+        );
         // KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL-bearing assignments: keep key, drop value.
         // (?!«) keeps a layer-2 «REDACTED:keyname» marker intact rather than
         // overwriting it with the anonymous «redacted».
@@ -140,6 +169,14 @@ class RedactionService {
         $text = (string)preg_replace('/\bgh[pos]_[A-Za-z0-9]{16,}/',         "\u{AB}redacted:gh\u{BB}",   $text); // GitHub ghp_/gho_/ghs_
         $text = (string)preg_replace('/\bxox[bp]-[A-Za-z0-9-]{8,}/',         "\u{AB}redacted:slack\u{BB}", $text);
         $text = (string)preg_replace('/\bAIza[0-9A-Za-z_-]{30,}/',           "\u{AB}redacted:aiza\u{BB}", $text);
+        // #645: short vendor tokens that the long-run rules below never reach.
+        $text = (string)preg_replace('/\bglpat-[A-Za-z0-9_-]{20,}/',         "\u{AB}redacted:gitlab\u{BB}", $text); // GitLab personal access token
+        $text = (string)preg_replace('/\bgithub_pat_[A-Za-z0-9_]{20,}/',     "\u{AB}redacted:gh\u{BB}",   $text); // GitHub fine-grained token
+        $text = (string)preg_replace('/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/',      "\u{AB}redacted:aws\u{BB}",  $text); // AWS access key id
+        $text = (string)preg_replace('/\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/', "\u{AB}redacted:stripe\u{BB}", $text);
+        $text = (string)preg_replace('/\bnpm_[A-Za-z0-9]{30,}/',             "\u{AB}redacted:npm\u{BB}",  $text);
+        // A whole JWT: three dot-separated base64url parts, the first starting with the header "eyJ".
+        $text = (string)preg_replace('/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/', "\u{AB}redacted:jwt\u{BB}", $text);
         // Long encoded runs: base64(url) >= 40 chars, hex >= 40 chars.
         //
         // '/' is a base64 alphabet character, so this rule used to match ACROSS path

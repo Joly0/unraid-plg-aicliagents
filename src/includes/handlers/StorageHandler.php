@@ -2201,12 +2201,7 @@ class StorageHandler {
             // Revert only the path keys, preserve everything else from live config
             $liveConfig['home_storage_path'] = $oldHomePath;
             $liveConfig['agent_storage_path'] = $oldAgentPath;
-            $content = "";
-            foreach ($liveConfig as $key => $value) {
-                if ($key === 'csrf_token') continue;
-                $content .= "$key=\"" . addslashes($value) . "\"" . PHP_EOL;
-            }
-            \AICliAgents\Services\AtomicWriteService::write(\AICliAgents\Services\ConfigService::CONFIG_PATH, $content);
+            \AICliAgents\Services\ConfigService::writeConfigFile($liveConfig);
             // Re-read to confirm revert took effect
             usleep(100000);
         }
@@ -2352,12 +2347,7 @@ class StorageHandler {
         if ($newAgentPath && $newAgentPath !== $oldAgentPath) $freshConfig['agent_storage_path'] = $newAgentPath;
         if ($newHomePath && $newHomePath !== $oldHomePath) $freshConfig['home_storage_path'] = $newHomePath;
 
-        $content = "";
-        foreach ($freshConfig as $key => $value) {
-            if ($key === 'csrf_token') continue;
-            $content .= "$key=\"" . addslashes($value) . "\"" . PHP_EOL;
-        }
-        \AICliAgents\Services\AtomicWriteService::write(\AICliAgents\Services\ConfigService::CONFIG_PATH, $content);
+        \AICliAgents\Services\ConfigService::writeConfigFile($freshConfig);
         self::$migrateSettingsSaved = true; // from here a failure leaves the setting on the NEW place
 
         // Final consolidation at the new location (skip if target is Flash — avoid unnecessary USB writes)

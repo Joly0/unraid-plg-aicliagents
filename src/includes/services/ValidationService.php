@@ -211,20 +211,66 @@ class ValidationService {
     }
 
     /**
-     * Escapes a value for safe INI file serialization.
-     * Handles quotes, equals signs, semicolons, and newlines.
+     * Escapes a value for a double-quoted INI string (#636).
+     * PHP's INI reader undoes exactly three escapes inside double quotes:
+     * backslash, double quote and dollar. It does NOT undo addslashes() output
+     * (a quote written as backslash-quote stays two characters), so addslashes
+     * must never write an INI file. A dollar is escaped so that ${NAME} is not
+     * expanded. A newline is legal inside a double-quoted INI value and is kept
+     * (a PEM key is multi-line); only a NUL byte is dropped.
      *
      * @param string $value The value to escape.
      * @return string Safe value for INI format.
      */
     public static function escapeForIni($value) {
         if (!is_string($value)) $value = (string)$value;
-        // Remove characters that corrupt INI format
-        $value = str_replace(["\r", "\n", "\0"], '', $value);
-        // Escape backslashes and double quotes
-        $value = str_replace('\\', '\\\\', $value);
-        $value = str_replace('"', '\\"', $value);
-        return $value;
+        $value = str_replace("\0", '', $value);
+        return str_replace(['\\', '"', '$'], ['\\\\', '\\"', '\\$'], $value);
+    }
+
+    /** Words the INI reader treats as booleans or null. A key with one of these names breaks the whole file (#636). */
+    public const RESERVED_INI_KEYS = ['NO', 'ON', 'OFF', 'YES', 'NONE', 'NULL', 'TRUE', 'FALSE'];
+
+    /** True when $key is a word that PHP's INI reader refuses as a key name. */
+    public static function isReservedIniKey($key): bool {
+        return in_array(strtoupper((string)$key), self::RESERVED_INI_KEYS, true);
+    }
+
+    /**
+     * Builds the text of a flat KEY="value" INI file (the vault, the workspace
+     * secret files and the plugin .cfg) and proves it reads back (#636).
+     *
+     * A key that is reserved or has a shape the reader cannot hold is skipped and
+     * named in $skipped. Every remaining value is then read back through
+     * parse_ini_string and compared; any difference means the file would corrupt a
+     * value, so the method returns false and the caller must not write.
+     *
+     * @param array      $map     key => scalar value
+     * @param string[]   $skipped keys left out (out parameter)
+     * @return string|false the file content, or false when the round trip fails
+     */
+    public static function buildIni(array $map, ?array &$skipped = null) {
+        $skipped = [];
+        $content = '';
+        $expect = [];
+        foreach ($map as $key => $value) {
+            $key = (string)$key;
+            if (!preg_match('/^[A-Za-z_][A-Za-z0-9_.-]*$/', $key) || self::isReservedIniKey($key)
+                || (!is_scalar($value) && $value !== null)) {
+                $skipped[] = $key;
+                continue;
+            }
+            $value = str_replace("\0", '', (string)$value);
+            $content .= $key . '="' . self::escapeForIni($value) . '"' . PHP_EOL;
+            $expect[$key] = $value;
+        }
+        if ($content === '') return '';
+        $back = @parse_ini_string($content, false, INI_SCANNER_NORMAL);
+        if (!is_array($back) || count($back) !== count($expect)) return false;
+        foreach ($expect as $key => $value) {
+            if (!array_key_exists($key, $back) || (string)$back[$key] !== $value) return false;
+        }
+        return $content;
     }
 
     /**

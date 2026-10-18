@@ -12,30 +12,29 @@ namespace AICliAgents\Services;
 
 class SecretService {
 
-    private const VAULT_FILE          = '/boot/config/plugins/unraid-aicliagents/secrets.cfg';
-    private const WS_SECRETS_DIR      = '/boot/config/plugins/unraid-aicliagents/secrets';
-    private const FREEFORM_KEYS_FILE  = '/boot/config/plugins/unraid-aicliagents/secrets_freeform_keys.json';
-
     // ---------- Paths ----------
+    // All flash locations hang off SecretPaths::flashRoot() (#646): the live
+    // /boot/config/plugins/unraid-aicliagents in production, a temp folder in
+    // tests (AICLI_FLASH_ROOT, set by tests/bootstrap.php).
 
     public static function getAgentSecretsPath(): string {
         // Test seam (RELAY_LINKED_BOXES.md, twin harness and unit tests): a
         // second Relay instance needs its own vault. Unset in production.
         $e = getenv('AICLI_SECRET_VAULT_FILE');
-        return ($e !== false && $e !== '') ? $e : self::VAULT_FILE;
+        return ($e !== false && $e !== '') ? $e : SecretPaths::flashRoot() . '/secrets.cfg';
     }
 
     public static function getWorkspaceSecretsDir(): string {
-        return self::WS_SECRETS_DIR;
+        return SecretPaths::flashRoot() . '/secrets';
     }
 
     public static function getWorkspaceSecretsPath(string $path, string $agentId): string {
         $hash = md5($path);
-        return self::WS_SECRETS_DIR . "/ws_{$hash}_{$agentId}.cfg";
+        return self::getWorkspaceSecretsDir() . "/ws_{$hash}_{$agentId}.cfg";
     }
 
     public static function getFreeformKeysPath(): string {
-        return self::FREEFORM_KEYS_FILE;
+        return SecretPaths::flashRoot() . '/secrets_freeform_keys.json';
     }
 
     // ---------- Free-form-keys sidecar (tracks which agent-vault keys came from
@@ -44,17 +43,20 @@ class SecretService {
     //            without touching schema-managed entries). ----------
 
     public static function getFreeformKeys(): array {
-        if (!file_exists(self::FREEFORM_KEYS_FILE)) return [];
-        $decoded = json_decode((string)@file_get_contents(self::FREEFORM_KEYS_FILE), true);
+        $file = self::getFreeformKeysPath();
+        if (!file_exists($file)) return [];
+        $decoded = json_decode((string)@file_get_contents($file), true);
         return is_array($decoded) ? array_values(array_filter(array_map('strval', $decoded))) : [];
     }
 
     public static function setFreeformKeys(array $keys): bool {
         $unique = array_values(array_unique(array_map('strval', $keys)));
-        $dir = dirname(self::FREEFORM_KEYS_FILE);
+        $file = self::getFreeformKeysPath();
+        ConfigService::refuseLiveStateInTests($file);
+        $dir = dirname($file);
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        $ok = \AICliAgents\Services\AtomicWriteService::writeJson(self::FREEFORM_KEYS_FILE, $unique);
-        if ($ok) @chmod(self::FREEFORM_KEYS_FILE, 0600);
+        $ok = \AICliAgents\Services\AtomicWriteService::writeJson($file, $unique);
+        if ($ok) @chmod($file, 0600);
         return $ok;
     }
 
@@ -109,9 +111,18 @@ class SecretService {
     // ---------- Internal ----------
 
     private static function readIni(string $file): array {
+        return self::readIniStrict($file) ?? [];
+    }
+
+    /**
+     * Like readIni, but null when the file EXISTS and cannot be parsed (a damaged
+     * or hand-edited vault). [] still means "no file" or "no keys". The writer uses
+     * the difference to keep a copy of a vault it cannot read (#636).
+     */
+    private static function readIniStrict(string $file): ?array {
         if (!file_exists($file)) return [];
         $parsed = @parse_ini_file($file);
-        if (!is_array($parsed)) return [];
+        if (!is_array($parsed)) return null;
         $out = [];
         foreach ($parsed as $k => $v) {
             // Defence: strip anything that doesn't look like a legitimate env name.
@@ -135,10 +146,19 @@ class SecretService {
     /**
      * Write the INI vault. Ensures the parent directory exists with 0700,
      * writes via AtomicWriteService for crash/race safety, then chmods 0600.
-     * Format matches saveVault's existing on-disk shape: KEY="value" per line,
-     * double-quoted, embedded quotes addslashes-escaped.
+     * Format: KEY="value" per line, double-quoted, with the INI escapes
+     * (backslash, double quote, dollar) from ValidationService::buildIni, which
+     * also proves the text reads back (#636). addslashes is wrong here: the INI
+     * reader does not undo it, so an apostrophe was corrupted.
+     *
+     * Refused (returns false, nothing written): a key that is an INI reserved word
+     * (NO, ON, OFF, YES, NONE, NULL, TRUE, FALSE), because one such line makes the
+     * whole file unreadable. A vault that exists but cannot be parsed is copied to
+     * <file>.corrupt-<time> first, so the replacement never destroys it unseen.
      */
     private static function writeVault(string $file, array $map): bool {
+        // #646: a test never writes a vault under a live root.
+        ConfigService::refuseLiveStateInTests($file);
         // Pre-create parent 0700. AtomicWriteService::write would create it 0755
         // which is wrong for the secrets/ subdir.
         $dir = dirname($file);
@@ -148,17 +168,29 @@ class SecretService {
             @chmod($dir, 0700);
         }
 
-        $content = '';
+        $clean = [];
         foreach ($map as $k => $v) {
             // Final shape gate at write time.
             if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) continue;
-            $content .= $k . '="' . addslashes((string)$v) . '"' . PHP_EOL;
+            if (ValidationService::isReservedIniKey($k)) {
+                LogService::log("Secret store: refused the key '$k': it is an INI reserved word.", LogService::LOG_WARN, 'SecretService');
+                return false;
+            }
+            $clean[$k] = (string)$v;
         }
-
-        if (!\AICliAgents\Services\AtomicWriteService::write($file, $content)) {
+        $content = ValidationService::buildIni($clean);
+        if ($content === false) {
+            LogService::log('Secret store: refused to write: a value does not survive the INI round trip.', LogService::LOG_ERROR, 'SecretService');
             return false;
         }
-        @chmod($file, 0600);
-        return true;
+
+        if (file_exists($file) && self::readIniStrict($file) === null) {
+            $copy = $file . '.corrupt-' . date('Ymd-His');
+            if (@copy($file, $copy)) @chmod($copy, 0600);
+            LogService::log('Secret store: the existing file could not be parsed; a copy was kept at ' . basename($copy), LogService::LOG_WARN, 'SecretService');
+        }
+
+        // 0600 from the first byte: the temp file is never group- or world-readable.
+        return \AICliAgents\Services\AtomicWriteService::write($file, $content, 0600);
     }
 }

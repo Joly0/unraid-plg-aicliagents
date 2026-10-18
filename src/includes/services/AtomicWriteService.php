@@ -59,9 +59,14 @@ class AtomicWriteService {
      * produce distinct tmp paths via getmypid() + microtime, so two PHP-FPM
      * workers racing on the same target file cannot corrupt each other's bytes.
      *
+     * Mode and owner (#637): when the target exists, its mode and owner are kept on the
+     * replacement file. When it does not exist, $mode (if given, for example 0600 for a
+     * vault) is the mode of the new file; without $mode the umask decides. An explicit
+     * $mode also wins over the mode of an existing file.
+     *
      * Returns true on success, false on any I/O failure (caller should log).
      */
-    public static function write(string $path, string $content): bool {
+    public static function write(string $path, string $content, ?int $mode = null): bool {
         self::$lastFailure = null;
         // #151 (mvp-dmoe): rename() REPLACES a symlink target rather than writing
         // through it, so a managed file the user linked into their config repo (e.g.
@@ -90,7 +95,21 @@ class AtomicWriteService {
         // bytes go straight to the kernel on every fwrite), and pairing it
         // with an explicit fflush+fsync before close gives durability before
         // the rename.
+        // #637: remember what the replaced file looked like. Read before the rename.
+        $keepMode = null; $keepUid = null; $keepGid = null;
+        if (is_file($path)) {
+            $st = @stat($path);
+            if (is_array($st)) {
+                $keepMode = $st['mode'] & 07777;
+                $keepUid = $st['uid'];
+                $keepGid = $st['gid'];
+            }
+        }
+        // A file that must be private never exists with a loose mode, not even for the
+        // moment between fopen and chmod.
+        $oldUmask = ($mode !== null || $keepMode !== null) ? umask(0077) : null;
         [$fh, $warning] = self::captureWarning(static fn() => fopen($tmpPath, 'w'));
+        if ($oldUmask !== null) umask($oldUmask);
         if ($fh === false) {
             return self::fail('fopen', $path, $warning);
         }
@@ -111,6 +130,13 @@ class AtomicWriteService {
             @fsync($fh); // Best effort: some supported filesystems do not implement it.
         }
         fclose($fh);
+
+        $finalMode = $mode ?? $keepMode;
+        if ($finalMode !== null) @chmod($tmpPath, $finalMode);
+        if ($keepUid !== null && function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            @chown($tmpPath, $keepUid);
+            @chgrp($tmpPath, $keepGid);
+        }
 
         [$renamed, $warning] = self::captureWarning(static fn() => rename($tmpPath, $path));
         if (!$renamed) {

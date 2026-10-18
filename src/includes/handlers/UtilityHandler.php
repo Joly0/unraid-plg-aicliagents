@@ -266,8 +266,7 @@ class UtilityHandler {
      * fields entirely, so clearing a secret was a silent no-op.)
      */
     private static function saveVault() {
-        $file = '/boot/config/plugins/unraid-aicliagents/secrets.cfg';
-        $existing = file_exists($file) ? (@parse_ini_file($file) ?: []) : [];
+        $existing = \AICliAgents\Services\SecretService::getAgentSecrets();
         $before = array_map('strval', $existing);
         ksort($before);
 
@@ -308,20 +307,11 @@ class UtilityHandler {
             }
         }
 
-        $content = '';
-        foreach ($existing as $k => $v) {
-            // Double-quoted INI format matches parse_ini_file readers server-side + shell readers
-            // in aicli-shell.sh. Escape embedded double-quotes.
-            $content .= $k . '="' . addslashes((string)$v) . '"' . PHP_EOL;
-        }
-
-        $dir = dirname($file);
-        if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        $res = @file_put_contents($file, $content);
-        if ($res === false) {
+        // #636: one writer for the vault (SecretService), with INI escaping, a read-back
+        // proof, a refusal of reserved key names and a backup of an unreadable vault.
+        if (!\AICliAgents\Services\SecretService::saveAgentSecrets($existing)) {
             return ['status' => 'error', 'message' => 'Failed to write secrets.cfg'];
         }
-        @chmod($file, 0600);
         // #463: `changed` is false when the save left every stored value as it was
         // (for example a form whose fields all still show the dots).
         $after = array_map('strval', $existing);

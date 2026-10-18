@@ -12,15 +12,14 @@ namespace AICliAgents\Services;
 
 class SshKeyService {
 
-    private const SIDECAR       = '/boot/config/plugins/unraid-aicliagents/ssh_keys.json';
     private const ATTACH_SCRIPT = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/ssh-attach.sh';
     private const VALID_TYPES   = ['ssh-ed25519','ssh-rsa','ecdsa-sha2-nistp256','ecdsa-sha2-nistp384','ecdsa-sha2-nistp521','sk-ssh-ed25519@openssh.com','sk-ecdsa-sha2-nistp256@openssh.com'];
 
     // ---------- Public API ----------
 
     public static function addKey(string $pubkey, string $label, string $userAgent): array {
-        $pubkey = trim($pubkey);
-        if (!self::validatePubkeyFormat($pubkey)) {
+        $pubkey = self::normalisePubkey($pubkey) ?? '';
+        if ($pubkey === '') {
             return ['status' => 'error', 'message' => 'Invalid public key format'];
         }
         $fp = self::getFingerprint($pubkey);
@@ -39,6 +38,7 @@ class SshKeyService {
         self::ensureSshDir($authKeys);
         $existing = file_exists($authKeys) ? (string)file_get_contents($authKeys) : '';
         $line = 'command="' . self::ATTACH_SCRIPT . '",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ' . $pubkey . ' # aicli-managed' . "\n";
+        if ($existing !== '' && substr($existing, -1) !== "\n") $existing .= "\n"; // never glue onto an unterminated last line
         AtomicWriteService::write($authKeys, $existing . $line);
         $sidecar      = self::readSidecar();
         $sidecar[$fp] = ['label' => $label, 'fingerprint' => $fp, 'date' => date('Y-m-d'), 'os_hint' => self::osHint($userAgent), 'pubkey' => $pubkey];
@@ -56,9 +56,12 @@ class SshKeyService {
         $pubkey  = $sidecar[$fingerprint]['pubkey'] ?? '';
         $label   = $sidecar[$fingerprint]['label']  ?? '';
         $authKeys = self::getAuthorizedKeysPath();
-        if ($pubkey !== '' && file_exists($authKeys)) {
+        // #639: match on the base64 body as a whole word, not on the whole line text.
+        // The comment is free text and may differ between the sidecar and the file.
+        $body64 = self::keyBody($pubkey);
+        if ($body64 !== '' && file_exists($authKeys)) {
             $lines    = file($authKeys, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            $filtered = array_filter($lines, fn($l) => !(str_contains($l, '# aicli-managed') && str_contains($l, $pubkey)));
+            $filtered = array_filter($lines, fn($l) => !(str_contains($l, '# aicli-managed') && in_array($body64, preg_split('/\s+/', $l) ?: [], true)));
             $body     = count($filtered) ? implode("\n", $filtered) . "\n" : '';
             AtomicWriteService::write($authKeys, $body);
         }
@@ -98,10 +101,41 @@ class SshKeyService {
     }
 
     public static function validatePubkeyFormat(string $pubkey): bool {
-        $parts = explode(' ', $pubkey, 3);
-        if (count($parts) < 2) return false;
-        if (!in_array($parts[0], self::VALID_TYPES, true)) return false;
-        return base64_decode($parts[1], true) !== false;
+        return self::normalisePubkey($pubkey) !== null;
+    }
+
+    /**
+     * One safe public key line: "<type> <base64> [comment]", or null (#639).
+     * The text must be ONE line: a CR, LF or NUL anywhere is refused, because a
+     * second line would reach authorized_keys without the forced command and the
+     * UI could never remove it. The type must be a known key type. The body must be
+     * strict base64 whose first field names the same type (the SSH wire format). The
+     * comment keeps only [A-Za-z0-9._@+-]; any other run of characters becomes "_".
+     */
+    public static function normalisePubkey(string $pubkey): ?string {
+        $pubkey = trim($pubkey);
+        if ($pubkey === '' || preg_match('/[\r\n\0]/', $pubkey)) return null;
+        $parts = preg_split('/\s+/', $pubkey, 3);
+        if (!is_array($parts) || count($parts) < 2) return null;
+        [$type, $b64] = $parts;
+        if (!in_array($type, self::VALID_TYPES, true)) return null;
+        if (!preg_match('/^[A-Za-z0-9+\/]+={0,2}$/', $b64)) return null;
+        $blob = base64_decode($b64, true);
+        if ($blob === false || strlen($blob) < 4 + strlen($type)) return null;
+        $nameLen = unpack('N', substr($blob, 0, 4))[1];
+        if ($nameLen !== strlen($type) || substr($blob, 4, $nameLen) !== $type) return null;
+        $line = $type . ' ' . $b64;
+        if (isset($parts[2]) && $parts[2] !== '') {
+            $comment = trim((string)preg_replace('/[^A-Za-z0-9._@+-]+/', '_', $parts[2]), '_');
+            if ($comment !== '') $line .= ' ' . $comment;
+        }
+        return $line;
+    }
+
+    /** The base64 body of a stored public key line, '' when it has none. */
+    private static function keyBody(string $pubkey): string {
+        $parts = preg_split('/\s+/', trim($pubkey));
+        return (is_array($parts) && isset($parts[1])) ? $parts[1] : '';
     }
 
     public static function hasKey(string $fingerprint): bool {
@@ -125,7 +159,10 @@ class SshKeyService {
         $lines    = array_filter(explode("\n", $existing), fn($l) => !str_contains($l, '# aicli-managed'));
         $clean    = rtrim(implode("\n", $lines));
         foreach ($sidecar as $entry) {
-            $clean .= "\n" . 'command="' . self::ATTACH_SCRIPT . '",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ' . $entry['pubkey'] . ' # aicli-managed';
+            // #639: a sidecar line that is not one safe key line is never written back.
+            $key = self::normalisePubkey((string)($entry['pubkey'] ?? ''));
+            if ($key === null) continue;
+            $clean .= "\n" . 'command="' . self::ATTACH_SCRIPT . '",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ' . $key . ' # aicli-managed';
         }
         AtomicWriteService::write($authKeys, $clean . "\n");
     }
@@ -133,6 +170,9 @@ class SshKeyService {
     // ---------- Private ----------
 
     private static function getAuthorizedKeysPath(): string {
+        // Test seam: unit tests point this at a temp file. Unset in production.
+        $e = getenv('AICLI_SSH_AUTHORIZED_KEYS');
+        if ($e !== false && $e !== '') return $e;
         $config = ConfigService::getConfig();
         $user   = $config['user'] ?? 'root';
         if ($user === '' || $user === 'root') return '/root/.ssh/authorized_keys';
@@ -153,14 +193,22 @@ class SshKeyService {
     }
 
     private static function readSidecar(): array {
-        if (!file_exists(self::SIDECAR)) return [];
-        $data = json_decode((string)@file_get_contents(self::SIDECAR), true);
+        $file = self::sidecarPath();
+        if (!file_exists($file)) return [];
+        $data = json_decode((string)@file_get_contents($file), true);
         return is_array($data) ? $data : [];
     }
 
+    /** The sidecar lives under the flash root (#646): the live folder in production, a temp folder in tests. */
+    private static function sidecarPath(): string {
+        return SecretPaths::flashRoot() . '/ssh_keys.json';
+    }
+
     private static function writeSidecar(array $data): void {
-        $dir = dirname(self::SIDECAR);
+        $file = self::sidecarPath();
+        ConfigService::refuseLiveStateInTests($file);
+        $dir = dirname($file);
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        AtomicWriteService::writeJson(self::SIDECAR, $data);
+        AtomicWriteService::writeJson($file, $data);
     }
 }

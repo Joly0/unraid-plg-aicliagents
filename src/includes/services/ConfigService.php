@@ -319,9 +319,25 @@ class ConfigService {
     private static function persistAutoContinueOnRestart(bool $enabled): bool {
         $raw = self::rawConfigFile();
         $raw['auto_continue_on_restart'] = $enabled ? '1' : '0';
-        $content = "";
-        foreach ($raw as $key => $value) {
-            $content .= "$key=\"" . addslashes((string)$value) . "\"" . PHP_EOL;
+        return self::writeConfigFile($raw);
+    }
+
+    /**
+     * The one writer of the plugin .cfg (#636). It escapes with the INI rules
+     * (backslash, double quote, dollar), not addslashes, and proves the text reads
+     * back before it writes: a value such as "/mnt/user/John's files" keeps its
+     * exact bytes on every save. Public so the storage handler uses the same writer.
+     * The csrf_token key never reaches the file.
+     */
+    public static function writeConfigFile(array $config): bool {
+        unset($config['csrf_token']);
+        $content = ValidationService::buildIni($config, $skipped);
+        if ($content === false) {
+            LogService::log("Refusing to write the plugin config: a value does not survive the INI round trip.", LogService::LOG_ERROR, "ConfigService");
+            return false;
+        }
+        if (!empty($skipped)) {
+            LogService::log("Plugin config: left out keys the INI reader cannot hold: " . implode(', ', $skipped), LogService::LOG_WARN, "ConfigService");
         }
         return AtomicWriteService::write(self::CONFIG_PATH, $content);
     }
@@ -453,12 +469,7 @@ class ConfigService {
 
         $config = array_merge($config, $newConfig);
 
-        $content = "";
-        foreach ($config as $key => $value) {
-            $content .= "$key=\"" . addslashes($value) . "\"" . PHP_EOL;
-        }
-
-        if (!AtomicWriteService::write(self::CONFIG_PATH, $content)) {
+        if (!self::writeConfigFile($config)) {
             LogService::log("Error saving configuration to " . self::CONFIG_PATH, LogService::LOG_ERROR, "ConfigService");
             return false;
         }
@@ -703,8 +714,10 @@ class ConfigService {
             LogService::log("getUserStatePath: home mount unavailable for '$user' — reads/writes will target bare tmpfs and may be lost", LogService::LOG_WARN, "ConfigService");
         }
 
-        $homeDir = "/tmp/unraid-aicliagents/work/$user/home";
+        // #646: the state root is injectable (AICLI_STATE_ROOT); tests/bootstrap.php redirects it.
+        $homeDir = SecretPaths::stateRoot() . "/work/$user/home";
         $statePath = "$homeDir/.aicli";
+        self::refuseLiveStateInTests($statePath);
 
         // Non-root user permission fix (2026-06-07): this runs as ROOT (web/emhttpd),
         // but the agent run-script writes .aicli/.exported_keys_* AS the session user.
@@ -731,11 +744,22 @@ class ConfigService {
         return $phpunitLoaded && !$sandboxDefined;
     }
 
-    /** Throw when test code runs against live state (see shouldRefuseLiveState). */
-    public static function refuseLiveStateInTests(): void
+    /**
+     * Throw when test code runs against live state (see shouldRefuseLiveState).
+     * #646: the constant alone is a heuristic (a stand-in runner can define it), so the
+     * guard also compares real paths: while a PHPUnit TestCase class is loaded, the state
+     * root, the flash root and every path in $paths must lie outside the live roots
+     * (/tmp/unraid-aicliagents and /boot/config/plugins/unraid-aicliagents).
+     */
+    public static function refuseLiveStateInTests(string ...$paths): void
     {
-        if (self::shouldRefuseLiveState(class_exists('PHPUnit\\Framework\\TestCase', false), defined('AICLI_TEST_TMP'))) {
+        $phpunit = class_exists('PHPUnit\\Framework\\TestCase', false);
+        if (self::shouldRefuseLiveState($phpunit, defined('AICLI_TEST_TMP'))) {
             throw new \RuntimeException('Refusing to use the live plugin state from test code: load tests/bootstrap.php (run the suite with ../ci/run unit), never a stand-in runner on the host.');
+        }
+        $bad = SecretPaths::livePathInTests($phpunit, array_merge([SecretPaths::stateRoot(), SecretPaths::flashRoot()], $paths));
+        if ($bad !== null) {
+            throw new \RuntimeException("Refusing to use the live plugin state from test code: $bad is a production path. Point AICLI_STATE_ROOT and AICLI_FLASH_ROOT at a temp folder (tests/bootstrap.php does).");
         }
     }
 
