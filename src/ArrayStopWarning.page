@@ -2,31 +2,9 @@ Menu="Buttons"
 Link='nav-user'
 ---
 <?php
-// Determine if home/agent storage paths are on the array
-$cfgFile = '/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg';
-$homeOnArray = false;
-$agentOnArray = false;
-$homePath = '';
-$agentPath = '';
-if (file_exists($cfgFile)) {
-    $cfg = @parse_ini_file($cfgFile) ?: [];
-    // The legacy persistence_base key is not an active storage location. The
-    // ConfigService read-time migration handles old cfg files; this warning
-    // must inspect only the modern path so a stale value cannot misdiagnose the
-    // live persistence device.
-    $homePath = $cfg['home_storage_path'] ?? '';
-    $agentPath = $cfg['agent_storage_path'] ?? '';
-    // Check if paths are on array/pool (starts with /mnt/ but not /mnt/storage, /mnt/disks, /mnt/remotes)
-    $classifyScript = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/classify-path.sh';
-    if (file_exists($classifyScript) && !empty($homePath)) {
-        $homeClass = trim(shell_exec("bash " . escapeshellarg($classifyScript) . " " . escapeshellarg($homePath) . " 2>/dev/null") ?: '');
-        $homeOnArray = ($homeClass === 'array' || strpos($homeClass, 'pool:') === 0);
-    }
-    if (file_exists($classifyScript) && !empty($agentPath)) {
-        $agentClass = trim(shell_exec("bash " . escapeshellarg($classifyScript) . " " . escapeshellarg($agentPath) . " 2>/dev/null") ?: '');
-        $agentOnArray = ($agentClass === 'array' || strpos($agentClass, 'pool:') === 0);
-    }
-}
+// R-172: this page runs on EVERY Unraid page load, so it runs no process and reads no file.
+// Whether the home or agent storage sits on the array is asked from the plugin (the action
+// get_array_stop_impact) when the person presses "Stop array".
 ?>
 <script>
 /**
@@ -34,10 +12,10 @@ if (file_exists($cfgFile)) {
  * Warns the user about active sessions AND storage paths on the array before stopping.
  */
 (function() {
-    var homeOnArray = <?= json_encode($homeOnArray) ?>;
-    var agentOnArray = <?= json_encode($agentOnArray) ?>;
-    var homePath = <?= json_encode($homePath) ?>;
-    var agentPath = <?= json_encode($agentPath) ?>;
+    var homeOnArray = false;
+    var agentOnArray = false;
+    var homePath = '';
+    var agentPath = '';
 
     // #592: workspaces.json is writable by an agent process, so every field that
     // goes into the dialog HTML is escaped here. Never put a raw field in it.
@@ -60,6 +38,18 @@ if (file_exists($cfgFile)) {
                         const resp = await fetch('/plugins/unraid-aicliagents/AICliAjax.php?action=get_workspaces&csrf_token=' + encodeURIComponent(window.csrf_token || ''));
                         const data = await resp.json();
                         sessions = (data && data.sessions) ? data.sessions : [];
+                    } catch (e) {}
+                    // R-172: ask now (not at page load) which storage sits on the array.
+                    // If the answer fails, the dialog still lists the sessions.
+                    try {
+                        const resp2 = await fetch('/plugins/unraid-aicliagents/AICliAjax.php?action=get_array_stop_impact&csrf_token=' + encodeURIComponent(window.csrf_token || ''));
+                        const impact = await resp2.json();
+                        if (impact && impact.status === 'ok') {
+                            homeOnArray = !!impact.homeOnArray;
+                            agentOnArray = !!impact.agentOnArray;
+                            homePath = impact.homePath || '';
+                            agentPath = impact.agentPath || '';
+                        }
                     } catch (e) {}
 
                     // Filter for sessions with workspace paths on array/pool

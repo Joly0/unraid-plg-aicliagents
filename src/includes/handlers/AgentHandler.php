@@ -56,11 +56,12 @@ class AgentHandler {
      * the background install-progress panel.
      */
     private static function restoreAgentBackup() {
-        $agentId   = $_GET['agentId'] ?? '';
         $backupDir = (string)($_GET['backup_dir'] ?? '');
-        if (empty($agentId) || $backupDir === '') {
+        if ((string)($_GET['agentId'] ?? '') === '' || $backupDir === '') {
             return ['status' => 'error', 'message' => 'Missing agentId or backup_dir'];
         }
+        $agentId = self::requireAgentId($_GET['agentId']);
+        if ($agentId === null) return ['status' => 'error', 'message' => 'Invalid agent id'];
         return \AICliAgents\Services\InstallerService::restoreAgentVersion($agentId, $backupDir);
     }
 
@@ -73,8 +74,8 @@ class AgentHandler {
      * already begun is NOT interrupted (that could leave a half-installed agent).
      */
     private static function cancelAgentUpgrade() {
-        $agentId = (string)($_GET['agentId'] ?? $_POST['agentId'] ?? '');
-        if ($agentId === '' || !array_key_exists($agentId, \AICliAgents\Services\AgentRegistry::getDefaultAgents())) {
+        $agentId = self::requireAgentId($_GET['agentId'] ?? $_POST['agentId'] ?? '');
+        if ($agentId === null) {
             return ['status' => 'error', 'message' => 'Invalid agent id'];
         }
         // Queued-only guard: never cancel a running binary swap.
@@ -102,10 +103,11 @@ class AgentHandler {
      * field has a single source of truth.
      */
     private static function getUpgradeBackupEstimate() {
-        $agentId = $_GET['agentId'] ?? '';
-        if (empty($agentId)) {
+        if ((string)($_GET['agentId'] ?? '') === '') {
             return ['status' => 'error', 'message' => 'No Agent ID provided'];
         }
+        $agentId = self::requireAgentId($_GET['agentId']);
+        if ($agentId === null) return ['status' => 'error', 'message' => 'Invalid agent id'];
         $dest = (string)($_GET['dest'] ?? '');
         return \AICliAgents\Services\InstallerService::estimateUpgradeBackup($agentId, $dest);
     }
@@ -334,6 +336,16 @@ class AgentHandler {
             return 'two versions of this agent are already running; close a workspace before installing a third';
         }
         return null;
+    }
+
+    /**
+     * R-170: the one check for an agent id that comes from a request. The id must have the
+     * shape of a registry key AND be a registered agent, so an unknown id can never create a
+     * status file, a cfg key or a path. Returns the id, or null when it is not acceptable.
+     */
+    public static function requireAgentId($raw): ?string {
+        if (!is_string($raw) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/i', $raw)) return null;
+        return array_key_exists($raw, \AICliAgents\Services\AgentRegistry::getDefaultAgents()) ? $raw : null;
     }
 
     private static function install() {
@@ -919,10 +931,11 @@ class AgentHandler {
     }
 
     private static function emergencyInstall() {
-        $agentId = $_GET['agentId'] ?? '';
-        if (empty($agentId)) {
+        if ((string)($_GET['agentId'] ?? '') === '') {
             return ['status' => 'error', 'message' => 'No Agent ID provided'];
         }
+        $agentId = self::requireAgentId($_GET['agentId']);
+        if ($agentId === null) return ['status' => 'error', 'message' => 'Invalid agent id'];
 
         // Check if already installed (binary exists in RAM)
         $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
@@ -1050,12 +1063,12 @@ class AgentHandler {
      * Set the selected channel/pin for an agent.
      */
     private static function setAgentChannel() {
-        $agentId = $_GET['agentId'] ?? '';
+        $agentId = self::requireAgentId($_GET['agentId'] ?? '');
         $channel = strtolower(trim((string)($_GET['channel'] ?? 'stable')));
         $pinned = $_GET['pinned'] ?? null;
         if ($pinned === '') $pinned = null;
 
-        if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+        if ($agentId === null) return ['status' => 'error', 'message' => 'Invalid agent id'];
         if (!in_array($channel, ['stable', 'latest', 'beta', 'pinned'], true)) {
             return ['status' => 'error', 'message' => 'Unsupported release channel'];
         }
@@ -1097,7 +1110,9 @@ class AgentHandler {
     }
 
     private static function uninstall() {
-        return uninstallAgent($_GET['agentId'] ?? '');
+        $agentId = self::requireAgentId($_GET['agentId'] ?? '');
+        if ($agentId === null) return ['status' => 'error', 'message' => 'Invalid agent id'];
+        return uninstallAgent($agentId);
     }
 
     private static function checkUpdates() {

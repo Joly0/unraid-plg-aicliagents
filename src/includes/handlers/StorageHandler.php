@@ -2,13 +2,15 @@
 /**
  * <module_context>
  *     <name>StorageHandler</name>
- *     <description>Handles storage AJAX actions: persist, consolidate, expand, shrink, repair, wipe, purge.</description>
+ *     <description>Handles storage AJAX actions: persist, consolidate, repair, wipe, purge.</description>
  *     <dependencies>AICliAgentsManager, StorageMountService, StorageMigrationService, StorageMetricsService</dependencies>
  *     <constraints>Under 150 lines. Each method returns array for JSON encoding.</constraints>
  * </module_context>
  */
 
 namespace AICliAgents\Handlers;
+
+require_once __DIR__ . '/AgentHandler.php'; // R-170: AgentHandler::requireAgentId, same generation as this file (#367)
 
 class StorageHandler {
     /** Tray title of the running storage migration ("Moving storage to <path>"). */
@@ -55,6 +57,7 @@ class StorageHandler {
             case 'storage_job_status':          return self::storageJobStatus();    // S-08: read-only, no Nchan publish
             case 'storage_jobs_active':         return self::storageJobsActive();   // S-08: read-only, no Nchan publish
             case 'enumerate_storage_targets':   return self::enumerateStorageTargets(); // S-11: read-only, no Nchan publish
+            case 'get_array_stop_impact':       return self::arrayStopImpact();     // R-172: read-only, asked only when the person presses Stop array
             case 'preflight_storage_backend':   return self::preflightStorageBackend(); // global engine policy, read-only
             case 'preflight_upper_mode':        return self::preflightUpperMode();      // #456: writable-layer placement, read-only
             case 'restore_from_sibling':        return self::restoreFromSibling(); // mutating, but no Nchan — integrity-only
@@ -85,8 +88,6 @@ class StorageHandler {
             case 'restore_status':              return self::restoreStatusAction(); // HOME_RESTORE.md: read-only, no Nchan publish
             case 'graduate_targets':            return self::graduateTargets();    // Bug #1380: read-only, qualifying relocation targets
             case 'graduate_storage':            $result = self::graduate(); break; // Bug #1380: relocate off USB flash to a durable target
-            case 'expand_storage':              $result = self::expand(); break;
-            case 'shrink_storage':              $result = self::shrink(); break;
             case 'repair_agent_storage':        $result = self::repairAgent($id); break;
             case 'repair_home_storage':         $result = self::repairHome(); break;
             case 'delete_home_storage':         $result = self::deleteHome(); break; // Bug #1379
@@ -110,10 +111,10 @@ class StorageHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_force_reclaim_state', 'get_task_status',
-                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'preflight_storage_backend', 'preflight_upper_mode',
+                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
-                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
+                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage', 'delete_home_confirm_token',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
@@ -634,6 +635,8 @@ class StorageHandler {
     }
 
     private static function persistAgent($id) {
+        // R-170: only a registered agent id is queued; any other text would become a job and a status file.
+        if (AgentHandler::requireAgentId($id) === null) return ['status' => 'error', 'message' => 'Invalid agent id'];
         // Enqueue a user-priority bake rather than blocking inline (Phase 3.3).
         // Priority 5 = user-clicked, pre-empts schedule and dirty-pressure ops.
         // S-08 (#1353): tracked — job_id ADDED to the response (back-compat keys
@@ -811,6 +814,7 @@ class StorageHandler {
         if (\AICliAgents\Services\SupervisorService::isHalted($entity)) {
             return ['status' => 'error', 'message' => "Home backup refused: $user's home is halted."];
         }
+        if (($dup = self::duplicateJobRefusal('home', $user, 'backup', "A backup of $user's home")) !== null) return $dup;
         $resolved = \AICliAgents\Services\StorageTargetService::resolveBackupTarget($target, $config);
         if (!$resolved['ok']) {
             return ['status' => 'error', 'message' => $resolved['message']];
@@ -1355,6 +1359,8 @@ class StorageHandler {
         if ($keep < 1) $keep = 1;
         $excludes = \AICliAgents\Services\HomeBackupSettingsService::excludesList($hs);
 
+        if (($dup = self::duplicateJobRefusal('home', $user, 'restore', "A restore of $user's home")) !== null) return $dup;
+
         // Mint the job id ourselves so the options sidecar exists BEFORE the
         // queue file can possibly be popped (mirrors backupHome()).
         $jobId = \AICliAgents\Services\SupervisorService::generateJobId('restore', 'home', $user);
@@ -1478,6 +1484,8 @@ class StorageHandler {
             return ['status' => 'error', 'message' => 'invalid_id'];
         }
         aicli_log("AJAX Request: Consolidate storage for $type: $id", AICLI_LOG_INFO);
+        // R-174: before the relaunch manifest and the consolidating marker, so a repeat click changes nothing.
+        if (($dup = self::duplicateJobRefusal($type, $id, 'consolidate', "A consolidation of $type $id")) !== null) return $dup;
 
         // R2.1: home consolidate — write relaunch manifest then mark as in-progress
         // and enqueue immediately. The slow close (forceCloseHome) is deferred to the
@@ -1603,7 +1611,8 @@ class StorageHandler {
             return ['status' => 'error', 'message' => 'invalid_agent'];
         }
         require_once __DIR__ . '/../services/OldVersionsJobService.php';
-        $jobId = \AICliAgents\Services\SupervisorService::generateJobId(\AICliAgents\Services\OldVersionsJobService::OP, 'agent', $agent);
+        if (($dup = self::duplicateJobRefusal('agent', $agent, \AICliAgents\Services\OldVersionsJobService::OP, 'The removal of old versions')) !== null) return $dup;
+        $jobId =\AICliAgents\Services\SupervisorService::generateJobId(\AICliAgents\Services\OldVersionsJobService::OP, 'agent', $agent);
         if (!\AICliAgents\Services\OldVersionsJobService::writeOptions($jobId, ['agent' => $agent])) {
             return ['status' => 'error', 'message' => 'Could not prepare the job. Try again.'];
         }
@@ -1693,6 +1702,8 @@ class StorageHandler {
                     'message' => "The home of $id cannot be converted. Only a home with layers on a disk that is not a USB flash drive can change to plain folders."];
         }
         aicli_log("AJAX Request: Convert home $id to plain folders", AICLI_LOG_INFO);
+        // R-174: before the relaunch manifest and the consolidating marker.
+        if (($dup = self::duplicateJobRefusal('home', $id, 'graduate', "The conversion of the home of $id")) !== null) return $dup;
 
         require_once __DIR__ . '/../services/UpgradeRelaunchService.php';
         $manifest = [];
@@ -1824,7 +1835,8 @@ class StorageHandler {
         $queued = []; $skipped = $sel['refused'];
         foreach ($sel['agents'] as $id) {
             if ($installBusy($id)) { $skipped[$id] = 'install_running'; continue; }
-            $jobId = \AICliAgents\Services\SupervisorService::enqueueJob('agent', $id, 'graduate', 'user_convert', 5);
+            if (self::duplicateJobRefusal('agent', $id, 'graduate', 'The conversion') !== null) { $skipped[$id] = 'already_queued'; continue; }
+            $jobId =\AICliAgents\Services\SupervisorService::enqueueJob('agent', $id, 'graduate', 'user_convert', 5);
             if ($jobId === null) {
                 \AICliAgents\Services\SupervisorService::enqueue('agent', $id, 'graduate', 'user_convert', 5);
             }
@@ -1934,22 +1946,9 @@ class StorageHandler {
         return $result;
     }
 
-    private static function expand() {
-        $type = $_GET['type'] ?? 'agents';
-        $inc = ($type === 'agents') ? '256M' : '128M';
-        aicli_log("AJAX Request: Expand storage ($type) by $inc", AICLI_LOG_INFO);
-        $res = aicli_expand_storage($type, $inc);
-        return ['status' => $res ? 'ok' : 'error', 'message' => $res ? '' : 'Expansion failed. Check debug log.'];
-    }
-
-    private static function shrink() {
-        $type = $_GET['type'] ?? 'agents';
-        aicli_log("AJAX Request: Shrink storage ($type)", AICLI_LOG_INFO);
-        $res = aicli_shrink_storage($type, null);
-        return ['status' => $res ? 'ok' : 'error', 'message' => $res ? '' : 'Shrink failed. Check debug log.'];
-    }
-
     private static function repairAgent($id) {
+        // R-170: the id must be a registered agent before it reaches a repair.
+        if (AgentHandler::requireAgentId($id) === null) return ['status' => 'error', 'message' => 'Invalid agent id'];
         aicli_log("AJAX Request: Repair Agent storage for $id", AICLI_LOG_INFO);
         $res = aicli_repair_agent_storage($id);
         return ['status' => $res ? 'ok' : 'error', 'message' => $res ? '' : 'Repair failed. Check debug log.'];
@@ -2163,6 +2162,40 @@ class StorageHandler {
             'new_home_path' => $newHomePath,
             'warnings' => $pfWarnings,
         ], $pfResolved);
+    }
+
+    /**
+     * R-174: a second click must not queue a second job. Returns an error row when a job of
+     * the same kind is already queued, running or deferred for this entity, else null.
+     * $find is the test seam; it has the signature of SupervisorService::findActiveJob.
+     * @return array<string,string>|null
+     */
+    public static function duplicateJobRefusal(string $type, string $id, string $op, string $what, ?callable $find = null): ?array {
+        $find ??= [\AICliAgents\Services\SupervisorService::class, 'findActiveJob'];
+        if ($find($type, $id, $op) === null) return null;
+        return ['status' => 'error', 'reason' => 'already_queued',
+                'message' => "$what is already waiting or running. Watch the activity tray for progress."];
+    }
+
+    /**
+     * R-172: does the home or the agent storage sit on the array or a pool? The array-stop
+     * warning asks this when the person presses "Stop array". The page used to run two bash
+     * processes for it on every Unraid page load. $classify is the test seam: it maps a path
+     * to true when that path depends on the array.
+     * @return array{status:string,homeOnArray:bool,agentOnArray:bool,homePath:string,agentPath:string}
+     */
+    public static function arrayStopImpact(?callable $classify = null, ?array $config = null): array {
+        $classify ??= static function (string $p): bool { return \AICliAgents\Services\StorageMountService::isArrayDependent($p); };
+        $config ??= getAICliConfig();
+        $homePath = (string)($config['home_storage_path'] ?? '');
+        $agentPath = (string)($config['agent_storage_path'] ?? '');
+        return [
+            'status'       => 'ok',
+            'homeOnArray'  => $homePath !== '' && (bool)$classify($homePath),
+            'agentOnArray' => $agentPath !== '' && (bool)$classify($agentPath),
+            'homePath'     => $homePath,
+            'agentPath'    => $agentPath,
+        ];
     }
 
     /**

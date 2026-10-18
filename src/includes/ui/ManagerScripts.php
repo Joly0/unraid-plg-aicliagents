@@ -162,7 +162,7 @@ function saveAICliAgentsManager(form, silent = false) {
             var msg = pf.message || ('This will migrate all agents and homes to ' + newStorageMode + '.');
             aicliGuardedSwal({ title: "Change persistence engine?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: "Migrate all storage", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restoreEngine, function() {
                 showMigrateOverlay();
-                $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=execute_storage_backend&mode=' + encodeURIComponent(newStorageMode) + '&ack_wear=1&csrf_token=' + csrf, function(r) {
+                aicliAjax('execute_storage_backend', { mode: newStorageMode, ack_wear: 1 }, function(r) {
                     hideMigrateOverlay();
                     if (r.status === 'ok') {
                         swal({ title: "Storage engine changed", text: r.message || "All storage was migrated.", type: "success", confirmButtonText: "OK" }, function() { safeReload(); });
@@ -231,7 +231,7 @@ function saveAICliAgentsManager(form, silent = false) {
                 showMigrateOverlay();
 
                 // Execute migration (pass both old and new paths — execute_migrate saves config AFTER copying)
-                $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=execute_migrate&agent_storage_path=' + encodeURIComponent(newAgentPath) + '&home_storage_path=' + encodeURIComponent(newHomePath) + '&old_agent_path=' + encodeURIComponent(curAgentPath) + '&old_home_path=' + encodeURIComponent(curHomePath) + '&csrf_token=' + csrf, function(r) {
+                aicliAjax('execute_migrate', { agent_storage_path: newAgentPath, home_storage_path: newHomePath, old_agent_path: curAgentPath, old_home_path: curHomePath }, function(r) {
                     if (r.status === 'queued') {
                         // F18 (#652): the copy runs in a supervisor job and goes on when this page closes.
                         // Save the settings of the form EXCEPT the two paths (the job saves those after the copy).
@@ -338,7 +338,7 @@ function aicliChangeUpperMode(target, previous, form) {
             swal.close();
             showMigrateOverlay();
             updateMigrateOverlay('Moving writable layers to ' + (target === 'zram' ? 'RAM' : 'disk') + '...', 5, 'Workspaces are being closed, then each home is saved and mounted again.');
-            $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=execute_upper_mode&mode=' + encodeURIComponent(target) + '&csrf_token=' + csrf, function(r) {
+            aicliAjax('execute_upper_mode', { mode: target }, function(r) {
                 hideMigrateOverlay();
                 if (r.status === 'ok') {
                     swal({ title: "Writable layer changed", text: r.message || "Done.", type: "success", confirmButtonText: "OK" }, function() { safeReload(); });

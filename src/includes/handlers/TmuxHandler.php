@@ -11,6 +11,7 @@
 namespace AICliAgents\Handlers;
 
 require_once __DIR__ . '/../services/TmuxService.php'; // #367: same generation as this file
+require_once __DIR__ . '/AgentHandler.php'; // R-170: AgentHandler::requireAgentId
 
 use AICliAgents\Services\TmuxService;
 use AICliAgents\Services\LifecycleLogService;
@@ -18,6 +19,14 @@ use AICliAgents\Services\LifecycleLogService;
 class TmuxHandler {
 
     public static function handle($action, $id) {
+        // R-170: every tmux action writes or reads state keyed by the agent id, so an id that
+        // is not a registered agent is refused here, once, before any action runs.
+        if (in_array($action, self::actions(), true)) {
+            $rawAgent = $_POST['agentId'] ?? $_GET['agentId'] ?? '';
+            if ((string)(is_scalar($rawAgent) ? $rawAgent : 'x') !== '' && AgentHandler::requireAgentId($rawAgent) === null) {
+                return ['status' => 'error', 'message' => 'Invalid agent id'];
+            }
+        }
         switch ($action) {
             case 'tmux_get_settings':           return self::getSettings();
             case 'tmux_save_settings':          return self::saveSettings();

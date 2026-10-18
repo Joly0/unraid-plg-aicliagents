@@ -150,18 +150,28 @@
             draw(r);
             stopPoll();
             if (r.measuring) state.pollTimer = setTimeout(load, 3000);
-        }).fail(function () { state.loading = false; });
+        }).fail(function (x, s, e) {
+            // R-175: a failed read ends the "measuring" wait, so Measure now works again.
+            state.loading = false;
+            stopPoll();
+            if (state.data && state.data.measuring) { state.data.measuring = false; draw(state.data); }
+            if (typeof aicliAjaxDefaultFail === 'function') aicliAjaxDefaultFail(x, s, e);
+        });
     }
 
-    // A POST with the CSRF token in the query, like the other changing actions of this page.
+    // A POST with the action and the CSRF token in the body (R-176: no token in a URL).
     function post(action, params, done) {
         var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
-        var qs = $.param(Object.assign({ action: action, csrf_token: token }, params || {}));
         var headers = {};
         if (typeof aicliTraceId === 'function') headers['X-Aicli-Trace'] = aicliTraceId();
-        var xhr = $.ajax({ url: '/plugins/unraid-aicliagents/AICliAjax.php?' + qs, method: 'POST', dataType: 'json', headers: headers });
+        var xhr = $.ajax({
+            url: '/plugins/unraid-aicliagents/AICliAjax.php?action=' + encodeURIComponent(action),
+            method: 'POST', dataType: 'json', headers: headers,
+            data: Object.assign({ csrf_token: token }, params || {})
+        });
         if (done) xhr.done(done);
-        return xhr;
+        // R-175: a failed change request shows its reason unless the caller handles it.
+        return typeof aicliAjaxWatch === 'function' ? aicliAjaxWatch(xhr) : xhr;
     }
     reg.post = post;
 
@@ -196,10 +206,16 @@
                 aicliAjax('get_boot_space', {}, function (r) {
                     if (r && r.measuring && n < 120) { poll(n + 1); return; }
                     done(r && r.status === 'ok' ? r : null);
-                }).fail(function () { done(null); });
+                }).fail(function (x, s, e) {
+                    if (typeof aicliAjaxDefaultFail === 'function') aicliAjaxDefaultFail(x, s, e);
+                    done(null);
+                });
             }, 3000);
         }
-        post('measure_boot_space', {}, function () { poll(0); }).fail(function () { done(null); });
+        post('measure_boot_space', {}, function () { poll(0); }).fail(function (x, s, e) {
+            if (typeof aicliAjaxDefaultFail === 'function') aicliAjaxDefaultFail(x, s, e);
+            done(null);
+        });
     };
 
     // A dialog sets aicliBootSpace.reopen = fn before it shows; the Measure now button of the dialog
@@ -216,7 +232,12 @@
 
     // Every action of the card calls this when it ends: a new measure starts at once.
     reg.refresh = function () {
-        post('measure_boot_space', {}, function () { stopPoll(); setTimeout(load, 400); });
+        post('measure_boot_space', {}, function () { stopPoll(); setTimeout(load, 400); })
+            .fail(function (x, s, e) {
+                // R-175: the request did not reach the server. Measure now works again and the reason shows.
+                $('#aicli-bs-measure').prop('disabled', false);
+                if (typeof aicliAjaxDefaultFail === 'function') aicliAjaxDefaultFail(x, s, e);
+            });
     };
 
     function storageTabVisible() {

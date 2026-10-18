@@ -18,6 +18,27 @@ class VersionCheckService {
     const TOTAL_TIMEOUT = 120; // seconds total for all agents
     const MAX_DROPDOWN_ENTRIES = 20;
 
+    /**
+     * R-171: a version string from a registry reaches the Store page. Only the characters of a
+     * real version (digits, letters, dot, plus, underscore, hyphen) are accepted, so markup in
+     * a hostile registry answer is never cached.
+     */
+    public static function isSafeVersion($v): bool {
+        return is_string($v) && preg_match('/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/', $v) === 1;
+    }
+
+    /** R-171: keep only the dist-tags whose name and version are safe. */
+    public static function cleanDistTags($tags): array {
+        $clean = [];
+        if (!is_array($tags)) return $clean;
+        foreach ($tags as $tag => $ver) {
+            if (is_string($tag) && preg_match('/^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/', $tag) === 1 && self::isSafeVersion($ver)) {
+                $clean[$tag] = $ver;
+            }
+        }
+        return $clean;
+    }
+
     /** Activity tray op id of a running check (Forgejo #447). */
     public const TRAY_OP_ID = 'version_check';
 
@@ -155,10 +176,13 @@ class VersionCheckService {
                 }
 
                 // Extract dist-tags
-                $distTags = $data['dist-tags'] ?? [];
+                $distTags = self::cleanDistTags($data['dist-tags'] ?? []);
 
-                // Extract versions with timestamps
-                $allVersions = $data['versions'] ?? [];
+                // Extract versions with timestamps (R-171: only safe version strings are cached)
+                $allVersions = array_values(array_filter(
+                    is_array($data['versions'] ?? null) ? $data['versions'] : [],
+                    [self::class, 'isSafeVersion']
+                ));
                 $timeMap = $data['time'] ?? [];
                 if (is_array($allVersions) && !empty($allVersions)) {
                     // npm view --json returns versions as array of strings
@@ -209,6 +233,14 @@ class VersionCheckService {
                 LogService::log("Populating cache for $id (non-npm source)...", LogService::LOG_DEBUG, "VersionCheck");
                 try {
                     $entry = $source->populateCache($id, $agent);
+                    if (is_array($entry)) {
+                        // R-171: the same shape check as the npm path.
+                        $entry['dist_tags'] = self::cleanDistTags($entry['dist_tags'] ?? []);
+                        $entry['versions'] = array_values(array_filter(
+                            is_array($entry['versions'] ?? null) ? $entry['versions'] : [],
+                            static fn($row) => is_array($row) ? self::isSafeVersion($row['version'] ?? null) : self::isSafeVersion($row)
+                        ));
+                    }
                     if (!empty($entry['versions'])) {
                         // Caller metadata last so it can't be overwritten by a future
                         // populateCache that accidentally emits checked_at/check_error.

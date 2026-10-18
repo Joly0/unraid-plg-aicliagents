@@ -107,6 +107,10 @@
                 swal('Not started', (r && r.message) || 'Unknown error. Check the Debug Console.', 'error');
             }
             if (typeof refreshStats === 'function') refreshStats(); if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
+        }).fail(function (x, s, e) {
+            // R-175: the dialog must not spin for ever when the request fails.
+            document.body.classList.remove('aicli-swal-above-tray');
+            swal('Not started', 'Could not reach the server. ' + aicliAjaxReason(x, s, e), 'error');
         });
     }
 

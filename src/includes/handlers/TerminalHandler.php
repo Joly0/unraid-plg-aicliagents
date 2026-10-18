@@ -2016,12 +2016,29 @@ class TerminalHandler {
 
     private static function log() {
         $msg = $_POST['message'] ?? $_GET['message'] ?? '';
-        $lvl = (int)($_POST['level'] ?? $_GET['level'] ?? 2);
+        $lvl = $_POST['level'] ?? $_GET['level'] ?? 2;
         $ctx = $_POST['context'] ?? $_GET['context'] ?? 'Frontend';
-        if (!empty($msg)) {
-            aicli_log("[JS] $msg", $lvl, $ctx);
+        $line = self::clientLogLine($msg, $lvl, $ctx);
+        if ($line !== null) {
+            aicli_log($line['message'], $line['level'], $line['context']);
         }
         return ['status' => 'ok'];
+    }
+
+    /**
+     * R-169: a browser log line must not forge a server log line. The context is cut to the
+     * safe tag characters, the level is held to 0-3, and a new line in the message is turned
+     * into a space, so one request writes exactly one line tagged [JS].
+     * @return array{message:string,level:int,context:string}|null null when there is nothing to log
+     */
+    public static function clientLogLine($msg, $lvl, $ctx): ?array {
+        if (!is_scalar($msg)) return null;
+        $msg = trim(preg_replace('/[\r\n]+/', ' ', (string)$msg));
+        if ($msg === '') return null;
+        $level = max(0, min(3, (int)(is_scalar($lvl) ? $lvl : 2)));
+        $context = ValidationService::sanitizeContext($ctx);
+        if ($context === '') $context = 'Frontend';
+        return ['message' => "[JS] $msg", 'level' => $level, 'context' => $context];
     }
 
     /**

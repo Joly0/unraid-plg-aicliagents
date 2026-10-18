@@ -65,6 +65,16 @@ require_once AICLI_GEN_SRC . '/includes/handlers/NotebookHandler.php';
 require_once AICLI_GEN_SRC . '/includes/services/PerfTrace.php';
 use AICliAgents\Services\ValidationService;
 
+// R-176: a storage or history change comes as POST, with the action and the parameters in the body, so
+// the CSRF token is never in a URL. The handlers read $_GET, so the body fields fill the keys the query
+// does not have. local_prepend.php has already checked the token of the POST.
+if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? '')) === 'POST'
+    && in_array((string)($_GET['action'] ?? $_POST['action'] ?? ''), ValidationService::POST_ONLY_ACTIONS, true)) {
+    foreach ($_POST as $postKey => $postVal) {
+        if (!isset($_GET[$postKey])) $_GET[$postKey] = $postVal;
+    }
+}
+
 if (isset($_GET['action'])) {
     // NOTEBOOK_HANG_OBSERVABILITY.md R2: time the whole request.
     $ajaxT0 = \AICliAgents\Services\PerfTrace::start();
@@ -78,6 +88,15 @@ if (isset($_GET['action'])) {
     }
     if ($action !== 'filetree') {
         header('Content-Type: application/json');
+    }
+
+    // R-176: a changing storage or history action is refused as GET (the token would sit in the URL).
+    $methodRefusal = ValidationService::methodRefusal($action, $_SERVER['REQUEST_METHOD'] ?? null);
+    if ($methodRefusal !== null) {
+        aicli_log("Refused action $action: not a POST request", AICLI_LOG_WARN, "AICliAjax");
+        ob_end_clean();
+        echo json_encode(['status' => 'error', 'message' => $methodRefusal]);
+        exit;
     }
 
     // WORKSPACE_UPLOAD_MULTI_CHUNKED.md R5: PHP silently drops a POST body
@@ -205,7 +224,7 @@ if (isset($_GET['action'])) {
         }
 
         // Initialize environment (skip mount for non-mount actions)
-        $mustMountActions = ['start', 'restart', 'install_agent', 'uninstall_agent', 'expand_storage', 'shrink_storage', 'migrate_agents'];
+        $mustMountActions = ['start', 'restart', 'install_agent', 'uninstall_agent', 'migrate_agents'];
         aicli_ensure_init(!in_array($action, $mustMountActions));
 
         // Route to handler - raw output actions first

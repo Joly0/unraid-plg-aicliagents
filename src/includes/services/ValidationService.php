@@ -12,6 +12,30 @@ namespace AICliAgents\Services;
 
 class ValidationService {
 
+    /**
+     * R-176: AJAX actions that change storage or history. They are accepted as POST only, so the
+     * CSRF token travels in the request body and never appears in a URL, a proxy log or the
+     * browser history. The browser helper aicliAjax() (CommonLogging.php) keeps the same list.
+     */
+    public const POST_ONLY_ACTIONS = [
+        'persist_agent', 'persist_home', 'consolidate_storage', 'convert_storage', 'remove_old_versions',
+        'clear_home_caches', 'convert_agents', 'graduate_storage', 'repair_agent_storage', 'repair_home_storage',
+        'delete_home_storage', 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts', 'backup_home',
+        'set_home_backup_setting', 'restore_home', 'delete_backup_snapshot', 'clear_halt', 'restore_from_sibling',
+        'auto_heal_agent_install', 'history_move', 'history_bring_back', 'execute_migrate',
+        'execute_storage_backend', 'execute_upper_mode',
+    ];
+
+    /**
+     * R-176: the refusal message for an action that must be POST, or null when the request may go on.
+     * A request with no method (a command line caller, a test) is not a web request and is let through.
+     */
+    public static function methodRefusal($action, ?string $method): ?string {
+        if (!is_string($action) || !in_array($action, self::POST_ONLY_ACTIONS, true)) return null;
+        if ($method === null || $method === '') return null;
+        return strtoupper($method) === 'POST' ? null : 'This action needs a POST request.';
+    }
+
     /** Allowed base directories for filesystem operations. */
     private static $ALLOWED_PATH_BASES = [
         '/mnt',

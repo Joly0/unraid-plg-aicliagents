@@ -88,7 +88,8 @@ function copyLogToClipboard() {
 }
 
 function clearSelectedLog() {
-    swal({ title: "Clear " + currentLog + " log?", text: "This action cannot be undone.", type: "warning", showCancelButton: true, confirmButtonColor: "#f44336", confirmButtonText: "Yes, Clear It", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
+    swal({ title: "Clear " + currentLog + " log?", text: "This action cannot be undone.", type: "warning", showCancelButton: true, confirmButtonColor: "#f44336", confirmButtonText: "Yes, Clear It", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+        if (!confirmed) return;
         aicliAjax('clear_log', { type: currentLog }, function(r) {
             if (r.status === 'ok') {
                 swal({ title: "Cleared", text: r.message, type: "success", timer: 1500, showConfirmButton: false });

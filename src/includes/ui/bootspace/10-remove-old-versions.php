@@ -96,6 +96,9 @@
                         swal('Not removed', (res && res.message) || 'Unknown error. Check the Debug Console.', 'error');
                     }
                     if (typeof refreshStats === 'function') refreshStats();
+                }).fail(function (x, s, e) {
+                    // R-175: the dialog must not spin for ever when the request fails.
+                    swal('Not removed', 'Could not reach the server. ' + aicliAjaxReason(x, s, e), 'error');
                 });
             });
         });

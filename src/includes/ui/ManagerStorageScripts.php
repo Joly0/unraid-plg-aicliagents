@@ -19,6 +19,12 @@ function escapeHtml(s) {
     });
 }
 
+// R-177: a name (a home, a layer, an agent) that goes into an onclick="..." attribute. It becomes a
+// JavaScript string literal first, then HTML-escaped, so no name can close the attribute or the string.
+function aicliJsArg(s) {
+    return escapeHtml(JSON.stringify(String(s == null ? '' : s)));
+}
+
 function refreshStats() {
     // Show storage unavailable banner if needed
     if (window.aicli_storage_available === false) {
@@ -146,7 +152,7 @@ function renderLayerList(layers, dirtyMb, upperMode) {
     var html = '';
     if (flashRoot) {
         html += '<div class="se-mount-label" style="opacity:0.65;" title="Common parent directory for the SquashFS layers below">' +
-                    '<i class="fa fa-folder-open-o"></i> ' + flashRoot +
+                    '<i class="fa fa-folder-open-o"></i> ' + escapeHtml(flashRoot) +
                 '</div>';
     }
 
@@ -178,9 +184,9 @@ function renderLayerList(layers, dirtyMb, upperMode) {
     // right bar.
     $.each(layers, function(i, l) {
         var icon = l.name.indexOf('delta') >= 0 ? 'fa-plus-square' : 'fa-database';
-        html += '<div class="se-layer-item" style="' + rowPadL + flashBar + '" title="' + l.path + '">' +
+        html += '<div class="se-layer-item" style="' + rowPadL + flashBar + '" title="' + escapeHtml(l.path) + '">' +
                   '<i class="fa ' + icon + '"></i>' +
-                  '<span class="se-layer-path">' + l.name + '</span>' +
+                  '<span class="se-layer-path">' + escapeHtml(l.name) + '</span>' +
                   '<span class="se-layer-size">' + formatSize(l.size_bytes) + '</span>' +
                 '</div>';
     });
@@ -267,7 +273,7 @@ function renderHomeStats(homes) {
             const cardClass = 'storage-entity-card' + (hasUpperChanges ? ' has-dirty' : '') + (!h.mounted ? ' offline' : '');
             html += '<div class="' + cardClass + '">' +
                 '<div class="se-header">' +
-                    '<div><div class="se-title"><i class="fa fa-home" style="color:var(--orange, #e68a00); margin-right:6px;"></i>' + u + '</div>' +
+                    '<div><div class="se-title"><i class="fa fa-home" style="color:var(--orange, #e68a00); margin-right:6px;"></i>' + escapeHtml(u) + '</div>' +
                     '<div class="se-meta" data-testid="home-storage-meta">' + metaText + '</div></div>' +
                     '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">' +
                         '<div style="font-size:11px; font-weight:700; color:' + (!h.mounted ? '#888' : (hasUpperChanges ? 'var(--orange, #ff8c00)' : '#4caf50')) + ';">' + (!h.mounted ? 'OFFLINE' : upperFigure) + '</div>' +
@@ -279,14 +285,14 @@ function renderHomeStats(homes) {
                 '</div>' +
                 '<div class="se-body">' +
                     statBlock +
-                    '<div class="se-mount-label"><i class="fa fa-hdd-o"></i> ' + h.mount_point + '</div>' +
+                    '<div class="se-mount-label"><i class="fa fa-hdd-o"></i> ' + escapeHtml(h.mount_point) + '</div>' +
                     (isPlain ? '' : renderLayerList(h.layer_files, h.dirty_mb, h.upper_mode)) +
                     // #496 R9: a layered home on a disk that is not a USB stick can become
                     // plain folders in place. The USB relocation strip below stays for sticks.
                     (h.can_convert ?
                         '<div data-testid="home-convert-strip" style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(76,175,80,0.08); border:1px solid rgba(76,175,80,0.35); border-radius:4px;">' +
                             '<span style="font-size:10px; line-height:1.4;"><i class="fa fa-folder-open-o" style="color:#4caf50; margin-right:5px;"></i>This home can change to plain folders. Then it needs no more saves or tidy-ups.</span>' +
-                            '<button type="button" class="aicli-btn-slim" data-testid="home-convert-btn" style="white-space:nowrap;"' + (job ? ' disabled title="' + job.title + '"' : '') + ' onclick="convertHomeStorage(\'' + u + '\'); return false;">Convert to plain folders</button>' +
+                            '<button type="button" class="aicli-btn-slim" data-testid="home-convert-btn" style="white-space:nowrap;"' + (job ? ' disabled title="' + job.title + '"' : '') + ' onclick="convertHomeStorage(' + aicliJsArg(u) + '); return false;">Convert to plain folders</button>' +
                         '</div>' : '') +
                     // Bug #1380: non-modal relocation offer — shown ONLY when this
                     // entity's data sits on a GENUINE USB flash drive AND a durable
@@ -294,17 +300,17 @@ function renderHomeStats(homes) {
                     (h.can_graduate ?
                         '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(76,175,80,0.08); border:1px solid rgba(76,175,80,0.35); border-radius:4px;">' +
                             '<span style="font-size:10px; line-height:1.4;"><i class="fa fa-hdd-o" style="color:#4caf50; margin-right:5px;"></i>This data is on a USB flash drive — move it to a durable disk (faster, no USB wear)</span>' +
-                            '<button type="button" class="aicli-btn-slim" style="white-space:nowrap;" onclick="graduateStorage(\'home\', \'' + u + '\', ' + (h.physical_mb || 0) + '); return false;">Move off USB flash drive</button>' +
+                            '<button type="button" class="aicli-btn-slim" style="white-space:nowrap;" onclick="graduateStorage(\'home\', ' + aicliJsArg(u) + ', ' + (h.physical_mb || 0) + '); return false;">Move off USB flash drive</button>' +
                         '</div>' : '') +
                     // HOME_BACKUP.md #287: this home's own backup — status line + Config backup… dialog.
                     aicliHomeBackupStripHtml(u) +
                 '</div>' +
                 '<div class="se-actions">' +
                     (isPlain ? '' :
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'persistEntity(\'home\', \'' + u + '\'); return false;') + '" title="Persist to storage' + lockTitle + '"><i class="fa fa-save"></i></a>' +
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate && !job ? 'consolidateStorage(\'home\', \'' + u + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate: save unsaved changes and merge all layers into one' + lockTitle : 'Nothing to merge: one layer and no unsaved changes') + '"><i class="fa fa-compress"></i></a>') +
-                    (showRepair ? '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'repairStorage(\'home\', \'' + u + '\'); return false;') + '" title="Repair mount: this home is not mounted' + lockTitle + '"><i class="fa fa-wrench"></i></a>' : '') +
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'deleteHomeStorage(\'' + u + '\'); return false;') + '" title="Delete home data (permanent)' + lockTitle + '" style="color:#c0392b;"><i class="fa fa-trash-o"></i></a>' +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'persistEntity(\'home\', ' + aicliJsArg(u) + '); return false;') + '" title="Persist to storage' + lockTitle + '"><i class="fa fa-save"></i></a>' +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate && !job ? 'consolidateStorage(\'home\', ' + aicliJsArg(u) + ')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate: save unsaved changes and merge all layers into one' + lockTitle : 'Nothing to merge: one layer and no unsaved changes') + '"><i class="fa fa-compress"></i></a>') +
+                    (showRepair ? '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'repairStorage(\'home\', ' + aicliJsArg(u) + '); return false;') + '" title="Repair mount: this home is not mounted' + lockTitle + '"><i class="fa fa-wrench"></i></a>' : '') +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'deleteHomeStorage(' + aicliJsArg(u) + '); return false;') + '" title="Delete home data (permanent)' + lockTitle + '" style="color:#c0392b;"><i class="fa fa-trash-o"></i></a>' +
                 '</div>' +
                 '</div>';
         });
@@ -379,6 +385,11 @@ function convertHomeStorage(id) {
             }
             if (done) done();
             refreshStats();
+        }).fail(function(x, s, e) {
+            // R-175: the dialog must not spin for ever when the request fails.
+            var why = 'Could not reach the server. ' + aicliAjaxReason(x, s, e);
+            if (typeof window.swal === 'function') swal('Not started', why, 'error'); else window.alert(why);
+            if (done) done();
         });
     }
     if (typeof window.swal !== 'function') {
@@ -436,7 +447,7 @@ function renderCleanupCard(artifacts) {
     $.each(artifacts, function(i, art) {
         totalMb += parseFloat(art.size_mb) || 0;
         fileListHtml += '<div style="display:flex; justify-content:space-between; padding:4px 8px; border-bottom:1px solid var(--border-color, rgba(0,0,0,0.06)); font-family:monospace; font-size:10px;">' +
-            '<span><i class="fa ' + (art.type === 'image' ? 'fa-file-archive-o' : 'fa-folder-o') + '" style="width:16px; color:var(--orange, #e68a00); opacity:0.6;"></i> ' + art.name + '</span>' +
+            '<span><i class="fa ' + (art.type === 'image' ? 'fa-file-archive-o' : 'fa-folder-o') + '" style="width:16px; color:var(--orange, #e68a00); opacity:0.6;"></i> ' + escapeHtml(art.name) + '</span>' +
             '<span style="opacity:0.6;">' + art.size_mb + ' MB</span></div>';
     });
 
@@ -470,7 +481,8 @@ function persistEntity(type, id) {
     const title = type === 'agent' ? "Persist Agent Updates?" : "Persist Home Changes?";
     const text = type === 'agent' ? "Commit changes in RAM to storage for " + id + "." : "Commit current RAM session data to SquashFS layers for " + id + ".";
     
-    swal({ title: title, text: text, type: "info", showCancelButton: true, confirmButtonText: "Persist Now", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
+    swal({ title: title, text: text, type: "info", showCancelButton: true, confirmButtonText: "Persist Now", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+        if (!confirmed) return;
         const token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
         aicli_log_to_server("User requested manual " + type + " persistence for " + id, 2);
         
@@ -514,12 +526,15 @@ function persistEntity(type, id) {
 
 function repairStorage(type, id) {
     if (aicliBlockedByConsolidate('repairing storage')) return false;
-    swal({ title: "Repair " + type + " storage?", text: "Unmount and remount the OverlayFS stack for " + id + ". This may briefly interrupt active sessions.", type: "warning", showCancelButton: true, confirmButtonText: "Repair", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
+    swal({ title: "Repair " + type + " storage?", text: "Unmount and remount the OverlayFS stack for " + id + ". This may briefly interrupt active sessions.", type: "warning", showCancelButton: true, confirmButtonText: "Repair", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+        if (!confirmed) return;
         const action = (type === 'agent') ? 'repair_agent_storage' : 'repair_home_storage';
         aicliAjax(action, (type === 'agent') ? { id: id } : { id: id, user: id }, function(r) {
             if (r.status === 'ok') swal({ title: "Repaired", text: "Storage stack remounted.", type: "success", timer: 1500, showConfirmButton: false });
             else swal("Repair Failed", r.message, "error");
             refreshStats();
+        }).fail(function(x, s, e) {
+            swal("Repair Failed", "Could not reach the server. " + aicliAjaxReason(x, s, e), "error");
         });
     });
 }
@@ -563,6 +578,8 @@ function consolidateStorage(type, id) {
                 swal('Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
             }
             refreshStats();
+        }).fail(function(x, s, e) {
+            swal('Failed', 'Could not reach the server. ' + aicliAjaxReason(x, s, e), 'error');
         });
     }
 
@@ -757,13 +774,16 @@ function graduateStorage(type, id, physicalMb) {
                     swal("Move failed", (r && r.message) || "Unknown error. Check debug.log.", "error");
                 }
                 refreshStats();
+            }).fail(function(x, s, e) {
+                swal("Move failed", "Could not reach the server. " + aicliAjaxReason(x, s, e), "error");
             });
         });
     });
 }
 
 function wipeStorage(type, id) {
-    swal({ title: "Wipe Storage: " + id + "?", text: "PERMANENTLY WIPE all storage for this " + type + ". This cannot be undone.", type: "error", showCancelButton: true, confirmButtonColor: "#f44336", confirmButtonText: "YES, WIPE IT", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
+    swal({ title: "Wipe Storage: " + id + "?", text: "PERMANENTLY WIPE all storage for this " + type + ". This cannot be undone.", type: "error", showCancelButton: true, confirmButtonColor: "#f44336", confirmButtonText: "YES, WIPE IT", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+        if (!confirmed) return;
         aicliAjax('wipe_storage', { type: type, id: id }, function(r) {
             if (r.status === 'ok') {
                 swal({ title: "Wiped", type: "success", timer: 1500 });
@@ -771,6 +791,8 @@ function wipeStorage(type, id) {
             }
             else swal("Failed", r.message, "error");
             refreshStats();
+        }).fail(function(x, s, e) {
+            swal("Failed", "Could not reach the server. " + aicliAjaxReason(x, s, e), "error");
         });
     });
 }
@@ -814,7 +836,11 @@ function deleteHomeStorage(id) {
                     } else {
                         swal('Delete Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
                     }
+                }).fail(function(x, s, e) {
+                    swal('Delete Failed', 'Could not reach the server. ' + aicliAjaxReason(x, s, e), 'error');
                 });
+            }).fail(function(x, s, e) {
+                swal('Delete Failed', 'Could not reach the server. ' + aicliAjaxReason(x, s, e), 'error');
             });
         });
     } else {
@@ -828,7 +854,8 @@ function deleteHomeStorage(id) {
             confirmButtonText: 'Delete permanently',
             showLoaderOnConfirm: true,
             closeOnConfirm: false
-        }, function() {
+        }, function(confirmed) {
+            if (!confirmed) return;
             aicliAjax('delete_home_storage', { id: id }, function(r) {
                 if (r && r.status === 'ok') {
                     swal({ title: 'Deleted', text: r.message || 'Home storage deleted.', type: 'success', timer: 2500, showConfirmButton: false });
@@ -836,6 +863,8 @@ function deleteHomeStorage(id) {
                 } else {
                     swal('Delete Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
                 }
+            }).fail(function(x, s, e) {
+                swal('Delete Failed', 'Could not reach the server. ' + aicliAjaxReason(x, s, e), 'error');
             });
         });
     }
@@ -1050,10 +1079,11 @@ function deleteHomeStorage(id) {
             confirmButtonText: 'Restore',
             showLoaderOnConfirm: true,
             closeOnConfirm: false
-        }, function() {
+        }, function(confirmed) {
+            if (!confirmed) return;
             $.ajax({
                 url: '/plugins/unraid-aicliagents/AICliAjax.php',
-                type: 'GET',
+                type: 'POST',
                 data: { action: 'restore_from_sibling', type: type, id: id, csrf_token: token },
                 dataType: 'json'
             }).done(function(r) {
@@ -1444,7 +1474,7 @@ function deleteHomeStorage(id) {
         var token = getToken();
         $.ajax({
             url: AJAX_BASE,
-            type: 'GET',
+            type: 'POST',
             data: { action: 'restore_from_sibling', type: type, id: id, csrf_token: token },
             dataType: 'json'
         }).done(function(r) {
@@ -1452,7 +1482,7 @@ function deleteHomeStorage(id) {
                 // Clear the halt
                 $.ajax({
                     url: AJAX_BASE,
-                    type: 'GET',
+                    type: 'POST',
                     data: { action: 'clear_halt', type: type, id: id, reason: 'restore_from_sibling', csrf_token: token },
                     dataType: 'json'
                 }).always(function() {
@@ -1503,7 +1533,7 @@ function deleteHomeStorage(id) {
             var token = getToken();
             $.ajax({
                 url: AJAX_BASE,
-                type: 'GET',
+                type: 'POST',
                 data: { action: 'clear_halt', type: type, id: id, reason: 'user_abandon_start_fresh', csrf_token: token },
                 dataType: 'json'
             }).always(function() {
@@ -1524,7 +1554,7 @@ function deleteHomeStorage(id) {
         var quiet = !!(opts && opts.quiet);
         $.ajax({
             url: AJAX_BASE,
-            type: 'GET',
+            type: 'POST',
             data: { action: 'auto_heal_agent_install', type: type, id: id, csrf_token: token },
             dataType: 'json',
             timeout: 180000
@@ -1604,7 +1634,7 @@ function deleteHomeStorage(id) {
         swal({ title: 'Confirming host...', showConfirmButton: false });
         $.ajax({
             url: AJAX_BASE,
-            type: 'GET',
+            type: 'POST',
             data: { action: 'clear_halt', type: type, id: id, reason: 'host_confirmed_by_user', csrf_token: token },
             dataType: 'json'
         }).always(function() {
@@ -1628,7 +1658,7 @@ function deleteHomeStorage(id) {
             var token = getToken();
             $.ajax({
                 url: AJAX_BASE,
-                type: 'GET',
+                type: 'POST',
                 data: { action: 'clear_halt', type: type, id: id, reason: 'user_manual_override', csrf_token: token },
                 dataType: 'json'
             }).always(function() {
@@ -1771,14 +1801,17 @@ function purgeArtifacts() {
         cancelButtonText: "Cancel",
         showLoaderOnConfirm: true,
         closeOnConfirm: false
-    }, function() {
-        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=purge_artifacts&csrf_token=' + csrf, function(r) {
+    }, function(confirmed) {
+        if (!confirmed) return;
+        aicliAjax('purge_artifacts', {}, function(r) {
             if (r.status === 'ok') {
                 swal({ title: "Purged", text: "All legacy migration artifacts have been removed.", type: "success", timer: 2000, showConfirmButton: false });
                 clearChanged();
             }
             else swal("Purge Failed", r.message, "error");
             refreshStats();
+        }).fail(function(x, s, e) {
+            swal("Purge Failed", "Could not reach the server. " + aicliAjaxReason(x, s, e), "error");
         });
     });
 }
@@ -2019,6 +2052,8 @@ function aicliBackupNow(user) {
                 swal('Could not start', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
             }
             aicliRefreshBackupStatus(user);
+        }).fail(function(x, s, e) {
+            swal('Could not start', 'Could not reach the server. ' + aicliAjaxReason(x, s, e), 'error');
         });
     });
 }

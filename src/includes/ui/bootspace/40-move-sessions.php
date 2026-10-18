@@ -151,6 +151,10 @@
                     } else {
                         fail(r && r.message);
                     }
+                }).fail(function (x, s, e) {
+                    // R-175: the dialog must not spin for ever when the request fails.
+                    unlift();
+                    fail('Could not reach the server. ' + aicliAjaxReason(x, s, e));
                 });
             });
 
@@ -211,6 +215,10 @@
                     } else {
                         fail(r && r.message);
                     }
+                }).fail(function (x, s, e) {
+                    // R-175: the dialog must not spin for ever when the request fails.
+                    unlift();
+                    fail('Could not reach the server. ' + aicliAjaxReason(x, s, e));
                 });
             });
         });

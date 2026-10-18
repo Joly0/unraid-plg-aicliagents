@@ -903,14 +903,14 @@ function updateAgentBadge(id, data) {
         item.addClass('has-update').removeClass('has-downgrade');
         // Update the action button
         actionBtn.removeClass('danger').addClass('info')
-            .html('<i class="fa fa-arrow-circle-up"></i> UPGRADE to v' + data.update.available);
+            .html('<i class="fa fa-arrow-circle-up"></i> UPGRADE to v' + $('<div>').text(String(data.update.available)).html());
         // Pre-select the upgrade version in the dropdown so the install uses it
         var select = document.getElementById('version-select-' + id);
         if (select) { select.value = data.update.available; }
         // Update badge in header
         var meta = item.find('.agent-meta');
         if (!meta.find('.update-avail').length) {
-            meta.append('<span class="agent-status-badge update-avail"><i class="fa fa-arrow-circle-up"></i> v' + data.update.available + '</span>');
+            meta.append('<span class="agent-status-badge update-avail"><i class="fa fa-arrow-circle-up"></i> v' + $('<div>').text(String(data.update.available)).html() + '</span>');
         }
     }
 }
@@ -980,7 +980,8 @@ function restoreAgentBackup(id, backupDir, version, select) {
         confirmButtonColor: '#e67e22',
         showLoaderOnConfirm: true,
         closeOnConfirm: false
-    }, function() {
+    }, function(confirmed) {
+        if (!confirmed) return;
         $.ajax({
             url: '/plugins/unraid-aicliagents/AICliAjax.php',
             type: 'GET',
@@ -1047,7 +1048,8 @@ $(function() {
 // --- Existing Functions ---
 
 function uninstallAgent(id, btn) {
-    swal({ title: "Uninstall " + id + "?", text: "This will remove the agent and its storage data.", type: "warning", showCancelButton: true, confirmButtonText: "Uninstall", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
+    swal({ title: "Uninstall " + id + "?", text: "This will remove the agent and its storage data.", type: "warning", showCancelButton: true, confirmButtonText: "Uninstall", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+        if (!confirmed) return;
         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=uninstall_agent&agentId=' + id + '&csrf_token=' + csrf, function(r) {
             if (r && r.status === 'ok') {
                 swal({ title: "Uninstalled", text: id + " has been removed.", type: "success", timer: 1500, showConfirmButton: false });
@@ -1942,7 +1944,7 @@ function av2LoadStoragePanel(panelOrBody, agentIdMaybe) {
                 persistBtn.textContent = 'Persisting…';
                 $.ajax({
                     url: '/plugins/unraid-aicliagents/AICliAjax.php',
-                    type: 'GET',
+                    type: 'POST',
                     dataType: 'json',
                     data: { action: 'persist_agent', id: agentId, csrf_token: csrf }
                 }).done(function(res) {
@@ -1982,7 +1984,7 @@ function _av2ClearHaltIdempotent(id, reason) {
     var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
     return $.ajax({
         url: '/plugins/unraid-aicliagents/AICliAjax.php',
-        type: 'GET',
+        type: 'POST',
         data: { action: 'clear_halt', type: 'agent', id: id, reason: reason, csrf_token: token },
         dataType: 'json'
     }).always(function() { /* swallow — idempotent precursor */ });
@@ -1999,10 +2001,11 @@ function av2RepairAgent(id, mode, btn) {
             confirmButtonText: 'Restore',
             showLoaderOnConfirm: true,
             closeOnConfirm: false
-        }, function() {
+        }, function(confirmed) {
+            if (!confirmed) return;
             $.ajax({
                 url: '/plugins/unraid-aicliagents/AICliAjax.php',
-                type: 'GET',
+                type: 'POST',
                 data: { action: 'restore_from_sibling', type: 'agent', id: id, csrf_token: token },
                 dataType: 'json'
             }).done(function(r) {
@@ -2056,10 +2059,11 @@ function av2ClearAgentHalt(id, btn) {
         confirmButtonText: 'Clear halt',
         showLoaderOnConfirm: true,
         closeOnConfirm: false
-    }, function() {
+    }, function(confirmed) {
+        if (!confirmed) return;
         $.ajax({
             url: '/plugins/unraid-aicliagents/AICliAjax.php',
-            type: 'GET',
+            type: 'POST',
             data: { action: 'clear_halt', type: 'agent', id: id, reason: 'user_manual_override_storecard', csrf_token: token },
             dataType: 'json'
         }).done(function(r) {
