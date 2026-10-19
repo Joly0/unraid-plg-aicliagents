@@ -1626,7 +1626,12 @@ fi
 # Record this bake as the lock holder, so a concurrent bake of the same layer
 # can skip and every other caller can see who holds the lock. Atomic (tmp + mv).
 if [ -n "$_UPPER_OVERRIDE" ]; then _bake_owner_op="bake_staged"; else _bake_owner_op="bake"; fi
-if ! { printf 'op=%s pid=%s since=%s start=%s\n' "$_bake_owner_op" "${BASHPID:-$$}" "$(date +%s)" "$(_proc_start_ticks "${BASHPID:-$$}")" > "${_BAKE_LOCK_OWNER}.$$" \
+# Read the pid here, not inside $(...): there BASHPID is the pid of the
+# command-substitution subshell, so the record held the start time of a
+# process that had already ended, and a second bake never saw this bake as
+# live (#691).
+_bake_owner_pid="${BASHPID:-$$}"
+if ! { printf 'op=%s pid=%s since=%s start=%s\n' "$_bake_owner_op" "$_bake_owner_pid" "$(date +%s)" "$(_proc_start_ticks "$_bake_owner_pid")" > "${_BAKE_LOCK_OWNER}.$$" \
         && mv -f "${_BAKE_LOCK_OWNER}.$$" "$_BAKE_LOCK_OWNER"; } 2>/dev/null; then
     rm -f "${_BAKE_LOCK_OWNER}.$$" 2>/dev/null || true
 fi
