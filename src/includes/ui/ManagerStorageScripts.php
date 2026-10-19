@@ -250,7 +250,7 @@ function renderHomeStats(homes) {
             const canConsolidate = !isPlain && (h.layers >= 2 || (h.layers >= 1 && Number(h.dirty_mb || 0) > 0));
             const showRepair = !h.mounted;
             const job = homeJobLabel(h.job);
-            const jobRemaining = isPlain ? '' : homeJobRemaining(job, h.dirty_mb);
+            const jobRemaining = isPlain ? '' : (job ? homeJobRemaining(h.job, h.dirty_mb) : '');
             const hasUpperChanges = !isPlain && Number(h.dirty_mb || 0) > 0;
             const isZramUpper = h.upper_mode === 'zram';
             const upperFigure = isPlain ? 'Plain folders' : (!hasUpperChanges ? 'Layered'
