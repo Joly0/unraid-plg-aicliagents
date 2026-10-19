@@ -730,6 +730,7 @@ do_graduate() {
 # backend-migrate — one entity's part of the global storage-engine migration.
 do_backend_migrate() {
     require_entity_args
+    backend_migration_clear_reasons "$TYPE" "$ID"
     _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
     case "$TARGET" in
         layering|passthrough) ;;
@@ -738,7 +739,7 @@ do_backend_migrate() {
     local start; start="$(_lifecycle_count)"
     op_backend_migrate "$TYPE" "$ID" "$PERSIST" "$TARGET" "$FORCE_DIRECT" >&2
     local ex=$?
-    local reason=""; { [ "$ex" -eq 2 ] || [ "$ex" -eq 4 ]; } && reason="$(_read_defer_reason)"
+    local reason; reason="$(backend_migration_failure_reason "$TYPE" "$ID" "" "$ex")"
     emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$(_lifecycle_events_json "$start")"
     exit "$ex"
 }

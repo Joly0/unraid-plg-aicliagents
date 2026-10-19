@@ -1864,6 +1864,46 @@ write_graduate_refusal() {
         > "/tmp/unraid-aicliagents/.graduate_refusal_${type}_${safe}" 2>/dev/null || true
 }
 
+# Clear and read only the reason markers written by one backend-migration call.
+backend_migration_clear_reasons() {
+    local type="${1:-}" id="${2:-}" root="${3:-/tmp/unraid-aicliagents}"
+    local safe="${id//[^a-zA-Z0-9_-]/_}"
+    [ -n "$type" ] && [ -n "$id" ] || return 0
+    rm -f "$root/.convert_reason_${type}_${safe}" \
+        "$root/.graduate_refusal_${type}_${safe}" \
+        "$root/.bake_defer_reason_${type}_${safe}" 2>/dev/null || true
+}
+
+# Return the plain reason from the latest backend migration, for any exit code.
+backend_migration_failure_reason() {
+    local type="${1:-}" id="${2:-}" root="${3:-/tmp/unraid-aicliagents}" exit="${4:-0}"
+    local safe convert refusal defer
+    safe="${id//[^a-zA-Z0-9_-]/_}"
+    convert="$root/.convert_reason_${type}_${safe}"
+    refusal="$root/.graduate_refusal_${type}_${safe}"
+    defer="$root/.bake_defer_reason_${type}_${safe}"
+    local why path first
+    if [ -s "$convert" ]; then
+        head -c 1024 "$convert" 2>/dev/null | tr '\r\n' ' ' | tr -d '\000-\010\013\014\016-\037\177' | sed 's/[[:space:]]*$//'
+    elif [ -s "$refusal" ]; then
+        why="$(sed -n '1p' "$refusal" 2>/dev/null)"
+        path="$(sed -n '2p' "$refusal" 2>/dev/null)"
+        first="$(sed -n '3p' "$refusal" 2>/dev/null)"
+        printf '%s%s%s' "$why" "${path:+ at $path}" "${first:+ (first item: $first)}" | head -c 1024
+    elif [ -s "$defer" ]; then
+        head -c 1024 "$defer" 2>/dev/null | tr '\r\n' ' ' | tr -d '\000-\010\013\014\016-\037\177' | sed 's/[[:space:]]*$//'
+    else
+        case "$exit" in
+            0) ;;
+            2) printf '%s' 'backend_migration_deferred' ;;
+            3) printf '%s' 'guard_reject' ;;
+            4) printf '%s' 'precondition_failed' ;;
+            64) printf '%s' 'usage_error' ;;
+            *) printf '%s' 'backend_migration_failed' ;;
+        esac
+    fi
+}
+
 # agent_convert_layout_paths <persist> <id> — sets AGC_STABLE (the stable link)
 # and AGC_VERSIONS (the folder that holds every plain version of the agent).
 agent_convert_layout_paths() {
@@ -2701,7 +2741,7 @@ bake_via_hardlink_merge() {
 #   fat32_size_cap                  — projected layer would exceed the FAT32 4 GiB per-file cap (bake/consolidate exit 4, S-09 #1352)
 #   upper_not_empty                 — graduate found unflushed files in the upper after the flush+consolidate (op_graduate exit 2, S-10 #1354)
 #   graduate_precondition           — graduate precondition failed (exit 4 — wrong device/engine/backend, no layers, or pt dir occupied) (op_graduate, S-10 #1354)
-AICLI_DEFER_REASONS="mount_busy busy_cooldown sqlite_backup_deferred consolidate_lowerdir_incomplete bake_lock_held bake_landed_during_consolidate target_not_mounted fat32_size_cap upper_not_empty graduate_precondition no_space"
+AICLI_DEFER_REASONS="mount_busy busy_cooldown sqlite_backup_deferred consolidate_lowerdir_incomplete bake_lock_held bake_landed_during_consolidate target_not_mounted fat32_size_cap upper_not_empty graduate_precondition no_space boot_disk_too_small space_estimate_unavailable"
 
 # 2026-09-29 (#357): a bake's exit 2 does NOT always mean "saved". mount_busy
 # (the refresh after the layer was written) and busy_cooldown (saved within

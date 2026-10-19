@@ -26,6 +26,12 @@
 _SO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 [ -d "$_SO_DIR" ] || _SO_DIR="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage"
 
+# Use the same 10% size allowance and free-space margin as a normal layer bake.
+BACKEND_MIGRATION_BAKE_MARGIN_MB="${AICLI_LAYER_SPACE_MARGIN_MB:-64}"
+case "$BACKEND_MIGRATION_BAKE_MARGIN_MB" in
+    ''|*[!0-9]*) BACKEND_MIGRATION_BAKE_MARGIN_MB=64 ;;
+esac
+
 # lock_holder_describe <lockfile>   (R8, HARD_STOP_RESILIENCE.md)
 #
 # Print ONE line that names the process which holds <lockfile> open:
@@ -1314,6 +1320,36 @@ exit 0
 # reverse path writes a verified SquashFS layer from the plain directory, flips
 # the manifest only after that layer exists, then MOVES the plain directory and
 # any superseded layers into a timestamped archive — never deletes user data.
+backend_migration_check_layer_space() {
+    local type="${1:-}" id="${2:-}" persist="${3:-}" source="${4:-}"
+    local source_bytes need_mb available_mb
+    source_bytes="$(du -sb "$source" 2>/dev/null | awk 'NR==1 {print $1}')"
+    case "$source_bytes" in
+        ''|*[!0-9]*)
+            write_defer_reason "$type" "$id" "space_estimate_unavailable"
+            echo "[backend-migrate] Cannot measure the plain folder before creating its SquashFS layer." >&2
+            return 1
+            ;;
+    esac
+    need_mb=$(( (source_bytes + source_bytes / 10 + 1048575) / 1048576 + BACKEND_MIGRATION_BAKE_MARGIN_MB ))
+    available_mb="$(df -Pm "$persist" 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$available_mb" in
+        ''|*[!0-9]*)
+            write_defer_reason "$type" "$id" "space_estimate_unavailable"
+            echo "[backend-migrate] Cannot measure free space before creating the SquashFS layer. No storage was changed." >&2
+            return 1
+            ;;
+    esac
+    if [ "$available_mb" -lt "$need_mb" ]; then
+        write_defer_reason "$type" "$id" "boot_disk_too_small"
+        echo "[backend-migrate] The boot disk has too little room for the new layer (about ${need_mb} MB needed, ${available_mb} MB available). No storage was changed." >&2
+        lifecycle_log "error" "backend_migrate" "backend_migrate_no_space" \
+            "{\"type\":\"$type\",\"id\":\"$id\",\"source_bytes\":$source_bytes,\"need_mb\":$need_mb,\"available_mb\":$available_mb}" 2>/dev/null || true
+        return 2
+    fi
+    return 0
+}
+
 op_backend_migrate() (
 set -euo pipefail
 TYPE="${1:-}"
@@ -1336,6 +1372,7 @@ guard_path "$PERSIST_PATH" "PERSIST_PATH" || exit 1
 _assert_persist_durable "$PERSIST_PATH" || exit 1
 
 _BM_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
+backend_migration_clear_reasons "$TYPE" "$ID"
 _BM_MNT=""
 if [ "$TYPE" = "home" ]; then
     _BM_MNT="$(home_mount "$ID")"
@@ -1378,8 +1415,6 @@ if ! flock -n 9; then
     exit 2
 fi
 
-_BM_ARCHIVE="$PERSIST_PATH/.backend-migration-archive/$(date -u +%Y%m%dT%H%M%SZ)_${TYPE}_${_BM_LOCK_ID}"
-mkdir -p "$_BM_ARCHIVE" 2>/dev/null || exit 1
 # 2026-09-29 (SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-29 — a consolidate reads
 # the real directory, never the stable name"): a side-by-side plain-folder
 # agent's stable path is a SYMLINK to its version directory (see the archive
@@ -1390,6 +1425,13 @@ if [ -z "$_BM_BAKE_SRC" ] || [ ! -d "$_BM_BAKE_SRC" ]; then
     printf '%s\n' "[backend-migrate] $_BM_PT does not resolve to a directory — nothing changed" >&2
     exit 1
 fi
+if backend_migration_check_layer_space "$TYPE" "$ID" "$PERSIST_PATH" "$_BM_BAKE_SRC"; then
+    :
+else
+    exit $?
+fi
+_BM_ARCHIVE="$PERSIST_PATH/.backend-migration-archive/$(date -u +%Y%m%dT%H%M%SZ)_${TYPE}_${_BM_LOCK_ID}"
+mkdir -p "$_BM_ARCHIVE" 2>/dev/null || exit 1
 _BM_NEW_LAYER="$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$_BM_BAKE_SRC" "consolidated")" || exit 1
 
 # `replaceLayers` makes the new verified file the only expected layer before

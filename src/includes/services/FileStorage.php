@@ -509,6 +509,7 @@ final class FileStorage
         }
         $out = [];
         $exit = 1;
+        $stderrCapture = null;
         // nosemgrep: php.lang.security.exec-use.exec-use
         // #571: a bake or merge can run for minutes with no output. Keep the install's
         // tray entry alive while the process lives (a no-op when no such entry exists).
@@ -517,11 +518,53 @@ final class FileStorage
             [$exit, $out] = \AICliAgents\Services\ActivityService::runWatched(
                 $cmd . ' 2>/dev/null', $type === 'agent' ? "install_$id" : null, 15, 'Baking SquashFS delta');
         } else {
+            if ($verb === 'backend-migrate') {
+                $stderrCapture = @tempnam(sys_get_temp_dir(), 'aicli-backend-migrate-');
+                if (is_string($stderrCapture) && $stderrCapture !== '') {
+                    $cmd .= ' 2>' . escapeshellarg($stderrCapture);
+                } else {
+                    $stderrCapture = null;
+                    $cmd .= ' 2>/dev/null';
+                }
+            } else {
+                $cmd .= ' 2>/dev/null';
+            }
             // nosemgrep: php.lang.security.exec-use.exec-use
-            exec($cmd . ' 2>/dev/null', $out, $exit);
+            exec($cmd, $out, $exit);
         }
-        $json = json_decode(implode("\n", $out), true);
-        return [$exit, is_array($json) ? $json : []];
+        $json = [];
+        $jsonLine = null;
+        foreach ($out as $index => $line) {
+            $decoded = json_decode((string)$line, true);
+            if (is_array($decoded)) {
+                $json = $decoded;
+                $jsonLine = $index;
+            }
+        }
+        $stdoutDiagnostic = [];
+        foreach ($out as $index => $line) {
+            if ($index !== $jsonLine && trim((string)$line) !== '') $stdoutDiagnostic[] = (string)$line;
+        }
+        if ($stderrCapture !== null) {
+            $diagnostic = @file_get_contents($stderrCapture);
+            @unlink($stderrCapture);
+            if (is_string($diagnostic) && trim($diagnostic) !== '') $stdoutDiagnostic[] = $diagnostic;
+        }
+        if ($verb === 'backend-migrate') {
+            $diagnostic = self::boundedMigrationDiagnostic(implode("\n", $stdoutDiagnostic));
+            if ($diagnostic !== '') $json['diagnostic'] = $diagnostic;
+            $json['reason'] = (string)($json['reason'] ?? $json['defer_reason'] ?? '');
+        }
+        return [$exit, $json];
+    }
+
+    /** Keep the last shell output lines that explain a failed backend migration. */
+    private static function boundedMigrationDiagnostic(string $diagnostic): string
+    {
+        $diagnostic = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $diagnostic);
+        $lines = preg_split('/\r\n|\r|\n/', $diagnostic) ?: [];
+        $diagnostic = trim(implode("\n", array_slice($lines, -20)));
+        return strlen($diagnostic) > 2000 ? substr($diagnostic, -2000) : $diagnostic;
     }
 
     /**

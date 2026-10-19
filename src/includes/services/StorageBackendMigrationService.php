@@ -10,11 +10,11 @@ namespace AICliAgents\Services;
 
 final class StorageBackendMigrationService
 {
-    public static function preflight(string $target, ?array $config = null): array
+    public static function preflight(string $target, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
         $target = StorageBackendPolicyService::normalizeMode($target);
-        $verdicts = StorageBackendPolicyService::targetVerdicts($config);
+        $verdicts = $seams['verdicts'] ?? StorageBackendPolicyService::targetVerdicts($config);
         $refused = [];
         $usb = [];
         foreach ($verdicts as $kind => $verdict) {
@@ -29,12 +29,20 @@ final class StorageBackendMigrationService
                 'targets' => $verdicts,
             ];
         }
+        $entities = $seams['entities'] ?? self::entities($config);
+        $capacity = self::capacityPreflight($target, $config, $verdicts, $entities, $seams);
+        if (($capacity['status'] ?? '') !== 'ok') {
+            return $capacity + ['target' => $target, 'targets' => $verdicts];
+        }
         $message = $target === StorageBackendPolicyService::PASSTHROUGH
             ? 'All installed agents and homes will be converted to plain directories. Existing sessions will be closed safely, old SquashFS data will be retained in the migration archive, and new installs can activate side by side.'
             : 'All installed agents and homes will be converted to SquashFS layers with writable zram state. Existing plain directories will be archived only after the layer and manifest are verified.';
         if ($usb !== []) {
             $message .= ' The probe identified removable/USB-backed storage (' . implode(', ', $usb) . '); SquashFS + zram is recommended to reduce wear.';
         }
+        $message .= ' The migration needs about ' . BootSpaceService::human((int)$capacity['capacity']['forward_bytes'])
+            . ' for the new storage and ' . BootSpaceService::human((int)$capacity['capacity']['rollback_bytes'])
+            . ' for rollback copies. It must leave ' . BootSpaceService::human((int)$capacity['capacity']['reserve_bytes']) . ' free.';
         return [
             'status' => 'ok',
             'target' => $target,
@@ -42,7 +50,155 @@ final class StorageBackendMigrationService
             'targets' => $verdicts,
             'requires_acknowledgement' => $usb !== [],
             'message' => $message,
+            'capacity' => $capacity['capacity'],
         ];
+    }
+
+    /**
+     * Check all new and rollback copies against one fresh measurement and live free space.
+     * The old representation stays in place until the new one is verified, so it does not
+     * free space for this check. Tests may supply snapshot, entities and disk seams.
+     */
+    private static function capacityPreflight(string $target, array $config, array $verdicts, array $entities, array $seams): array
+    {
+        $now = (int)($seams['now'] ?? time());
+        $snapshot = $seams['snapshot'] ?? BootSpaceService::read();
+        if (!is_array($snapshot) || BootSpaceService::isStale($snapshot, $now) || !array_key_exists('partial', $snapshot) || !empty($snapshot['partial'])) {
+            return ['status' => 'error', 'message' => 'The Boot disk space report is missing, old or incomplete. Refresh that report before you try the engine change.'];
+        }
+        $agentPath = trim((string)($verdicts['agent']['path'] ?? ''));
+        if ($agentPath === '') $agentPath = trim((string)($config['agent_storage_path'] ?? '')) ?: StoragePathResolver::pluginBase();
+        $agentPath = rtrim($agentPath, '/');
+        $homePath = rtrim((string)($verdicts['home']['path'] ?? StoragePathResolver::homePersistPathFromConfig($config)), '/');
+        $measuredAgentPath = rtrim((string)($snapshot['persist'] ?? ''), '/');
+        $measuredHomePath = rtrim((string)($snapshot['home_persist'] ?? ''), '/');
+        if (($measuredAgentPath !== '' && $measuredAgentPath !== $agentPath)
+            || ($measuredHomePath !== '' && $measuredHomePath !== $homePath)
+            || (($measuredAgentPath === '' || $measuredHomePath === '') && $agentPath !== $homePath)) {
+            return ['status' => 'error', 'message' => 'The Boot disk space report does not match both current storage paths. Refresh that report before you try the engine change.'];
+        }
+
+        $agents = [];
+        foreach (($snapshot['agents'] ?? []) as $row) {
+            if (is_array($row) && isset($row['id'])) $agents[(string)$row['id']] = $row;
+        }
+        $plainAgentEstimates = [];
+        foreach (($snapshot['convert']['agents'] ?? []) as $row) {
+            if (is_array($row) && isset($row['id'], $row['plain_bytes'])) $plainAgentEstimates[(string)$row['id']] = $row;
+        }
+        $homeParts = [];
+        foreach (($snapshot['parts'] ?? []) as $part) {
+            if (!is_array($part) || !isset($part['key'], $part['bytes'])) continue;
+            $homeParts[(string)$part['key']] = max(0, (int)$part['bytes']);
+        }
+
+        $diskFor = $seams['disk'] ?? static function (string $path): array {
+            $stat = @stat($path);
+            return [
+                'device' => $stat === false ? null : (string)($stat['dev'] ?? ''),
+                'total' => (int)@disk_total_space($path),
+                'free' => (int)@disk_free_space($path),
+            ];
+        };
+        $groups = [];
+        $forwardTotal = 0;
+        $rollbackTotal = 0;
+        foreach ($entities as $entity) {
+            $type = (string)($entity['type'] ?? '');
+            $id = (string)($entity['id'] ?? '');
+            if (!in_array($type, ['agent', 'home'], true) || $id === '') continue;
+            $forwardBytes = 0;
+            $rollbackBytes = 0;
+            if ($type === 'agent') {
+                $row = $agents[$id] ?? null;
+                // A complete report has scanned both persistence roots. An installed
+                // agent with no measured row has no saved files to copy.
+                if (!is_array($row)) continue;
+                $storage = (string)($row['storage'] ?? '');
+                if ($target === StorageBackendPolicyService::PASSTHROUGH && $storage === 'layers') {
+                    $estimate = $plainAgentEstimates[$id] ?? null;
+                    $forwardBytes = is_array($estimate)
+                        ? max(0, (int)$estimate['plain_bytes'])
+                        : (int)ceil(max(0, (int)($row['current_bytes'] ?? 0) + (int)($row['previous_bytes'] ?? 0)) * AgentStorageService::UNPACKED_RATIO);
+                    $rollbackBytes = max(
+                        max(0, (int)($row['current_bytes'] ?? 0) + (int)($row['previous_bytes'] ?? 0)),
+                        (int)ceil($forwardBytes / AgentStorageService::UNPACKED_RATIO)
+                    );
+                } elseif ($target === StorageBackendPolicyService::LAYERING && $storage === 'plain') {
+                    // The SquashFS output can approach the plain folder size. Use that
+                    // full size for the new layer and again for a plain rollback copy.
+                    $forwardBytes = max(0, (int)($row['current_bytes'] ?? 0));
+                    $rollbackBytes = $forwardBytes;
+                } elseif (!in_array($storage, ['layers', 'plain'], true)) {
+                    return ['status' => 'error', 'message' => 'The Boot disk space report cannot identify the storage for agent ' . $id . '. Refresh that report before you try the engine change.'];
+                }
+            } else {
+                $layerKey = 'home:' . $id . ':layers';
+                $plainKeys = ['home:' . $id . ':history', 'home:' . $id . ':caches', 'home:' . $id . ':other'];
+                if (array_key_exists($layerKey, $homeParts)) {
+                    if ($target === StorageBackendPolicyService::PASSTHROUGH) {
+                        // Layer files hold compressed content. The measured part uses allocated
+                        // bytes, so the established 5.8 expansion estimate is conservative here.
+                        $forwardBytes = (int)ceil($homeParts[$layerKey] * AgentStorageService::UNPACKED_RATIO);
+                        $rollbackBytes = max($homeParts[$layerKey], (int)ceil($forwardBytes / AgentStorageService::UNPACKED_RATIO));
+                    }
+                } elseif (array_reduce($plainKeys, static fn(bool $found, string $key): bool => $found || array_key_exists($key, $homeParts), false)) {
+                    if ($target === StorageBackendPolicyService::LAYERING) {
+                        // A SquashFS layer may be close to the plain source size. The
+                        // migration also needs a fresh plain copy if it must roll back.
+                        $forwardBytes = array_sum(array_map(static fn(string $key): int => $homeParts[$key] ?? 0, $plainKeys));
+                        $rollbackBytes = $forwardBytes;
+                    }
+                } else {
+                    // Homes with no layer or plain-folder part have no saved files to copy.
+                    continue;
+                }
+            }
+            if ($forwardBytes === 0 && $rollbackBytes === 0) continue;
+            $path = (string)($verdicts[$type]['path'] ?? ($type === 'agent' ? ($config['agent_storage_path'] ?? '') : ($config['home_storage_path'] ?? '')));
+            if ($path === '') return ['status' => 'error', 'message' => 'The storage path for ' . $type . '/' . $id . ' is not available for the space check.'];
+            $disk = $diskFor($path);
+            $device = (string)($disk['device'] ?? '');
+            $total = (int)($disk['total'] ?? 0);
+            $free = (int)($disk['free'] ?? 0);
+            if ($device === '' || $total <= 0 || $free < 0) {
+                return ['status' => 'error', 'message' => 'Free space for ' . $type . '/' . $id . ' could not be checked. No storage was changed.'];
+            }
+            $key = $device;
+            if (!isset($groups[$key])) $groups[$key] = ['total' => $total, 'free' => $free, 'forward' => 0, 'rollback' => 0];
+            $groups[$key]['forward'] += $forwardBytes;
+            $groups[$key]['rollback'] += $rollbackBytes;
+            $forwardTotal += $forwardBytes;
+            $rollbackTotal += $rollbackBytes;
+        }
+
+        $reserveTotal = 0;
+        foreach ($groups as $group) {
+            $reserve = max(AgentStorageService::RESERVE_BYTES, intdiv((int)$group['total'], AgentStorageService::RESERVE_DIVISOR));
+            $reserveTotal += $reserve;
+            $write = (int)$group['forward'] + (int)$group['rollback'];
+            if ((int)$group['free'] < $write + $reserve) {
+                $need = $write + $reserve;
+                return [
+                    'status' => 'error',
+                    'message' => 'The migration needs about ' . BootSpaceService::human((int)$group['forward'])
+                        . ' for new storage and ' . BootSpaceService::human((int)$group['rollback'])
+                        . ' for rollback copies, plus ' . BootSpaceService::human($reserve) . ' free. It needs '
+                        . BootSpaceService::human($need) . ' free, but only ' . BootSpaceService::human((int)$group['free'])
+                        . ' is available. Free space, then try again. No storage was changed.',
+                    'capacity' => ['forward_bytes' => (int)$group['forward'], 'rollback_bytes' => (int)$group['rollback'],
+                        'write_bytes' => $write, 'reserve_bytes' => $reserve,
+                        'required_bytes' => $need, 'available_bytes' => (int)$group['free'], 'fits' => false],
+                ];
+            }
+        }
+        return ['status' => 'ok', 'capacity' => [
+            'forward_bytes' => $forwardTotal, 'rollback_bytes' => $rollbackTotal,
+            'write_bytes' => $forwardTotal + $rollbackTotal, 'reserve_bytes' => $reserveTotal,
+            'required_bytes' => $forwardTotal + $rollbackTotal + $reserveTotal,
+            'available_bytes' => array_sum(array_map(static fn(array $g): int => (int)$g['free'], $groups)),
+            'fits' => true,
+        ]];
     }
 
     /** Lock file of the all-entity engine migration. Tests may override it. */
@@ -83,12 +239,32 @@ final class StorageBackendMigrationService
         return in_array((string)(self::readStatus()['status'] ?? ''), ['queued', 'running'], true);
     }
 
+    /** Save a refusal so both status views retain the reason a migration did not start. */
+    private static function recordPreflightFailure(array $check, string $target, array $config, array $entities): array
+    {
+        $now = time();
+        $state = [
+            'status' => 'error', 'phase' => 'preflight',
+            'from' => StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering'),
+            'target' => StorageBackendPolicyService::normalizeMode($target),
+            'started_at' => $now, 'updated_at' => $now, 'completed' => 0,
+            'total' => count($entities), 'current' => '',
+            'message' => (string)($check['message'] ?? 'The migration could not start. No storage was changed.'),
+        ];
+        if (isset($check['capacity']) && is_array($check['capacity'])) $state['capacity'] = $check['capacity'];
+        self::writeStatus($state);
+        return $check;
+    }
+
     /** Reserve the global engine change, then start its worker without holding the page open. */
     public static function startAsync(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
-        $check = $seams['preflight'] ?? self::preflight($target, $config);
-        if (($check['status'] ?? '') !== 'ok') return $check;
+        $check = $seams['preflight'] ?? self::preflight($target, $config, $seams);
+        if (($check['status'] ?? '') !== 'ok') {
+            $entities = $seams['entities'] ?? self::entities($config);
+            return self::recordPreflightFailure($check, $target, $config, $entities);
+        }
         $target = (string)$check['target'];
         if (!empty($check['requires_acknowledgement']) && !$acknowledgeWear) {
             return ['status' => 'error', 'message' => 'Plain-directory mode on removable/USB storage requires an explicit wear acknowledgement.'];
@@ -280,8 +456,11 @@ final class StorageBackendMigrationService
     public static function migrate(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
-        $check = $seams['preflight'] ?? self::preflight($target, $config);
-        if (($check['status'] ?? '') !== 'ok') return $check;
+        $check = $seams['preflight'] ?? self::preflight($target, $config, $seams);
+        if (($check['status'] ?? '') !== 'ok') {
+            $entities = $seams['entities'] ?? self::entities($config);
+            return self::recordPreflightFailure($check, $target, $config, $entities);
+        }
         $target = (string)$check['target'];
         if (!empty($check['requires_acknowledgement']) && !$acknowledgeWear) {
             return ['status' => 'error', 'message' => 'Plain-directory mode on removable/USB storage requires an explicit wear acknowledgement.'];
@@ -364,7 +543,10 @@ final class StorageBackendMigrationService
                 self::writeStatus($state);
                 $r = $convert($entity['type'], $entity['id'], $target, $target === StorageBackendPolicyService::PASSTHROUGH);
                 if ((int)($r['exit'] ?? 1) !== 0) {
-                    $failure = $entity['type'] . '/' . $entity['id'] . ': ' . (($r['reason'] ?? '') ?: 'storage conversion failed');
+                    $diagnostic = self::cleanDiagnostic((string)($r['diagnostic'] ?? ''));
+                    $reason = self::conversionFailureReason((string)($r['reason'] ?? ''), $diagnostic);
+                    $failure = $entity['type'] . '/' . $entity['id'] . ': ' . $reason;
+                    self::logConversionFailure($entity, (int)($r['exit'] ?? 1), (string)($r['reason'] ?? ''), $diagnostic, $target);
                     // Convert the entities that already moved back, newest first.
                     foreach (array_reverse($migrated) as $done) {
                         $state['phase'] = 'rolling_back';
@@ -401,6 +583,62 @@ final class StorageBackendMigrationService
             return ['status' => 'error', 'message' => 'Storage data migrated, but the global policy could not be saved. Re-open Settings and retry.', 'migrated' => $migrated];
         }
         return ['status' => 'ok', 'message' => 'Migrated ' . count($migrated) . ' storage entities to ' . StorageBackendPolicyService::label($target) . '.', 'migrated' => $migrated, 'resume_after_migration' => true];
+    }
+
+    /** Return a short reason that fits the saved status and Settings page. */
+    private static function conversionFailureReason(string $reason, string $diagnostic): string
+    {
+        $text = strtolower($reason . ' ' . $diagnostic);
+        if (preg_match('/no space left|insufficient space|not enough (?:free )?space|disk full|no_room|too_small|space .* needed/', $text)) {
+            return 'not enough free space on the storage disk';
+        }
+        if (preg_match('/busy|in use|lock|already running|mount .*busy/', $text)) {
+            return 'storage is in use';
+        }
+        if (str_contains($text, 'backend_migration_deferred')) {
+            return 'conversion was deferred. Check the Debug Console for details.';
+        }
+        if (str_contains($text, 'space_estimate_unavailable')) {
+            return 'free space for the new layer could not be checked';
+        }
+        if (str_contains($text, 'pt_dir_occupied')) {
+            return 'the plain folder already contains data';
+        }
+        $plainReason = trim(self::cleanDiagnostic($reason));
+        if (strlen($plainReason) > 20 && preg_match('/[\s.]/', $plainReason)) {
+            return strlen($plainReason) > 180 ? substr($plainReason, 0, 177) . '...' : $plainReason;
+        }
+        return 'storage conversion failed. Check the Debug Console for details.';
+    }
+
+    /** Keep control characters and oversized shell output out of status and log records. */
+    private static function cleanDiagnostic(string $diagnostic): string
+    {
+        $diagnostic = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $diagnostic);
+        $lines = preg_split('/\r\n|\r|\n/', $diagnostic) ?: [];
+        $diagnostic = trim(implode("\n", array_slice($lines, -20)));
+        return strlen($diagnostic) > 2000 ? substr($diagnostic, -2000) : $diagnostic;
+    }
+
+    /** Keep the shell cause in both durable lifecycle history and the Debug Console. */
+    private static function logConversionFailure(array $entity, int $exit, string $reason, string $diagnostic, string $target): void
+    {
+        $reason = substr(self::cleanDiagnostic($reason), 0, 256);
+        $payload = [
+            'entity' => (string)($entity['type'] ?? '') . '/' . (string)($entity['id'] ?? ''),
+            'target' => $target,
+            'exit' => $exit,
+            'reason' => $reason,
+            'diagnostic' => $diagnostic,
+        ];
+        if (class_exists(LifecycleLogService::class)) {
+            LifecycleLogService::log(LifecycleLogService::LEVEL_ERROR, 'backend_migration', 'conversion_failed', $payload);
+        }
+        if (class_exists(LogService::class)) {
+            $detail = $diagnostic !== '' ? $diagnostic : ($reason !== '' ? $reason : 'no diagnostic output');
+            LogService::log('Storage migration failed for ' . $payload['entity'] . ' (exit ' . $exit . '): ' . $detail,
+                LogService::LOG_ERROR, 'StorageBackendMigrationService');
+        }
     }
 
     /** Enumerate only candidate entities; the shell remains authoritative about presence. */

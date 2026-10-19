@@ -14,7 +14,7 @@
  *   One run has one overall deadline (MeasureDeadline, 300 s). When it passes, the run writes
  *   what it has with "partial": true.
  * Dependencies: ConfigService, AgentStorageService, AgentVersionCleanupService, HomeCacheService,
- *   HistoryStoreService, HistoryMoveService, FileStorage (home layers), UtilityService.
+ *   HistoryStoreService, HistoryMoveService, FileStorage (home layers), StoragePathResolver, UtilityService.
  * Constraints: Never measures in the page request. The read functions (snapshot, cachedOldVersions,
  *   cachedConvert, cachedHistory, cachedCache) read the file only: no du, no find, no tree walk. removeLeftover() removes only items that the
  *   last measurement listed under "Left over", re-checks right before it removes, and never
@@ -272,7 +272,7 @@ class BootSpaceService
 
     /**
      * Measure everything. Slow: du on several GB. Run it in the background only.
-     * $seams (tests): persist, plugin_dir, du (callable path→bytes), config_user, disk (array),
+     * $seams (tests): persist, home_persist, plugin_dir, du (callable path→bytes), config_user, disk (array),
      * agent_sizes (array), old_versions (array), convert (array), cache_status (callable user→array),
      * history (callable homeDir→array), moved (callable user→array), retired_list, now (int),
      * deadline_at (Unix time; the measure then runs under its own deadline).
@@ -309,6 +309,10 @@ class BootSpaceService
     private static function measureParts(array $seams): array
     {
         $persist = rtrim((string)($seams['persist'] ?? self::persistPath()), '/');
+        $homePersist = rtrim((string)($seams['home_persist'] ?? (isset($seams['persist'])
+            ? $persist
+            : StoragePathResolver::homePersistPathFromConfig(ConfigService::getConfig()))), '/');
+        if ($homePersist === '') $homePersist = $persist;
         $pluginDir = rtrim((string)($seams['plugin_dir'] ?? self::pluginDir()), '/');
         $du = $seams['du'] ?? [self::class, 'duBytes'];
         $now = (int)($seams['now'] ?? time());
@@ -316,7 +320,7 @@ class BootSpaceService
         if ($configUser === '') $configUser = 'root';
 
         $disk = $seams['disk'] ?? self::diskInfo($persist);
-        $homes = self::discoverHomes($persist, $configUser, self::protectedHomeIds($configUser, $seams));
+        $homes = self::discoverHomes($homePersist, $configUser, self::protectedHomeIds($configUser, $seams));
         $parts = [];
         $insideTotal = 0;   // bytes of the parts that lie inside the plugin folder
         $history = [];      // user => agentId => figures (the Move old sessions dialog)
@@ -327,10 +331,10 @@ class BootSpaceService
         // ---- homes ----
         foreach ($homes['layered'] as $u) {
             if (self::outOfTime()) { $complete = false; break; }
-            $files = glob($persist . '/home_' . $u . '_*.sqsh') ?: [];
+            $files = glob($homePersist . '/home_' . $u . '_*.sqsh') ?: [];
             $b = 0; foreach ($files as $f) $b += (int)$du($f);
-            $b += (int)$du($persist . '/_upper/homes/' . $u);
-            $insideTotal += $b;
+            $b += (int)$du($homePersist . '/_upper/homes/' . $u);
+            if (self::isInside($homePersist, $pluginDir)) $insideTotal += $b;
             $parts[] = ['key' => 'home:' . $u . ':layers', 'group' => 'home', 'user' => $u,
                 'label' => 'Home ' . $u . ': saved layers', 'bytes' => $b,
                 'note' => 'Saved layers and the writable layer of the home.',
@@ -338,7 +342,7 @@ class BootSpaceService
         }
         foreach ($homes['plain'] as $u) {
             if (!$complete || self::outOfTime()) { $complete = false; break; }
-            $home = $persist . '/passthrough/homes/' . $u;
+            $home = $homePersist . '/passthrough/homes/' . $u;
             $total = (int)$du($home);
             $histBytes = 0;
             try {
@@ -358,7 +362,7 @@ class BootSpaceService
             $histBytes = min($histBytes, $total);
             $cacheBoot = min($cacheBoot, max(0, $total - $histBytes));
             $other = max(0, $total - $histBytes - $cacheBoot);
-            $insideTotal += $total;
+            if (self::isInside($homePersist, $pluginDir)) $insideTotal += $total;
 
             $hist = ['key' => 'home:' . $u . ':history', 'group' => 'home', 'user' => $u,
                 'label' => 'Home ' . $u . ': conversation history', 'bytes' => $histBytes,
@@ -403,7 +407,7 @@ class BootSpaceService
             $convAction = !empty($est['offered'])
                 ? self::action('convert_agents', 'Convert to plain folders')
                 : self::action('convert_agents', 'Convert to plain folders', false, self::convertReason((string)($est['reason'] ?? '')));
-            $insideTotal += $cur + $oldBytes;
+            if (self::isInside($persist, $pluginDir)) $insideTotal += $cur + $oldBytes;
             $names = [];
             foreach ($sizes as $s) $names[] = ($s['name'] ?? $s['id']) . ' (' . (($s['storage'] ?? '') === 'layers' ? 'layers' : 'plain folders') . ')';
             $parts[] = ['key' => 'agents:current', 'group' => 'agents', 'label' => 'Agents: current versions', 'bytes' => $cur,
@@ -420,7 +424,7 @@ class BootSpaceService
         if ($complete && !self::outOfTime()) {
             $items = self::leftOverItems($persist, $homes, $du, $seams['retired_list'] ?? null);
             $lo = 0; foreach ($items as $it) $lo += $it['bytes'];
-            $insideTotal += $lo;
+            if (self::isInside($persist, $pluginDir)) $insideTotal += $lo;
             $parts[] = ['key' => 'leftover', 'group' => 'leftover', 'label' => 'Left over', 'bytes' => $lo,
                 'items' => array_map(static function ($it) { return ['key' => $it['key'], 'label' => $it['label'], 'bytes' => $it['bytes']]; }, $items),
                 'action' => $items ? self::action('remove_leftover', 'Remove')
@@ -432,7 +436,7 @@ class BootSpaceService
         // ---- plugin files: the rest of the plugin folder ----
         if ($complete && !self::outOfTime()) {
             $pluginTotal = (int)$du($pluginDir);
-            $persistInPlugin = self::isInside($persist, $pluginDir);
+            $persistInPlugin = self::isInside($persist, $pluginDir) || self::isInside($homePersist, $pluginDir);
             $rest = $persistInPlugin ? max(0, $pluginTotal - $insideTotal) : $pluginTotal;
             $parts[] = ['key' => 'plugin', 'group' => 'plugin', 'label' => 'Plugin files', 'bytes' => $rest,
                 'note' => 'Program files, saved copies of earlier versions, settings and state.', 'action' => null];
@@ -440,7 +444,8 @@ class BootSpaceService
             $complete = false;
         }
 
-        $out = ['measured_at' => $now, 'disk' => $disk, 'parts' => self::sortParts($parts),
+        $out = ['measured_at' => $now, 'persist' => $persist, 'home_persist' => $homePersist,
+            'disk' => $disk, 'parts' => self::sortParts($parts),
             'agents' => $agentRows, 'history' => $history, 'history_ages' => self::HISTORY_AGES, 'caches' => $caches,
             'partial' => !$complete || MeasureDeadline::wasPartial()];
         // AGENT_TEMP_FOLDER.md R4: the agent temporary folders in RAM. Background measure only.
