@@ -48,6 +48,9 @@ class StorageHandler {
     }
 
     public static function handle($action, $id) {
+        if (self::blockedByBackendMigration((string)$action)) {
+            return ['status' => 'error', 'reason' => 'storage_migration', 'message' => 'Wait for the storage migration to finish before starting another storage action.'];
+        }
         $result = null;
         switch ($action) {
             case 'get_storage_status':          $result = self::getStatus(); break;
@@ -96,6 +99,7 @@ class StorageHandler {
             case 'nuclear_rebuild_storage':     $result = self::wipe(); break;
             case 'purge_artifacts':             $result = self::purgeArtifacts(); break;
             case 'preflight_migrate':           return self::preflightMigrate();
+            case 'storage_backend_migration_status': return \AICliAgents\Services\StorageBackendMigrationService::status();
             case 'execute_migrate':             $result = self::executeMigrateExclusive(); break;
             case 'execute_storage_backend':     $result = self::executeStorageBackend(); break;
             case 'execute_upper_mode':          $result = self::executeUpperMode(); break;
@@ -108,10 +112,24 @@ class StorageHandler {
         return $result;
     }
 
+    /** Storage changes that can conflict with a global agent and home conversion. */
+    public static function blockedByBackendMigration(string $action): bool
+    {
+        $mutating = [
+            'restore_from_sibling', 'clear_halt', 'auto_heal_agent_install', 'persist_agent', 'persist_home',
+            'consolidate_storage', 'convert_storage', 'remove_old_versions', 'clear_home_caches', 'convert_agents',
+            'backup_home', 'set_home_backup_setting', 'restore_home', 'delete_backup_snapshot',
+            'graduate_storage', 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
+            'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts', 'execute_upper_mode',
+        ];
+        if (!in_array($action, $mutating, true)) return false;
+        return \AICliAgents\Services\StorageBackendMigrationService::isMigrationInProgress();
+    }
+
     /** Actions handled by this handler. */
     public static function actions() {
         return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_force_reclaim_state', 'get_task_status',
-                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'preflight_upper_mode',
+                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'storage_backend_migration_status', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage',
@@ -2302,11 +2320,10 @@ class StorageHandler {
     }
 
     private static function executeStorageBackend(): array {
-        set_time_limit(900);
         require_once __DIR__ . '/../services/StorageBackendMigrationService.php';
         $mode = (string)($_GET['mode'] ?? 'layering');
         $ack = ((string)($_GET['ack_wear'] ?? '0') === '1');
-        return \AICliAgents\Services\StorageBackendMigrationService::migrate($mode, $ack, getAICliConfig());
+        return \AICliAgents\Services\StorageBackendMigrationService::startAsync($mode, $ack, getAICliConfig());
     }
 
     /**

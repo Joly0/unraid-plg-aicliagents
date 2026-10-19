@@ -161,17 +161,24 @@ function saveAICliAgentsManager(form, silent = false) {
             if (pf.status !== 'ok') { restoreEngine(); swal("Error", pf.message || "Storage-engine check failed", "error"); return; }
             var msg = pf.message || ('This will migrate all agents and homes to ' + newStorageMode + '.');
             aicliGuardedSwal({ title: "Change persistence engine?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: "Migrate all storage", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restoreEngine, function() {
-                showMigrateOverlay();
+                sessionStorage.removeItem('aicli_backend_migration_dismissed');
+                renderBackendMigrationStatus({ status: 'queued', target: newStorageMode, message: 'Starting the migration…' });
                 aicliAjax('execute_storage_backend', { mode: newStorageMode, ack_wear: 1 }, function(r) {
-                    hideMigrateOverlay();
-                    if (r.status === 'ok') {
-                        swal({ title: "Storage engine changed", text: r.message || "All storage was migrated.", type: "success", confirmButtonText: "OK" }, function() { safeReload(); });
+                    if (r.status === 'accepted') {
+                        window._aicliBackendMigrationStartedHere = true;
+                        if (typeof swal.close === 'function') swal.close();
+                        updateBackendMigrationStatus();
                     } else {
+                        restoreEngine();
+                        renderBackendMigrationStatus({ status: 'error', from: curStorageMode, target: newStorageMode, message: r.message || 'Storage migration failed.' });
                         swal("Migration Failed", r.message || "Check debug.log", "error");
                     }
                 }).fail(function() {
-                    hideMigrateOverlay();
-                    swal("Migration Failed", "Server communication error", "error");
+                    // A response can be lost after the detached worker starts.
+                    // Close the prompt and use the saved state as the source of truth.
+                    window._aicliBackendMigrationStartedHere = true;
+                    if (typeof swal.close === 'function') swal.close();
+                    updateBackendMigrationStatus();
                 });
             });
         }).fail(function() { restoreEngine(); swal("Error", "Could not check the change. Try again.", "error"); });
@@ -378,6 +385,55 @@ function updateMigrateOverlay(step, progress, file) {
 
 function hideMigrateOverlay() {
     $('#aicli-migrate-overlay').fadeOut(200, function() { $(this).remove(); });
+}
+
+function renderBackendMigrationStatus(s) {
+    var box = $('#aicli-backend-migration-status');
+    if (!box.length) return;
+    if (!s || !s.status || s.status === 'idle' || sessionStorage.getItem('aicli_backend_migration_dismissed') === '1') {
+        box.prop('hidden', true).empty();
+        return;
+    }
+    box.prop('hidden', false).empty();
+    var running = s.status === 'running' || s.status === 'queued';
+    var title = s.status === 'queued' ? 'Storage migration starting'
+        : (s.phase === 'rolling_back' ? 'Restoring storage after a conversion problem'
+        : (running ? 'Storage migration in progress'
+        : (s.status === 'complete' ? 'Storage migration complete' : 'Storage migration needs attention')));
+    var target = s.target === 'passthrough' ? 'Plain directories' : (s.target === 'layering' ? 'SquashFS layers + zram' : '');
+    $('<strong>').text(title).appendTo(box);
+    $('<div>').text((target ? 'Target: ' + target + '. ' : '') + (s.message || '')).appendTo(box);
+    if (running && Number(s.total) > 0) {
+        var current = s.current ? 'Current item: ' + s.current + '. ' : '';
+        $('<div>').text(current + Number(s.completed || 0) + ' of ' + Number(s.total) + ' complete.').appendTo(box);
+        $('<progress>').attr({ max: Number(s.total), value: Number(s.completed || 0), 'aria-label': 'Storage migration progress' }).css({ width: '100%', marginTop: '6px' }).appendTo(box);
+        $('select[name="storage_backend_mode"]').prop('disabled', true);
+    } else if (running) {
+        $('select[name="storage_backend_mode"]').prop('disabled', true);
+        $('<div>').text(s.message || 'Workspaces cannot open until the migration finishes.').appendTo(box);
+    } else {
+        $('select[name="storage_backend_mode"]').prop('disabled', false);
+        if (s.status === 'complete' && target) $('select[name="storage_backend_mode"]').val(s.target);
+        if ((s.status === 'error' || s.status === 'interrupted') && s.from) {
+            $('select[name="storage_backend_mode"]').val(s.from);
+            window._aicliEngineBusy = false;
+        }
+        if (s.status === 'complete') window._aicliEngineBusy = false;
+        if (s.status === 'complete' && window._aicliBackendMigrationStartedHere) {
+            window._aicliBackendMigrationStartedHere = false;
+            setTimeout(safeReload, 800);
+        }
+        $('<button type="button">').text('Dismiss').css({ marginTop: '6px' }).on('click', function() {
+            sessionStorage.setItem('aicli_backend_migration_dismissed', '1');
+            box.prop('hidden', true).empty();
+        }).appendTo(box);
+    }
+}
+
+function updateBackendMigrationStatus() {
+    if (!$('#aicli-backend-migration-status').length) return;
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=storage_backend_migration_status&csrf_token=' + encodeURIComponent(csrf))
+        .done(renderBackendMigrationStatus);
 }
 
 // The shared folder browser. HOME_BACKUP.md "2026-09-24 follow-up": it has a
@@ -621,6 +677,10 @@ $(function() {
     refreshLogContexts(); // R-07 (#1370): seed the Debug Console context filter dropdown
     refreshStats();
     resetStatsTimer();
+    updateBackendMigrationStatus();
+    setInterval(function() {
+        if (document.visibilityState === 'visible') updateBackendMigrationStatus();
+    }, 2500);
     // EVENT_FIRST_RECONCILIATION.md fact table: the debug log tail has no push
     // behind it (low value to push) — poll only while the tab is actually
     // visible AND the Debug Console tab is the one showing, never into a

@@ -67,41 +67,42 @@
     }
 
     // Pure: the button of one action. A disabled action keeps its reason in the tooltip.
-    function buttonHtml(part, a) {
-        var off = !a.enabled;
+    function buttonHtml(part, a, migrationBusy) {
+        var off = !a.enabled || migrationBusy;
+        var reason = migrationBusy ? 'Wait for the storage migration to finish.' : (a.reason || 'Not available now.');
         return '<button type="button" class="aicli-bs-act" data-testid="boot-space-action" data-action-id="' + esc(a.id) + '" data-part-key="' + esc(part.key) + '"' +
-            (off ? ' aria-disabled="true" title="' + esc(a.reason || 'Not available now.') + '"' : ' title="' + esc(a.label) + '"') +
+            (off ? ' disabled aria-disabled="true" title="' + esc(reason) + '"' : ' title="' + esc(a.label) + '"') +
             ' style="font-size:11px; padding:3px 10px; white-space:nowrap; margin:0; ' + (off ? 'opacity:0.4; cursor:not-allowed;' : '') + '">' + esc(a.label) + '</button>';
     }
 
     // Pure: the HTML of one line.
-    function lineHtml(part, maxBytes) {
+    function lineHtml(part, maxBytes, migrationBusy) {
         var w = maxBytes > 0 ? Math.max(part.bytes > 0 ? 2 : 0, Math.round((part.bytes / maxBytes) * 100)) : 0;
         var color = COLORS[part.group] || '#999';
         var acts = '';
-        if (part.action) acts += buttonHtml(part, part.action);
-        (part.extra_actions || []).forEach(function (a) { acts += ' ' + buttonHtml(part, a); });
+        if (part.action) acts += buttonHtml(part, part.action, migrationBusy);
+        (part.extra_actions || []).forEach(function (a) { acts += ' ' + buttonHtml(part, a, migrationBusy); });
         var note = part.note ? '<div style="font-size:10px; opacity:0.6; margin-top:1px;">' + esc(part.note) + '</div>' : '';
         var link = part.setting_link
             ? ' <a href="#" class="aicli-bs-setting" data-setting="' + esc(part.setting_link) + '" data-testid="boot-space-setting-link" style="font-size:10px;">Cache setting</a>' : '';
-        return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; padding:7px 0; border-top:1px solid var(--border-color, #333);">' +
-            '<div style="flex:1 1 220px; min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + link + note + '</div>' +
-            '<div style="flex:1 1 140px; min-width:100px;"><div class="stat-bar-wrap" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
-            '<div data-testid="boot-space-size" style="flex:0 0 70px; text-align:right; font-size:12px; font-weight:700;">' + human(part.bytes) + '</div>' +
-            '<div style="flex:0 0 auto; min-width:150px; text-align:right;">' + acts + '</div>' +
+        return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:grid; grid-template-columns:minmax(260px,1.1fr) minmax(140px,1fr) 70px minmax(120px,max-content); align-items:center; gap:8px 14px; padding:8px 0; border-top:1px solid var(--border-color, #333);">' +
+            '<div style="min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + link + note + '</div>' +
+            '<div style="min-width:100px;"><div class="stat-bar-wrap" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
+            '<div data-testid="boot-space-size" style="text-align:right; font-size:12px; font-weight:700;">' + human(part.bytes) + '</div>' +
+            '<div style="text-align:right;">' + acts + '</div>' +
         '</div>';
     }
 
     // Pure: the warning about the agent temporary folders in RAM (AGENT_TEMP_FOLDER.md R4). '' when there is no warning.
     // The numbers come from the background measure (data.agent_tmp). The button opens the dialog of fragment 60.
-    function tmpWarnHtml(t) {
+    function tmpWarnHtml(t, migrationBusy) {
         if (!t || !t.warn) return '';
         var closed = Number(t.closed_bytes) || 0;
-        var canClean = closed > 0;
+        var canClean = closed > 0 && !migrationBusy;
         return '<div data-testid="boot-space-tmp-warn" style="padding:10px; margin-bottom:12px; border:1px solid #ff8c00; border-radius:4px; background:rgba(255,140,0,0.08); font-size:12px;">' +
             '<div style="font-weight:600; margin-bottom:3px;"><i class="fa fa-exclamation-triangle"></i> Temporary files of agents use ' + human(t.ram_bytes) + ' of RAM</div>' +
             '<div style="opacity:0.85; margin-bottom:6px;">The warning limit is ' + human((Number(t.warn_mb) || 0) * 1048576) + '. Sessions that no longer run hold ' + human(closed) + ' of it. A large temporary folder in RAM can make typing slow. The setting Agent temporary folder (Configuration tab) can move new sessions to a pool.</div>' +
-            '<button type="button" class="aicli-bs-tmp-act" data-testid="boot-space-tmp-clean"' + (canClean ? '' : ' aria-disabled="true" title="No closed session holds temporary files."') +
+            '<button type="button" class="aicli-bs-tmp-act" data-testid="boot-space-tmp-clean"' + (canClean ? '' : ' disabled aria-disabled="true" title="' + (migrationBusy ? 'Wait for the storage migration to finish.' : 'No closed session holds temporary files.') + '"') +
             ' style="font-size:11px; padding:3px 10px; margin:0; ' + (canClean ? '' : 'opacity:0.4; cursor:not-allowed;') + '">Clean up temporary files of closed sessions</button></div>';
     }
 
@@ -111,23 +112,32 @@
         var max = 0;
         parts.forEach(function (p) { if (p.bytes > max) max = p.bytes; });
         var measuring = !!(data && data.measuring);
+        var migration = data && data.storage_migration;
+        var migrationBusy = !!(migration && (migration.status === 'queued' || migration.status === 'running'));
         var stamp;
         if (data && data.has_data) stamp = 'Measured at <b data-testid="boot-space-measured">' + clock(data.measured_at) + '</b>';
         else stamp = '<span data-testid="boot-space-measured">Not measured yet.</span>';
         if (measuring) stamp += ' &middot; <i class="fa fa-spinner fa-spin"></i> measuring now&hellip;';
         var rows = parts.length
-            ? parts.map(function (p) { return lineHtml(p, max); }).join('')
+            ? parts.map(function (p) { return lineHtml(p, max, migrationBusy); }).join('')
             : '<div style="font-size:12px; opacity:0.7; padding:8px 0;">' + (measuring ? 'The sizes are being measured. This takes a few seconds.' : 'No sizes yet. Press Measure now.') + '</div>';
-        return '<div class="aicli-card" data-testid="boot-space-card" id="boot-space">' +
+        var migrationBanner = '';
+        if (migrationBusy) {
+            var progress = Number(migration.total) > 0 ? (Number(migration.completed || 0) + ' of ' + Number(migration.total) + ' storage items complete.') : 'The migration is starting.';
+            migrationBanner = '<div data-testid="boot-space-migration" role="status" aria-live="polite" style="padding:10px 12px; margin:0 0 10px; border:1px solid #e6a23c; border-radius:4px; background:rgba(230,162,60,.12); font-size:12px;"><strong>' + (migration.status === 'queued' ? 'Storage migration starting' : 'Storage migration in progress') + '</strong><div>' + esc(migration.message || 'Workspaces and storage actions are paused until this finishes.') + '</div><div>' + esc(progress) + '</div>' + (Number(migration.total) > 0 ? '<progress max="' + Number(migration.total) + '" value="' + Number(migration.completed || 0) + '" aria-label="Storage migration progress" style="width:100%; margin-top:6px;"></progress>' : '') + '</div>';
+        }
+        return '<style>@media(max-width:760px){#aicli-boot-space-card .aicli-bs-line{grid-template-columns:minmax(0,1fr) auto !important;}#aicli-boot-space-card .aicli-bs-line>div:first-child,#aicli-boot-space-card .aicli-bs-line>div:last-child{grid-column:1/-1;}#aicli-boot-space-card .aicli-bs-line>div:last-child{justify-self:end;}}</style>' +
+            '<div class="aicli-card" data-testid="boot-space-card" id="boot-space">' +
             '<div class="aicli-card-header"><i class="fa fa-hdd-o text-orange-500"></i> Boot disk space</div>' +
             '<div class="aicli-card-body">' +
                 '<p style="margin:0 0 10px; font-size:12px; opacity:0.75;">Where the space on the boot disk goes. The sizes are the space really used on disk, so compression is counted. The largest part is first.</p>' +
                 diskHtml(data && data.disk) +
-                tmpWarnHtml(data && data.agent_tmp) +
+                migrationBanner +
+                tmpWarnHtml(data && data.agent_tmp, migrationBusy) +
                 rows +
                 '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px; font-size:11px; opacity:0.85;">' +
                     '<span>' + stamp + '</span>' +
-                    '<button type="button" id="aicli-bs-measure" data-testid="boot-space-measure-now" style="font-size:11px; padding:3px 10px; margin:0;"' + (measuring ? ' disabled' : '') + '>Measure now</button>' +
+                    '<button type="button" id="aicli-bs-measure" data-testid="boot-space-measure-now" style="font-size:11px; padding:3px 10px; margin:0;"' + ((measuring || migrationBusy) ? ' disabled title="Wait for the storage migration to finish."' : '') + '>Measure now</button>' +
                 '</div>' +
             '</div></div>';
     }
@@ -149,7 +159,7 @@
             if (!r || r.status !== 'ok') return;
             draw(r);
             stopPoll();
-            if (r.measuring) state.pollTimer = setTimeout(load, 3000);
+            if (r.measuring || (r.storage_migration && ['queued', 'running'].indexOf(r.storage_migration.status) !== -1)) state.pollTimer = setTimeout(load, 3000);
         }).fail(function (x, s, e) {
             // R-175: a failed read ends the "measuring" wait, so Measure now works again.
             state.loading = false;
@@ -190,9 +200,12 @@
     // 10 minutes or missing.
     reg.stampHtml = function (r) {
         var stale = !r || !r.has_data || !!r.stale;
+        var migration = r && r.storage_migration;
+        var migrationBusy = !!(migration && (migration.status === 'queued' || migration.status === 'running'));
         var h = '<div data-testid="bootspace-dialog-stamp" data-stale="' + (stale ? '1' : '0') + '" style="margin-top:8px; font-size:11px; opacity:0.85;">' + esc(ageText(r));
         if (r && r.measuring) h += ' <i class="fa fa-spinner fa-spin"></i> measuring now&hellip;';
-        if (stale && !(r && r.measuring)) {
+        if (migrationBusy) h += ' Storage actions are paused until the migration finishes.';
+        if (stale && !(r && r.measuring) && !migrationBusy) {
             h += ' <button type="button" class="aicli-bs-dialog-measure" data-testid="bootspace-dialog-measure-now" style="font-size:11px; padding:2px 8px; margin:0 0 0 6px;">Measure now</button>';
         }
         return h + '</div>';

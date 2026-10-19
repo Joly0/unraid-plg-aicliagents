@@ -1183,6 +1183,15 @@ class ProcessManager {
      * Terminates all AI-related processes (Aggressive).
      */
     public static function evictAll() {
+        self::evictAllWithSuppression(true);
+    }
+
+    /** Stop sessions for a storage conversion without treating it as a user close. */
+    public static function evictAllForStorageMigration() {
+        self::evictAllWithSuppression(false);
+    }
+
+    private static function evictAllWithSuppression(bool $suppressAutoLaunch) {
         LogService::log("EVICTOR: Terminating ALL AI sessions...", LogService::LOG_WARN, "ProcessManager");
         // WORKSPACE_LIFECYCLE_EVENTS.md: a global evict has no per-id capture
         // path like evictTargeted's stopTerminal loop, so read the ids about
@@ -1210,7 +1219,7 @@ class ProcessManager {
             // close everything. Auto-launch must not bring these workspaces
             // straight back on the next page load. See
             // docs/specs/2026-04-27-auto-launch-workspaces-design.md.
-            AutoLaunchSuppression::suppress($id);
+            if ($suppressAutoLaunch) AutoLaunchSuppression::suppress($id);
         }
     }
 

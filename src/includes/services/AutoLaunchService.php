@@ -84,6 +84,7 @@ class AutoLaunchService
                 if ($sid !== '') $defer[$sid] = true;
             }
         }
+
         return $defer;
     }
 
@@ -202,6 +203,24 @@ class AutoLaunchService
             }
         }
 
+        // A storage-engine migration closes sessions and changes the storage
+        // behind every agent. Hold the shared side of its lock for the whole
+        // sweep so a migration cannot start between the running check and the
+        // terminal start. Conversely, the migration's exclusive lock makes a
+        // sweep return here without launching agents.
+        if (class_exists(StorageBackendMigrationService::class)) {
+            StorageBackendMigrationService::status(); // Reconcile a worker that stopped before it held the lock.
+            $backendGuard = StorageBackendMigrationService::acquireLaunchGuard(false);
+            if ($backendGuard === false || StorageBackendMigrationService::isMigrationInProgress()) {
+                StorageBackendMigrationService::releaseLaunchGuard($backendGuard);
+                if ($lockFh !== false) { @flock($lockFh, LOCK_UN); @fclose($lockFh); }
+                self::log("Auto-launch deferred: global storage migration is running (trigger=$reason)", AICLI_LOG_INFO);
+                return ['launched' => 0, 'skipped' => 0, 'failed' => 0, 'sessions' => [], 'busy' => true];
+            }
+        } else {
+            $backendGuard = false;
+        }
+
         $launched = 0;
         $skipped  = 0;
         $failed   = 0;
@@ -211,6 +230,7 @@ class AutoLaunchService
             $workspaces = ConfigService::getWorkspaces();
         } catch (\Throwable $e) {
             self::log("getWorkspaces failed: " . $e->getMessage(), AICLI_LOG_WARN);
+            if (class_exists(StorageBackendMigrationService::class)) StorageBackendMigrationService::releaseLaunchGuard($backendGuard);
             if ($lockFh !== false) { @flock($lockFh, LOCK_UN); @fclose($lockFh); }
             return ['launched' => 0, 'skipped' => 0, 'failed' => 1, 'sessions' => []];
         }
@@ -388,6 +408,7 @@ class AutoLaunchService
             @flock($lockFh, LOCK_UN);
             @fclose($lockFh);
         }
+        if (class_exists(StorageBackendMigrationService::class)) StorageBackendMigrationService::releaseLaunchGuard($backendGuard);
 
         return [
             'launched' => $launched,

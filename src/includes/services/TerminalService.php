@@ -32,14 +32,28 @@ class TerminalService {
      * @return array{ok:bool,reason:string}
      */
     public static function startTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli', string $origin = 'interactive', ?float $lockWaitSeconds = null): array {
-        if (!SessionLaunchLock::acquire((string)$id, $lockWaitSeconds ?? SessionLaunchLock::START_WAIT_SECONDS)) {
-            LogService::log("Start of $id refused: another start, close or restart of this workspace did not finish in time. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
-            return ['ok' => false, 'reason' => 'lock_timeout'];
+        // Every start path reaches this method, including manual workspace opens,
+        // retries and auto-launch. Take the shared global lock before the per-
+        // workspace lock so a storage migration can keep all sessions closed.
+        StorageBackendMigrationService::status(); // Reconcile a worker that stopped before it held the lock.
+        $migrationLock = StorageBackendMigrationService::acquireLaunchGuard(false);
+        if ($migrationLock === false || StorageBackendMigrationService::isMigrationInProgress()) {
+            StorageBackendMigrationService::releaseLaunchGuard($migrationLock);
+            LogService::log("Start of $id refused: storage is being migrated. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
+            return ['ok' => false, 'reason' => 'storage_migration'];
         }
         try {
-            return self::startTerminalLocked($id, $path, $chatId, $agentId, $origin);
+            if (!SessionLaunchLock::acquire((string)$id, $lockWaitSeconds ?? SessionLaunchLock::START_WAIT_SECONDS)) {
+                LogService::log("Start of $id refused: another start, close or restart of this workspace did not finish in time. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
+                return ['ok' => false, 'reason' => 'lock_timeout'];
+            }
+            try {
+                return self::startTerminalLocked($id, $path, $chatId, $agentId, $origin);
+            } finally {
+                SessionLaunchLock::release((string)$id);
+            }
         } finally {
-            SessionLaunchLock::release((string)$id);
+            StorageBackendMigrationService::releaseLaunchGuard($migrationLock);
         }
     }
 
@@ -136,6 +150,7 @@ class TerminalService {
     public static function startFailureSentence(string $reason, string $agentName): string
     {
         switch ($reason) {
+            case 'storage_migration':    return 'Storage is being converted. Wait for the migration to finish, then try again.';
             case 'agent_unknown':       return 'This agent is not installed on this server.';
             case 'no_terminal_server':  return 'The terminal server program is missing.';
             case 'agent_storage':       return "The storage for $agentName could not be mounted.";

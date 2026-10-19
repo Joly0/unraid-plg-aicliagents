@@ -53,6 +53,7 @@ class BootSpaceHandler
     public static function measure(?string $method = null, ?callable $launcher = null): array
     {
         if (!self::isPost($method)) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
+        if (self::migrationActive()) return self::migrationRefusal();
         $started = BootSpaceService::startMeasure($launcher);
         return ['status' => 'ok', 'measuring' => $started || BootSpaceService::isMeasuring(), 'started' => $started];
     }
@@ -64,6 +65,7 @@ class BootSpaceHandler
     public static function cleanAgentTmp(?string $method = null, array $seams = []): array
     {
         if (!self::isPost($method)) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
+        if (self::migrationActive()) return self::migrationRefusal();
         aicli_log("AJAX Request: Clean up temporary files of closed sessions", AICLI_LOG_INFO);
         require_once __DIR__ . '/../services/TempCleanupJobService.php';
         $op = \AICliAgents\Services\TempCleanupJobService::OP;
@@ -84,6 +86,7 @@ class BootSpaceHandler
     public static function removeLeftover(?string $method = null, ?string $key = null, array $seams = []): array
     {
         if (!self::isPost($method)) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
+        if (self::migrationActive()) return self::migrationRefusal();
         $key = trim($key ?? (string)($_REQUEST['key'] ?? ''));
         aicli_log("AJAX Request: Remove left-over item $key", AICLI_LOG_INFO);
         $r = BootSpaceService::removeLeftover($key, $seams);
@@ -92,5 +95,16 @@ class BootSpaceHandler
             BootSpaceService::startMeasure($seams['launcher'] ?? null);
         }
         return $r;
+    }
+
+    private static function migrationActive(): bool
+    {
+        require_once __DIR__ . '/../services/StorageBackendMigrationService.php';
+        return \AICliAgents\Services\StorageBackendMigrationService::isMigrationInProgress();
+    }
+
+    private static function migrationRefusal(): array
+    {
+        return ['status' => 'error', 'reason' => 'storage_migration', 'message' => 'Wait for the storage migration to finish before starting another storage action.'];
     }
 }

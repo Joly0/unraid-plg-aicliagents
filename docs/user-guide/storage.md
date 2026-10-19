@@ -159,6 +159,24 @@ The plugin converts one agent at a time. It closes only the workspaces that run 
 
 The old layers move to a backup folder. They stay for 14 days, then the plugin removes them. They use space until then. You can remove them sooner with **Remove** on the **Left over** line.
 
+## The setting "Persistence engine"
+
+**Persistence engine** applies to every installed agent and every home. **SquashFS layers + zram (recommended)** stores changes in compressed layers and a writable layer. **Plain directories (advanced)** stores files directly in ordinary folders.
+
+### Change the persistence engine
+
+> [!WARNING]
+> This change closes open workspaces and converts all installed agents and homes. The conversion can take several minutes. Keep the server running until the status says the migration is complete.
+
+1. Open the **Configuration** tab.
+2. Change **Persistence engine**. Expect: the dialog **Change persistence engine?** explains the conversion.
+3. Press **Migrate all storage**. Expect: the confirmation closes when the conversion starts. A status appears beside the setting. It shows the target engine, current item and number of completed items.
+4. Wait for **Storage migration complete**. The saved setting changes only after all items convert.
+
+You can open another page while the conversion runs. The **Boot disk space** card also shows the progress. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Home Storage** to see the same status. The page does not block navigation.
+
+If another storage job is using an agent or home, the plugin names that item and refuses before it closes workspaces. Wait for the job to finish, then try again. If a conversion fails after it starts, the status shows which item the plugin is restoring. The plugin keeps the previous setting when it restores the converted items. Read the final message before you try again.
+
 ## The setting "Writable layer for homes"
 
 This setting decides where the writable layer of each home lives. It applies to homes only. Agents keep their own rule.
@@ -585,6 +603,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-19** — **Persistence engine** closes its confirmation after the conversion starts. Configuration and Home Storage show saved progress, and Home Storage disables conflicting actions. Manual and automatic workspace starts wait until conversion ends. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issues #693, #694, #696 and #697.
 - **2026-10-18** — A save that is refused for lack of space says "Not enough boot disk space to save the home" in the Unraid notice, the tray and the **Persist** message, and says what to do. The plugin tests the new layer at the compression of your last layer before it refuses. The guide says that files in the `tmp` folder of a home are treated as a cache. Spec `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issues #599 and #658.
 - **2026-10-18** — A dialog or button of the Storage tab that waits for the server now shows "Could not reach the server" with the reason when the request fails. A repeated click on a job button says the job is already waiting or running. The Cancel button of a confirm dialog sends nothing. Issue #668.
 - **2026-10-18** — The Activity tray buttons **Convert to plain folders** and **Close all and tidy up** now show the reason in the row when the plugin refuses the job. Issue #656.

@@ -581,10 +581,14 @@ class BootSpaceService
         $now = $now ?? time();
         $data = self::read();
         $started = false;
-        if (self::isStale($data, $now)) $started = self::startMeasure($launcher);
+        require_once __DIR__ . '/StorageBackendMigrationService.php';
+        $migration = StorageBackendMigrationService::status();
+        $migrationActive = in_array((string)($migration['status'] ?? ''), ['queued', 'running'], true);
+        if (!$migrationActive && self::isStale($data, $now)) $started = self::startMeasure($launcher);
         $measuring = $started || self::isMeasuring($now);
         $out = $data ?? ['measured_at' => 0, 'disk' => null, 'parts' => []];
         $out['measuring'] = $measuring;
+        $out['storage_migration'] = $migration;
         $out['has_data'] = $data !== null;
         $out['age'] = $data !== null ? max(0, $now - (int)$data['measured_at']) : null;
         $out['stale'] = self::isStale($data, $now);
@@ -604,6 +608,8 @@ class BootSpaceService
     public static function meta(?array $data = null, ?int $now = null): array
     {
         $now = $now ?? time();
+        require_once __DIR__ . '/StorageBackendMigrationService.php';
+        $migration = StorageBackendMigrationService::status();
         return [
             'has_data'    => $data !== null,
             'measured_at' => $data !== null ? (int)$data['measured_at'] : 0,
@@ -611,6 +617,7 @@ class BootSpaceService
             'stale'       => self::isStale($data, $now),
             'measuring'   => self::isMeasuring($now),
             'partial'     => $data !== null && !empty($data['partial']),
+            'storage_migration' => $migration,
         ];
     }
 

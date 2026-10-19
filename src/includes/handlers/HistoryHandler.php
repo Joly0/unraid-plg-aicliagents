@@ -31,6 +31,10 @@ class HistoryHandler
 {
     public static function handle($action, $id): ?array
     {
+        if (in_array($action, ['history_move', 'history_bring_back'], true)
+            && \AICliAgents\Services\StorageBackendMigrationService::isMigrationInProgress()) {
+            return ['status' => 'error', 'reason' => 'storage_migration', 'message' => 'Wait for the storage migration to finish before moving conversation history.'];
+        }
         switch ($action) {
             case 'history_measure':    return self::measure();          // read-only
             case 'history_move':       return self::queue(HistoryJobService::OP_MOVE);

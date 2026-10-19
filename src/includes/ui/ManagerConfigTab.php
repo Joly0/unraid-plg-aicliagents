@@ -31,6 +31,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['storage_backend_mode'] ?? 'layering', 'layering', _('SquashFS layers + zram (recommended)'))?>
                                 <?=mk_option($config['storage_backend_mode'] ?? 'layering', 'passthrough', _('Plain directories (advanced)'))?>
                             </select>
+                            <div id="aicli-backend-migration-status" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:8px; padding:8px 10px; border:1px solid var(--border-color, #aaa); border-radius:4px;"></div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">One setting applies to every installed agent and home. Changing it migrates all existing storage. Plain directories write directly to the selected path; removable/USB targets require an acknowledgement and SquashFS + zram is recommended to reduce wear.</div>
                         </dd>
 
