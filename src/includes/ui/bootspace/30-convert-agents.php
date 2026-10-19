@@ -152,11 +152,14 @@
                 confirmButtonText: 'Convert',
                 cancelButtonText: 'Cancel',
                 confirmButtonColor: '#b35900',
-                closeOnConfirm: true
+                // Keep the checked inputs in the dialog until the callback reads them.
+                closeOnConfirm: false
             }, function (confirmed) {
                 if (!confirmed) { document.body.classList.remove('aicli-swal-above-tray'); return; }
                 var ids = chosenIds();
-                if (!ids.length) { document.body.classList.remove('aicli-swal-above-tray'); return; }
+                document.body.classList.remove('aicli-swal-above-tray');
+                if (typeof window.swal.close === 'function') window.swal.close();
+                if (!ids.length) return;
                 start(ids, est);
             });
             // Recount when the person ticks or unticks an agent; the Convert button is
