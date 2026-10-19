@@ -49,7 +49,7 @@ Open the **AI CLI Agents** page under Unraid's Settings menu. It has these tabs:
 | Choose the persistence engine | **Configuration** tab, field **Persistence engine** |
 | Choose how often the plugin saves | **Configuration** tab, field **Backup Interval** |
 | Choose when the plugin merges | **Configuration** tab, field **Consolidate Layer Ceiling** |
-| See where the boot disk space goes, and free it | **Home Storage** tab, card **Boot disk space** (at the top). See "Boot disk space" below. |
+| See where the boot disk space goes, and free it | **Home Storage** tab, card **Boot disk space** (at the top). It includes homes and agents from their configured storage paths. See "Boot disk space" below. |
 | See, save, merge, repair or delete a home | **Home Storage** tab, section **User Home Persistence** |
 | See the size of an agent's files | The agent's card in the **Agent Store** tab. See [Agent Store](agent-store.md). |
 | See storage warnings | The Health dot near the top of the Settings page. See [Health, Activity and troubleshooting](health-and-troubleshooting.md). |
@@ -170,12 +170,13 @@ The old layers move to a backup folder. They stay for 14 days, then the plugin r
 
 1. Open the **Configuration** tab.
 2. Change **Persistence engine**. Expect: the dialog **Change persistence engine?** explains the conversion.
-3. Press **Migrate all storage**. Expect: the confirmation closes when the conversion starts. A status appears beside the setting. It shows the target engine, current item and number of completed items.
-4. Wait for **Storage migration complete**. The saved setting changes only after all items convert.
+3. Read the space check. It uses a complete **Boot disk space** report from the last 10 minutes and current free space. It counts the new storage and the copies needed to restore the old storage for every agent and home. It keeps at least 2 GB or 10% of each disk free, whichever is larger. If the report is missing, old or incomplete, refresh it on the **Boot disk space** card. If there is not enough room, the message gives the required and available space. No workspace closes and no data changes. The status keeps the refusal message.
+4. Press **Migrate all storage**. Expect: the confirmation closes when the conversion starts. A status appears beside the setting. It shows the target engine, current item and number of completed items.
+5. Wait for **Storage migration complete**. The saved setting changes only after all items convert.
 
 You can open another page while the conversion runs. The **Boot disk space** card also shows the progress. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Home Storage** to see the same status. The page does not block navigation.
 
-If another storage job is using an agent or home, the plugin names that item and refuses before it closes workspaces. Wait for the job to finish, then try again. If a conversion fails after it starts, the status shows which item the plugin is restoring. The plugin keeps the previous setting when it restores the converted items. Read the final message before you try again.
+If another storage job is using an agent or home, the plugin names that item and refuses before it closes workspaces. Wait for the job to finish, then try again. If a conversion fails after it starts, the status names the item and gives a short reason. The Debug Console keeps the lower-level detail. The plugin keeps the previous setting when it restores the converted items. Read the final message before you try again.
 
 ## The setting "Writable layer for homes"
 
@@ -603,6 +604,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-20** — The **Boot disk space** report measures homes and agents from their configured storage paths. The **Persistence engine** confirmation checks the combined space for new storage and rollback copies. It gives the required and available space when it refuses, and saves the reason in the status. A failed conversion shows a short reason and keeps the exit code and command detail in the Debug Console. Specs `docs/specs/BOOT_DISK_SPACE.md` and `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issues #699 and #701.
 - **2026-10-19** — **Persistence engine** closes its confirmation after the conversion starts. Configuration and Home Storage show saved progress, and Home Storage disables conflicting actions. Manual and automatic workspace starts wait until conversion ends. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issues #693, #694, #696 and #697.
 - **2026-10-18** — A save that is refused for lack of space says "Not enough boot disk space to save the home" in the Unraid notice, the tray and the **Persist** message, and says what to do. The plugin tests the new layer at the compression of your last layer before it refuses. The guide says that files in the `tmp` folder of a home are treated as a cache. Spec `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issues #599 and #658.
 - **2026-10-18** — A dialog or button of the Storage tab that waits for the server now shows "Could not reach the server" with the reason when the request fails. A repeated click on a job button says the job is already waiting or running. The Cancel button of a confirm dialog sends nothing. Issue #668.
