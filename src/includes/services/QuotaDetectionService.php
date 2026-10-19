@@ -24,6 +24,8 @@ final class QuotaDetectionService
     private const CODEX_CLOCK_RESET = '~(?:try\s+again|reset|resets)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s+\(([^)]+)\))?~iu';
     private const CODEX_DATE_RESET = '~(?:try\s+again|reset|resets)\s+(?:at\s+)?([A-Z][a-z]{2})[a-z]{0,6}\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?(?:\s+(20\d{2}))?,?\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s+\(([^)]+)\))?~iu';
     private const CLAUDE_RESET = '~You\'ve\s+hit\s+your\s+weekly\s+limit\s*·\s*resets\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*([ap])m\s+\(([^)]+)\)~iu';
+    // A reset with a time but no date ("resets 5am (Australia/Sydney)"): the next 5am in that zone.
+    private const CLAUDE_CLOCK_RESET = '~You(?:\'|’)?ve\s+hit\s+your\s+(?:weekly\s+)?limit\s*·\s*resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap])m(?:\s+\(([^)]+)\))?~iu';
     private const CLAUDE_NATIVE_WAIT = '~Claude\s+Code\s+will\s+continue\s+automatically\s+at\s+([A-Z][a-z]{2})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*([ap])m(?:\s+\(([^)]+)\))?~iu';
     private const CLAUDE_NATIVE_CANCELLED = '~Automatic\s+continue\s+cancelled~iu';
 
@@ -74,6 +76,7 @@ final class QuotaDetectionService
             ['agent' => 'codex-cli', 'kind' => 'quota', 'id' => 'codex-clock-reset', 're' => self::CODEX_CLOCK_RESET],
             ['agent' => 'codex-cli', 'kind' => 'quota', 'id' => 'codex-date-reset', 're' => self::CODEX_DATE_RESET],
             ['agent' => 'claude-code', 'kind' => 'quota', 'id' => 'claude-weekly-reset', 're' => self::CLAUDE_RESET],
+            ['agent' => 'claude-code', 'kind' => 'quota', 'id' => 'claude-clock-reset', 're' => self::CLAUDE_CLOCK_RESET],
             ['agent' => 'claude-code', 'kind' => 'quota', 'id' => 'claude-native-wait', 're' => self::CLAUDE_NATIVE_WAIT],
         ];
         foreach (self::OPENCODE_AGENTS as $a) {
@@ -529,6 +532,18 @@ final class QuotaDetectionService
                 'reason' => 'Claude reported a native quota reset; provider-owned waiting remains separate from plugin scheduling.',
                 'fingerprint' => self::fingerprint($text, 'claude-reset'),
                 'label' => trim((string)$m[1] . ' ' . $m[2] . ', ' . $m[3] . ($m[4] !== '' ? ':' . $m[4] : '') . strtolower((string)$m[5]) . 'm (' . $m[6] . ')'),
+            ];
+            if ($at !== null) $d['at'] = $at;
+            return $d;
+        }
+        if (preg_match(self::CLAUDE_CLOCK_RESET, $text, $m)) {
+            $at = self::nextClockTime($now, (int)$m[1], (int)($m[2] ?: 0), (string)$m[3], (string)($m[4] ?? ''));
+            $d = [
+                'source' => 'native-agent-owned',
+                'nativeState' => 'reset',
+                'reason' => 'Claude reported a native quota reset; provider-owned waiting remains separate from plugin scheduling.',
+                'fingerprint' => self::fingerprint($text, 'claude-clock-reset'),
+                'label' => trim((string)$m[1] . ($m[2] !== '' ? ':' . $m[2] : '') . strtolower((string)$m[3]) . 'm' . (!empty($m[4]) ? ' (' . $m[4] . ')' : '')),
             ];
             if ($at !== null) $d['at'] = $at;
             return $d;
