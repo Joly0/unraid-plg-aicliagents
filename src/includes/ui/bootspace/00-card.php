@@ -85,7 +85,7 @@
         var note = part.note ? '<div style="font-size:10px; opacity:0.6; margin-top:1px;">' + esc(part.note) + '</div>' : '';
         var link = part.setting_link
             ? ' <a href="#" class="aicli-bs-setting" data-setting="' + esc(part.setting_link) + '" data-testid="boot-space-setting-link" style="font-size:10px;">Cache setting</a>' : '';
-        return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:grid; grid-template-columns:minmax(260px,1.1fr) minmax(140px,1fr) 70px minmax(120px,max-content); align-items:center; gap:8px 14px; padding:8px 0; border-top:1px solid var(--border-color, #333);">' +
+        return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:grid; grid-template-columns:minmax(240px,0.7fr) minmax(180px,1.3fr) 70px minmax(120px,max-content); align-items:center; gap:8px 14px; padding:8px 0; border-top:1px solid var(--border-color, #333);">' +
             '<div style="min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + link + note + '</div>' +
             '<div style="min-width:100px;"><div class="stat-bar-wrap" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
             '<div data-testid="boot-space-size" style="text-align:right; font-size:12px; font-weight:700;">' + human(part.bytes) + '</div>' +
