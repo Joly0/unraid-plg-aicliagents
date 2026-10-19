@@ -157,9 +157,14 @@
             }, function (confirmed) {
                 if (!confirmed) { document.body.classList.remove('aicli-swal-above-tray'); return; }
                 var ids = chosenIds();
-                document.body.classList.remove('aicli-swal-above-tray');
-                if (typeof window.swal.close === 'function') window.swal.close();
-                if (!ids.length) return;
+                if (!ids.length) {
+                    document.body.classList.remove('aicli-swal-above-tray');
+                    if (typeof window.swal.close === 'function') window.swal.close();
+                    return;
+                }
+                // Do not close this dialog: the result dialog of start() replaces it.
+                // A close() just before that swal() hides the new dialog when the
+                // answer comes back inside the close animation.
                 start(ids, est);
             });
             // Recount when the person ticks or unticks an agent; the Convert button is
