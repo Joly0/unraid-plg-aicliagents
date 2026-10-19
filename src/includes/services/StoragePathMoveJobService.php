@@ -149,7 +149,7 @@ class StoragePathMoveJobService
 
     /**
      * Run a queued job. Returns the process exit code: 0 done, 1 refused or failed.
-     * @param array<string,callable> $seams test seams: lock (fn(): resource|null), marker (fn(): bool),
+     * @param array<string,callable> $seams test seams: lock (fn(): resource|null), marker (fn(): bool), backend_active (fn(): bool),
      *        get_job (fn(string): ?array), move (fn(string $newAgent, string $newHome): array),
      *        fail_tray (fn(string $message): void)
      */
@@ -160,14 +160,21 @@ class StoragePathMoveJobService
             return self::refuse($jobId, 'The move has no saved options, so nothing was moved.', $seams);
         }
         require_once __DIR__ . '/FileStorage.php';
+        require_once __DIR__ . '/StorageBackendMigrationService.php';
         $lock = isset($seams['lock']) ? ($seams['lock'])() : FileStorage::acquireMigrationLock();
         if ($lock === null || $lock === false) {
             return self::refuse($jobId, 'Another storage move is already running. Nothing was moved.', $seams);
         }
         $trayHandled = false;
         try {
-            $inProgress = isset($seams['marker']) ? (bool)($seams['marker'])() : FileStorage::isMigrationInProgress();
-            if ($inProgress) {
+            $backendInProgress = isset($seams['backend_active'])
+                ? (bool)($seams['backend_active'])()
+                : (FileStorage::isBackendMigrationInProgress() || StorageBackendMigrationService::isMigrationInProgress());
+            $inProgress = !$backendInProgress
+                && (isset($seams['marker']) ? (bool)($seams['marker'])() : FileStorage::isMigrationInProgress());
+            if ($backendInProgress) {
+                $res = ['status' => 'error', 'message' => 'A storage-engine migration is running. Wait for it to finish before moving storage.'];
+            } elseif ($inProgress) {
                 $res = ['status' => 'error', 'message' => 'An earlier storage move did not finish. It must finish or resume first.'];
             } else {
                 $unfinished = self::unfinishedSaves((array)($opts['pre_jobs'] ?? []), $seams['get_job'] ?? null);

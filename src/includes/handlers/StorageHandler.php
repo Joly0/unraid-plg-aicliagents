@@ -120,7 +120,7 @@ class StorageHandler {
             'consolidate_storage', 'convert_storage', 'remove_old_versions', 'clear_home_caches', 'convert_agents',
             'backup_home', 'set_home_backup_setting', 'restore_home', 'delete_backup_snapshot',
             'graduate_storage', 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
-            'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts', 'execute_upper_mode',
+            'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts', 'execute_migrate', 'execute_upper_mode',
         ];
         if (!in_array($action, $mutating, true)) return false;
         return \AICliAgents\Services\StorageBackendMigrationService::isMigrationInProgress();
@@ -2342,6 +2342,7 @@ class StorageHandler {
     public static function executeMigrateExclusive(array $seams = []): array {
         require_once __DIR__ . '/../services/FileStorage.php';
         require_once __DIR__ . '/../services/StoragePathMoveJobService.php';
+        require_once __DIR__ . '/../services/StorageBackendMigrationService.php';
         $config = getAICliConfig();
         foreach (['old_agent_path' => 'agent_storage_path', 'old_home_path' => 'home_storage_path'] as $param => $key) {
             if (isset($_GET[$param]) && (string)$_GET[$param] !== (string)($config[$key] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence')) {
@@ -2355,16 +2356,24 @@ class StorageHandler {
             return ['status' => 'error', 'message' => 'Another storage move is already running. Wait for it to finish.'];
         }
         try {
+            if (self::blockedByBackendMigration('execute_migrate')) {
+                return ['status' => 'error', 'reason' => 'storage_migration', 'message' => 'Wait for the storage migration to finish before moving storage.'];
+            }
+            if (\AICliAgents\Services\FileStorage::isBackendMigrationInProgress()) {
+                return ['status' => 'error', 'reason' => 'storage_migration', 'message' => 'Wait for the storage migration to finish before moving storage.'];
+            }
             if (\AICliAgents\Services\FileStorage::isMigrationInProgress()) {
                 return ['status' => 'error', 'message' => 'An earlier storage move did not finish. It must finish or resume first.'];
             }
+            if (\AICliAgents\Services\StoragePathMoveJobService::hasPending()) {
+                return ['status' => 'error', 'message' => 'Another storage move is already queued. Wait for it to finish.'];
+            }
+            // Keep the shared lock until queuePathMove() has created its claim.
+            // An engine migration then sees the pending move before it can queue.
+            return self::queuePathMove($config, (string)($_GET['agent_storage_path'] ?? ''), (string)($_GET['home_storage_path'] ?? ''), $seams);
         } finally {
             \AICliAgents\Services\FileStorage::releaseMigrationLock($lock);
         }
-        if (\AICliAgents\Services\StoragePathMoveJobService::hasPending()) {
-            return ['status' => 'error', 'message' => 'Another storage move is already queued. Wait for it to finish.'];
-        }
-        return self::queuePathMove($config, (string)($_GET['agent_storage_path'] ?? ''), (string)($_GET['home_storage_path'] ?? ''), $seams);
     }
 
     /**

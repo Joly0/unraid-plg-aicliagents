@@ -58,28 +58,41 @@ class PendingAgentUpgradeService
     public static function queue(string $agentId, string $version, string $backupDest,
                                  int $activeSessions, array $seams = [], string $reason = ''): array
     {
-        if (self::safeId($agentId) === '') {
-            return ['status' => 'error', 'message' => 'Invalid agent ID', 'active_sessions' => 0];
+        $storageGuard = StorageBackendMigrationService::acquireLaunchGuard(false);
+        if ($storageGuard === false) {
+            $refusal = StorageBackendMigrationService::migrationRefusal();
+            return $refusal !== null
+                ? ($refusal + ['active_sessions' => $activeSessions])
+                : ['status' => 'error', 'message' => 'A storage change is in progress. Wait for it to finish, then try again.', 'active_sessions' => $activeSessions];
         }
-        @mkdir(self::baseDir(), 0755, true);
-        $request = [
-            'schema' => 1,
-            'agentId' => $agentId,
-            'version' => $version,
-            'backup_dest' => $backupDest,
-            'requested_at' => time(),
-        ];
-        if (!AtomicWriteService::writeJson(self::requestPath($agentId), $request)) {
-            return ['status' => 'error', 'message' => 'Could not save queued upgrade', 'active_sessions' => $activeSessions];
+        try {
+            $refusal = StorageBackendMigrationService::migrationRefusal();
+            if ($refusal !== null) return $refusal + ['active_sessions' => $activeSessions];
+            if (self::safeId($agentId) === '') {
+                return ['status' => 'error', 'message' => 'Invalid agent ID', 'active_sessions' => 0];
+            }
+            @mkdir(self::baseDir(), 0755, true);
+            $request = [
+                'schema' => 1,
+                'agentId' => $agentId,
+                'version' => $version,
+                'backup_dest' => $backupDest,
+                'requested_at' => time(),
+            ];
+            if (!AtomicWriteService::writeJson(self::requestPath($agentId), $request)) {
+                return ['status' => 'error', 'message' => 'Could not save queued upgrade', 'active_sessions' => $activeSessions];
+            }
+            self::setQueuedStatus($agentId, $activeSessions, $seams, $reason);
+            if (isset($seams['wake'])) $seams['wake']();
+            else SupervisorService::wake();
+            return [
+                'status' => 'queued',
+                'message' => self::waitingMessage($activeSessions, $reason),
+                'active_sessions' => $activeSessions,
+            ];
+        } finally {
+            StorageBackendMigrationService::releaseLaunchGuard($storageGuard);
         }
-        self::setQueuedStatus($agentId, $activeSessions, $seams, $reason);
-        if (isset($seams['wake'])) $seams['wake']();
-        else SupervisorService::wake();
-        return [
-            'status' => 'queued',
-            'message' => self::waitingMessage($activeSessions, $reason),
-            'active_sessions' => $activeSessions,
-        ];
     }
 
     /** @param array<string,callable> $seams */
@@ -173,9 +186,19 @@ class PendingAgentUpgradeService
         $request = self::read($agentId);
         if ($request === []) return 'missing';
 
+        $storageGuard = StorageBackendMigrationService::acquireLaunchGuard(false);
+        if ($storageGuard === false) {
+            return StorageBackendMigrationService::isMigrationInProgress() ? 'waiting' : 'busy';
+        }
+        if (StorageBackendMigrationService::isMigrationInProgress()) {
+            StorageBackendMigrationService::releaseLaunchGuard($storageGuard);
+            return 'waiting';
+        }
+
         $lock = @fopen(self::baseDir() . "/pending-agent-upgrade-$agentId.lock", 'c');
         if ($lock === false || !@flock($lock, LOCK_EX | LOCK_NB)) {
             if (is_resource($lock)) @fclose($lock);
+            StorageBackendMigrationService::releaseLaunchGuard($storageGuard);
             return 'busy';
         }
 
@@ -241,6 +264,7 @@ class PendingAgentUpgradeService
             AgentUpgradeAdmissionService::release($admission);
             @flock($lock, LOCK_UN);
             @fclose($lock);
+            StorageBackendMigrationService::releaseLaunchGuard($storageGuard);
         }
     }
 
@@ -257,16 +281,28 @@ class PendingAgentUpgradeService
         // list is read from /proc and compared in PHP. An id that is not an
         // agent id shape cannot name a running install.
         if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        return in_array($agentId, self::runningInstallIds($procRoot), true);
+    }
+
+    /** @return list<string> ids passed to live install-bg.php worker processes */
+    public static function runningInstallIds(string $procRoot = '/proc'): array
+    {
         $self = (string)getmypid();
+        $ids = [];
         foreach ((array)@glob(rtrim($procRoot, '/') . '/[0-9]*/cmdline', GLOB_NOSORT) as $file) {
             if (basename(dirname($file)) === $self) continue;
             $raw = @file_get_contents($file);
             if ($raw === false || $raw === '') continue;
             $args = explode("\0", rtrim($raw, "\0"));
             foreach ($args as $i => $arg) {
-                if (substr($arg, -14) === 'install-bg.php' && ($args[$i + 1] ?? null) === $agentId) return true;
+                $id = (string)($args[$i + 1] ?? '');
+                if (substr($arg, -14) === 'install-bg.php' && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $id)) {
+                    $ids[$id] = true;
+                }
             }
         }
-        return false;
+        $out = array_keys($ids);
+        sort($out);
+        return $out;
     }
 }

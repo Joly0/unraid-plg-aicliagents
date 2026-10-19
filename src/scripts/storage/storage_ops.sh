@@ -1317,9 +1317,9 @@ exit 0
 # Convert one entity for the global engine switch. The normal graduate path is
 # reused for layering -> passthrough (including its verified copy, write-ahead
 # intent, manifest authority flip and retained .graduated rollback layer). The
-# reverse path writes a verified SquashFS layer from the plain directory, flips
-# the manifest only after that layer exists, then MOVES the plain directory and
-# any superseded layers into a timestamped archive — never deletes user data.
+# reverse path writes a verified SquashFS layer from the plain directory. A
+# rollback restores the representation saved by this migration instead of
+# baking a replacement copy.
 backend_migration_check_layer_space() {
     local type="${1:-}" id="${2:-}" persist="${3:-}" source="${4:-}"
     local source_bytes need_mb available_mb
@@ -1357,6 +1357,7 @@ ID="${2:-}"
 PERSIST_PATH="${3:-}"
 TARGET="${4:-}"
 FORCE_DIRECT="${5:-0}"
+ROLLBACK="${6:-0}"
 
 source "$_SO_DIR/common.sh"
 source "$_SO_DIR/resolve_paths.sh" 2>/dev/null || true
@@ -1372,7 +1373,7 @@ guard_path "$PERSIST_PATH" "PERSIST_PATH" || exit 1
 _assert_persist_durable "$PERSIST_PATH" || exit 1
 
 _BM_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
-backend_migration_clear_reasons "$TYPE" "$ID"
+backend_migration_clear_reasons "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-/tmp/unraid-aicliagents}"
 _BM_MNT=""
 if [ "$TYPE" = "home" ]; then
     _BM_MNT="$(home_mount "$ID")"
@@ -1383,33 +1384,131 @@ else
 fi
 _BM_PT="$PERSIST_PATH/passthrough/${TYPE}s/$ID"
 
+_backend_migration_mark_changed() {
+    local result_file="${AICLI_BACKEND_MIGRATE_RESULT_FILE:-}"
+    [ -n "$result_file" ] || return 0
+    printf '1\n' > "$result_file"
+}
+
+backend_migration_restore_archived_plain() {
+    local base="$1" archive="$2" plain="$2/plain" link="$2/stable-link" link_target="" target_dir=""
+    [ -d "$plain" ] || return 1
+    if [ -L "$link" ]; then
+        link_target="$(readlink -- "$link" 2>/dev/null || true)"
+        [ -n "$link_target" ] || return 1
+        case "$link_target" in
+            /*) target_dir="$link_target" ;;
+            *) target_dir="$base/$link_target" ;;
+        esac
+        base="$(realpath -m -- "$base" 2>/dev/null || true)"
+        target_dir="$(realpath -m -- "$target_dir" 2>/dev/null || true)"
+        [ -n "$base" ] && [ -n "$target_dir" ] || return 1
+        case "$target_dir" in "$base"/*) : ;; *) return 1 ;; esac
+        [ ! -e "$target_dir" ] || return 1
+        mkdir -p "$(dirname "$target_dir")" || return 1
+        mv "$plain" "$target_dir" || return 1
+        mv "$link" "$_BM_PT" || return 1
+    else
+        mv "$plain" "$_BM_PT" || return 1
+    fi
+    manifest_set_backend "$TYPE" "$ID" "passthrough" || return 1
+    while IFS= read -r _bm_layer; do
+        [ -n "$_bm_layer" ] || continue
+        rm -f -- "$_bm_layer" || return 1
+    done < <(layer_files_of "$PERSIST_PATH" "$TYPE" "$ID")
+    rm -rf -- "$archive" || return 1
+    return 0
+}
+
 if [ "$TARGET" = "passthrough" ]; then
+    if [ "$ROLLBACK" = "1" ]; then
+        _BM_AGENT_BASE="$PERSIST_PATH/passthrough/${TYPE}s"
+        _BM_ARCHIVE_ROOT="$PERSIST_PATH/.backend-migration-archive"
+        _BM_ARCHIVE_RESTORED=0
+        if [ -d "$_BM_ARCHIVE_ROOT" ]; then
+            while IFS= read -r _bm_archive; do
+                [ -n "$_bm_archive" ] || continue
+                if backend_migration_restore_archived_plain "$_BM_AGENT_BASE" "$_bm_archive"; then
+                    _BM_ARCHIVE_RESTORED=1
+                    break
+                fi
+            done < <(find "$_BM_ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -name "*_${TYPE}_${_BM_LOCK_ID}" -print | sort -r)
+        fi
+        if [ "$_BM_ARCHIVE_RESTORED" = "1" ]; then
+            lifecycle_log "info" "backend_migrate" "backend_migrate_rollback_restored_plain" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
+            _backend_migration_mark_changed
+            exit 0
+        fi
+    fi
     # Capture any last upper writes before reusing the battle-tested graduate
     # authority flip. This branch is idempotent for an already-direct entity.
     _BM_HAS_LAYERS="$(_entity_has_layers "$PERSIST_PATH" "$TYPE" "$ID")"
     if [ "$_BM_HAS_LAYERS" = "1" ]; then
-        op_graduate "$TYPE" "$ID" "$PERSIST_PATH" "$FORCE_DIRECT"
-        exit $?
+        op_graduate "$TYPE" "$ID" "$PERSIST_PATH" "$FORCE_DIRECT" || exit $?
+        _backend_migration_mark_changed
+        exit 0
     fi
     _entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"
     if [ -d "$UPPER_DIR" ] && [ -n "$(find "$UPPER_DIR" -type f -print -quit 2>/dev/null)" ]; then
-        op_bake "$TYPE" "$ID" "$PERSIST_PATH"
-        op_graduate "$TYPE" "$ID" "$PERSIST_PATH" "$FORCE_DIRECT"
-        exit $?
+        op_bake "$TYPE" "$ID" "$PERSIST_PATH" || exit $?
+        op_graduate "$TYPE" "$ID" "$PERSIST_PATH" "$FORCE_DIRECT" || exit $?
+        _backend_migration_mark_changed
+        exit 0
     fi
-    mkdir -p "$_BM_PT" 2>/dev/null || exit 1
-    manifest_set_backend "$TYPE" "$ID" "passthrough" || exit 1
+    # No layers and no saved upper data means there is nothing to convert.
+    # In particular, do not create an empty plain folder that rollback can bake.
     exit 0
 fi
 
 # layering target: a plain directory is the current authority. Keep it in place
 # until a verified layer and both manifest writes have succeeded.
 if [ ! -d "$_BM_PT" ]; then
-    manifest_set_backend "$TYPE" "$ID" "flash" || exit 1
     exit 0
 fi
 
-exec 9>"/var/run/aicli-bake-${TYPE}-${_BM_LOCK_ID}.lock"
+# A layering rollback restores the exact layer set retained by the forward
+# graduation. Rename it back; do not bake the copied plain tree a second time.
+_BM_RETIRE="$PERSIST_PATH/.graduated/${TYPE}_${_BM_LOCK_ID}"
+_BM_INTENT_PATH=""
+if declare -f _intent_path >/dev/null 2>&1; then
+    _BM_INTENT_PATH="$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")"
+fi
+if [ -f "$_BM_INTENT_PATH" ] && command -v jq >/dev/null 2>&1; then
+    _BM_INTENT_RETIRE="$(jq -r '.retire // empty' "$_BM_INTENT_PATH" 2>/dev/null || true)"
+    if [ -n "$_BM_INTENT_RETIRE" ]; then
+        case "$_BM_INTENT_RETIRE" in
+            /*) _BM_INTENT_RETIRE_PATH="$_BM_INTENT_RETIRE" ;;
+            *) _BM_INTENT_RETIRE_PATH="$PERSIST_PATH/$_BM_INTENT_RETIRE" ;;
+        esac
+        case "$_BM_INTENT_RETIRE_PATH" in
+            "$PERSIST_PATH"/*) [ -d "$_BM_INTENT_RETIRE_PATH" ] && _BM_RETIRE="$_BM_INTENT_RETIRE_PATH" ;;
+        esac
+    fi
+fi
+if [ ! -d "$_BM_RETIRE" ] || ! compgen -G "$_BM_RETIRE/*.sqsh" >/dev/null; then _BM_RETIRE=""; fi
+if [ -n "$_BM_RETIRE" ]; then
+    _entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"
+    convert_rollback "$PERSIST_PATH" "$_BM_PT" "$_BM_RETIRE" "${UPPER_DIR:-}" || exit $?
+    mapfile -t _BM_RESTORED_LAYERS < <(layer_files_of "$PERSIST_PATH" "$TYPE" "$ID")
+    [ "${#_BM_RESTORED_LAYERS[@]}" -gt 0 ] || exit 1
+    manifest_replace_layers "$TYPE" "$ID" "$PERSIST_PATH" "$(basename "${_BM_RESTORED_LAYERS[0]}")" || exit 1
+    manifest_set_backend "$TYPE" "$ID" "flash" || exit 1
+    lifecycle_log "info" "backend_migrate" "backend_migrate_rollback_restored_layers" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"layer\":\"$(basename "${_BM_RESTORED_LAYERS[0]}")\"}" 2>/dev/null || true
+    _backend_migration_mark_changed
+    exit 0
+fi
+
+_BM_PRECHECK_SRC="$(readlink -f -- "$_BM_PT" 2>/dev/null || true)"
+if [ -n "$_BM_PRECHECK_SRC" ] && [ -d "$_BM_PRECHECK_SRC" ] \
+    && [ -z "$(find "$_BM_PRECHECK_SRC" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    # Avoid taking a bake lock or making a layer for an empty plain folder.
+    exit 0
+fi
+
+_BM_BAKE_LOCK_DIR="${AICLI_BAKE_LOCK_DIR:-/var/run}"
+exec 9>"$_BM_BAKE_LOCK_DIR/aicli-bake-${TYPE}-${_BM_LOCK_ID}.lock"
 if ! flock -n 9; then
     write_defer_reason "$TYPE" "$ID" "backend_migrate_deferred"
     exit 2
@@ -1424,6 +1523,11 @@ _BM_BAKE_SRC="$(readlink -f -- "$_BM_PT" 2>/dev/null || true)"
 if [ -z "$_BM_BAKE_SRC" ] || [ ! -d "$_BM_BAKE_SRC" ]; then
     printf '%s\n' "[backend-migrate] $_BM_PT does not resolve to a directory — nothing changed" >&2
     exit 1
+fi
+if [ -z "$(find "$_BM_BAKE_SRC" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    # Empty plain folders have no content to migrate and must not create an
+    # empty SquashFS replacement during the forward step or its rollback.
+    exit 0
 fi
 if backend_migration_check_layer_space "$TYPE" "$ID" "$PERSIST_PATH" "$_BM_BAKE_SRC"; then
     :
@@ -1460,6 +1564,7 @@ fi
 
 lifecycle_log "info" "backend_migrate" "backend_migrate_ok" \
     "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"target\":\"layering\",\"layer\":\"$_BM_NEW_LAYER\",\"archive\":\"$_BM_ARCHIVE\"}" 2>/dev/null || true
+_backend_migration_mark_changed
 exit 0
 )
 
@@ -3881,16 +3986,24 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     _gr_phase "copying"
     if [ "$_GR_AGENT" = "1" ]; then
         printf '%s\n' "$_GR_AGENT_GEN" > "$_GR_STAGING_MARKER" 2>/dev/null || true
+        printf 'copy=%s\n' "$_GR_COPY" >> "$_GR_STAGING_MARKER" 2>/dev/null || true
         mkdir -p "$AGC_VERSIONS" 2>/dev/null || true
+    elif [ "$FORCE_DIRECT" = "1" ]; then
+        printf '%s\n' "$_GR_COPY" > "$_GR_STAGING_MARKER" 2>/dev/null || true
     else
         : > "$_GR_STAGING_MARKER" 2>/dev/null || true
     fi
-    # A failure before anything moved: the agent's partial version folder goes
-    # away (a home keeps its partial copy for a retry to converge over).
+    # A user home conversion keeps its copy so a retry can converge over it.
+    # A global migration has no retry after a hard copy failure, so remove the
+    # partial copy and keep the marker only if removal failed.
     _gr_fail_cleanup() {
-        [ "$_GR_AGENT" = "1" ] || return 0
-        rm -rf "${_GR_PT_DIR:?}" "$_GR_STAGING_MARKER" 2>/dev/null || true
-        rmdir "$AGC_VERSIONS" 2>/dev/null || true
+        [ "$_GR_AGENT" = "1" ] || [ "$FORCE_DIRECT" = "1" ] || return 0
+        local _gr_failed_copy="${_GR_COPY:-$_GR_PT_DIR}"
+        if ! convert_cleanup_failed_copy "$_gr_failed_copy" "$_GR_STAGING_MARKER"; then
+            _gr_reason "An unfinished conversion copy remains at $_gr_failed_copy. Remove it from Boot disk space under Left over."
+            error "Unfinished conversion copy remains at $_gr_failed_copy; its staging marker stays in place."
+        fi
+        if [ "$_GR_AGENT" = "1" ]; then rmdir "$AGC_VERSIONS" 2>/dev/null || true; fi
     }
     log "Copying to $_GR_COPY..."
     if ! convert_copy_tree "$_GR_VIEW" "$_GR_COPY" "$_GR_EXCLUDES" "$_GR_PROG" 2>>"$DEBUG_LOG"; then
@@ -3929,7 +4042,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         _gr_upper_freed=0; [ "$_GR_UPPER_SAME_FS" = "1" ] && _gr_upper_freed="$_GR_UPPER_BYTES"
         if ! convert_fits_after_free "$_GR_PERSIST_FREE" "$_GR_LAYERS_BYTES" "$_gr_upper_freed" "$_GR_EST"; then
             error "The home needs about $_GR_EST bytes on the boot disk, but only $(( _GR_PERSIST_FREE + _GR_LAYERS_BYTES + _gr_upper_freed )) bytes are free even after the old layers move off it. Nothing was changed."
-            rm -rf "$_GR_COPY" 2>/dev/null || true
+            _gr_fail_cleanup
             _gr_cleanup_meta
             _gr_precondition_refuse "boot_disk_too_small"
         fi
@@ -3937,9 +4050,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     fi
 
     # ---- critical section: bake lock, unmount, intent, retire ----
-    _GR_BAKE_LOCK="/var/run/aicli-bake-${TYPE}-${_GR_LOCK_ID}.lock"
-    exec 9>"$_GR_BAKE_LOCK"
-    if ! flock -n 9; then
+    if ! convert_acquire_graduate_bake_lock "$TYPE" "$_GR_LOCK_ID" "$FORCE_DIRECT"; then
         _gr_cleanup_meta
         _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "bake_lock_held"
     fi
@@ -3957,6 +4068,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         _gr_cleanup_meta
         _gr_reason "Files in the home kept changing just before the switch. Nothing was changed; try again."
         error "Copy verify failed just before the switch: files kept changing ($_gr_why) — layers untouched."
+        _gr_fail_cleanup
         exit 1
     fi
     log "Final pass done: the copy matches the home."
@@ -3996,6 +4108,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         _gr_cleanup_meta
         _gr_reason "The system still holds the old layers open, so moving them would not free the boot disk. Nothing was changed. Restart the server, then try again."
         error "Layer loop devices stay attached after the unmount: $(printf '%s' "$_gr_why" | tr '\n' ';') — conversion stopped before any move."
+        _gr_fail_cleanup
         lifecycle_log "error" "graduate" "convert_loops_pinned" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
         exit 1
@@ -4042,7 +4155,14 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         fi
         [ "$_GR_AGENT" = "1" ] && agent_convert_unlink_layout "$PERSIST_PATH" "$ID" "$_GR_AGENT_GEN"
         clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
-        rm -f "$_GR_STAGING_MARKER" 2>/dev/null || true
+        if [ "$_GR_MODE" = "staged" ] && [ "$_GR_COPY" != "$_GR_PT_DIR" ]; then
+            if ! convert_cleanup_failed_copy "$_GR_COPY" "$_GR_STAGING_MARKER"; then
+                _gr_reason "An unfinished conversion copy remains at $_GR_COPY. Remove it from Boot disk space under Left over."
+                error "Unfinished conversion copy remains at $_GR_COPY; its staging marker stays in place."
+            fi
+        else
+            rm -f "$_GR_STAGING_MARKER" 2>/dev/null || true
+        fi
         lifecycle_log "warn" "graduate" "convert_rolled_back" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mode\":\"$_GR_MODE\"}" 2>/dev/null || true
     }
@@ -4245,10 +4365,13 @@ if ! check_disk_space "$PERSIST_PATH/.diskcheck" "$_GR_NEED_MB"; then
 fi
 
 : > "$_GR_STAGING_MARKER" 2>/dev/null || true
+if [ "$FORCE_DIRECT" = "1" ]; then
+    printf '%s\n' "$_GR_PT_DIR" > "$_GR_STAGING_MARKER" 2>/dev/null || true
+fi
 mkdir -p "$_GR_PT_DIR" 2>/dev/null
 log "Copying $_GR_SRC_BASE → $_GR_PT_DIR (rsync -aHX, $_GR_SRC_BYTES bytes)..."
-if ! rsync -aHX --delete "$_GR_SCRATCH/" "$_GR_PT_DIR/" 2>>"$DEBUG_LOG"; then
-    error "rsync into the passthrough dir failed — aborting (layers untouched; staging marker kept for retry convergence)."
+if ! convert_rsync_plain_tree "$_GR_SCRATCH" "$_GR_PT_DIR" "$_GR_STAGING_MARKER" "$FORCE_DIRECT" 2>>"$DEBUG_LOG"; then
+    error "rsync into the passthrough dir failed — aborting (layers untouched)."
     _gr_cleanup_scratch
     exit 1
 fi
@@ -4258,6 +4381,7 @@ _GR_SRC_COUNT="$(find "$_GR_SCRATCH" -type f 2>/dev/null | wc -l | tr -d ' ')"
 _GR_DST_COUNT="$(find "$_GR_PT_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$_GR_SRC_COUNT" != "$_GR_DST_COUNT" ]; then
     error "Copy verify failed: file count src=$_GR_SRC_COUNT dst=$_GR_DST_COUNT — aborting (layers untouched)."
+    if [ "$FORCE_DIRECT" = "1" ]; then convert_cleanup_failed_copy "$_GR_PT_DIR" "$_GR_STAGING_MARKER" || true; fi
     _gr_cleanup_scratch
     exit 1
 fi
@@ -4274,6 +4398,7 @@ while IFS= read -r _gr_f; do
     fi
 done < <(find "$_GR_SCRATCH" -type f 2>/dev/null | head -5)
 if [ "$_GR_VERIFY_FAIL" -ne 0 ]; then
+    if [ "$FORCE_DIRECT" = "1" ]; then convert_cleanup_failed_copy "$_GR_PT_DIR" "$_GR_STAGING_MARKER" || true; fi
     _gr_cleanup_scratch
     exit 1
 fi
@@ -4283,9 +4408,7 @@ log "Copy verified ($_GR_DST_COUNT files, sampled sha256 ok)."
 # ---- 7. CRITICAL SECTION: per-entity bake lock -------------------------------
 # Same lock op_bake holds (fd 9) — excludes a concurrent bake AND the
 # supervisor's reconcile pass for the whole authority flip below.
-_GR_BAKE_LOCK="/var/run/aicli-bake-${TYPE}-${_GR_LOCK_ID}.lock"
-exec 9>"$_GR_BAKE_LOCK"
-if ! flock -n 9; then
+if ! convert_acquire_graduate_bake_lock "$TYPE" "$_GR_LOCK_ID" "$FORCE_DIRECT"; then
     log "Per-entity bake lock held — deferring graduate."
     _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "bake_lock_held"
 fi
@@ -4307,6 +4430,7 @@ if ! write_intent "$PERSIST_PATH" "$TYPE" "$ID" \
     "{\"op\":\"graduate\",\"keep\":\"\",\"pt_dir\":\"$_GR_PT_DIR\",\"files\":$_GR_DST_COUNT,\"delete\":[\"$_GR_SRC_BASE\"]}"; then
     # R-020 (#598): no plan on disk, so the layer must not move.
     error "Cannot write the graduate intent (disk full?) — nothing moved, layers authoritative."
+    if [ "$FORCE_DIRECT" = "1" ]; then convert_cleanup_failed_copy "$_GR_PT_DIR" "$_GR_STAGING_MARKER" || true; fi
     exit 1
 fi
 _itest_sigkill_window "graduate_after_intent"
@@ -4317,6 +4441,7 @@ log "Retiring layer to $_GR_RETIRE_DIR (move, NOT delete — 14-day retention)..
 if ! mv -f "$_GR_SRC_LAYER" "$_GR_RETIRE_DIR/" 2>>"$DEBUG_LOG"; then
     error "Failed to move $_GR_SRC_BASE to .graduated/ — rolling back (clearing intent; layers authoritative)."
     clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
+    if [ "$FORCE_DIRECT" = "1" ]; then convert_cleanup_failed_copy "$_GR_PT_DIR" "$_GR_STAGING_MARKER" || true; fi
     exit 1
 fi
 _itest_sigkill_window "graduate_after_move"
@@ -4328,6 +4453,7 @@ if ! manifest_set_backend "$TYPE" "$ID" "passthrough"; then
     mv -f "$_GR_RETIRE_DIR/$_GR_SRC_BASE" "$PERSIST_PATH/" 2>>"$DEBUG_LOG" || \
         error "ROLLBACK MOVE FAILED — layer remains at $_GR_RETIRE_DIR/$_GR_SRC_BASE (recover manually)."
     clear_intent "$PERSIST_PATH" "$TYPE" "$ID"
+    if [ "$FORCE_DIRECT" = "1" ]; then convert_cleanup_failed_copy "$_GR_PT_DIR" "$_GR_STAGING_MARKER" || true; fi
     exit 1
 fi
 _itest_sigkill_window "graduate_after_manifest"

@@ -842,7 +842,7 @@ final class FileStorage
     }
 
     /** Run one crash-safe per-entity storage-engine conversion. */
-    public static function migrateBackend(string $type, string $id, string $target, bool $forceDirect = false): array
+    public static function migrateBackend(string $type, string $id, string $target, bool $forceDirect = false, bool $rollback = false): array
     {
         if (!in_array($type, ['agent', 'home'], true) || $id === '') {
             return ['exit' => 64, 'outcome' => 'failed', 'reason' => 'invalid_entity'];
@@ -851,22 +851,23 @@ final class FileStorage
         $persist = self::persistPathFor($type, $id);
         $extra = ['--target' => $target];
         if ($forceDirect) $extra['--force-direct'] = null;
+        if ($rollback) $extra['--rollback'] = null;
         [$exit, $json] = self::seam('backend-migrate', $type, $id, $persist, $extra);
         $json['exit'] = $exit;
         return $json;
     }
 
-    /** Bracket the all-entity engine migration with the same crash marker used by path migration. */
+    /** Bracket the all-entity engine migration with its own crash marker. */
     public static function migrateBackendPolicy(string $from, string $to, callable $work): FileStorageMigrationResult
     {
-        self::writeMigrationMarker(['trigger' => 'backend', 'from' => $from, 'to' => $to, 'phase' => 'running']);
+        self::writeBackendMigrationMarker(['trigger' => 'backend', 'from' => $from, 'to' => $to, 'phase' => 'running']);
         try {
             $ok = (bool)$work();
         } catch (\Throwable $e) {
-            self::clearMigrationMarker();
+            self::clearBackendMigrationMarker();
             return FileStorageMigrationResult::make(false, 'failed', $e->getMessage());
         }
-        self::clearMigrationMarker();
+        self::clearBackendMigrationMarker();
         return FileStorageMigrationResult::make($ok, $ok ? 'migrated' : 'failed');
     }
 
@@ -1152,11 +1153,25 @@ final class FileStorage
         return is_file(self::markerPath());
     }
 
+    /** Is the global engine migration marker present? */
+    public static function isBackendMigrationInProgress(): bool
+    {
+        return is_file(self::backendMigrationMarkerPath());
+    }
+
+    /** The engine marker lives beside, but does not replace, the path-move marker. */
+    private static function backendMigrationMarkerPath(): string
+    {
+        $env = getenv('AICLI_BACKEND_MIGRATION_MARKER');
+        return ($env !== false && $env !== '')
+            ? $env
+            : dirname(self::markerPath()) . '/.backend_migration_inprogress.json';
+    }
+
     /**
-     * #652: the exclusive right to start a path migration. A non-blocking flock on
-     * a lock file beside the marker, so two requests cannot both pass the "no
-     * marker" check and then overwrite each other's marker. Returns the open lock
-     * handle (keep it until the request ends, then release it with
+     * #652/#707: the shared exclusive lock for path and engine migrations. A
+     * non-blocking flock on one lock file prevents concurrent migration writes.
+     * Returns the open lock handle (keep it until the request ends, then release it with
      * releaseMigrationLock()) or null when another migration holds it.
      * @return resource|null
      */
@@ -1184,7 +1199,16 @@ final class FileStorage
 
     private static function writeMigrationMarker(array $plan): void
     {
-        $marker = self::markerPath();
+        self::writeMarker(self::markerPath(), $plan);
+    }
+
+    private static function writeBackendMigrationMarker(array $plan): void
+    {
+        self::writeMarker(self::backendMigrationMarkerPath(), $plan);
+    }
+
+    private static function writeMarker(string $marker, array $plan): void
+    {
         @mkdir(dirname($marker), 0755, true);
         $plan['ts'] = gmdate('c');
         @file_put_contents($marker, json_encode($plan));
@@ -1193,5 +1217,10 @@ final class FileStorage
     private static function clearMigrationMarker(): void
     {
         @unlink(self::markerPath());
+    }
+
+    private static function clearBackendMigrationMarker(): void
+    {
+        @unlink(self::backendMigrationMarkerPath());
     }
 }

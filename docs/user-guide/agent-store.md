@@ -401,6 +401,7 @@ The plugin keeps each agent version as an immutable layer. The Agent Store build
 | The bar stops at about 99 percent and lists programs. | Programs still hold the old version. | Close those programs or the workspace that runs them. The upgrade then goes on. |
 | A box says "Backup failed — upgrade aborted". | The copy of the current version failed, for example because the disk was full. | Pick a folder with more space, or upgrade without a copy. The installed version is unchanged. |
 | An upgrade is marked failed, but the new layer is not live yet. | The activation waits for programs that hold the old layer. | Close the workspaces of the agent. The upgrade finishes by itself. |
+| An action says “Wait for the storage migration to finish before installing, removing, or upgrading agents.” | The plugin is changing how it stores agents and homes. | Wait for the migration status to finish, then try the action again. |
 | After a save, a workspace still uses the old key. | A save does not restart workspaces. | Use **Restart them now**, or restart the workspace when it is idle. |
 | The card shows a red tag. | The agent layers have a problem. | Press the repair button on the card. See "Storage health on a card". |
 | An agent works but shows `v?`. | The agent is installed, but the plugin has not read its version yet. | Open a workspace of the agent, or press **Check for Updates**. |
@@ -421,6 +422,7 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-20** — Installs, upgrades, restores from a kept backup and removals wait until **Persistence engine** conversion ends. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #708.
 - **2026-10-16** — The card has the link **Remove old versions**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R4), issue #536.
 
 </details>

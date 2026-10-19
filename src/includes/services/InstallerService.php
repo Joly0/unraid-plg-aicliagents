@@ -132,6 +132,8 @@ class InstallerService {
 
     public static function installAgent($agentId, $targetVersion = null) {
         @set_time_limit(900);
+        $migrationRefusal = StorageBackendMigrationService::migrationRefusal();
+        if ($migrationRefusal !== null) return $migrationRefusal;
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
 
         $config = ConfigService::getConfig();
@@ -434,6 +436,8 @@ class InstallerService {
      */
     public static function emergencyInstallAgent($agentId, array $seams = []) {
         @set_time_limit(600);
+        $migrationRefusal = StorageBackendMigrationService::migrationRefusal();
+        if ($migrationRefusal !== null) return $migrationRefusal;
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
 
         $registry = $seams['registry'] ?? AgentRegistry::getRegistry();
@@ -535,6 +539,8 @@ class InstallerService {
 
     /** @param array<string,mixed> $seams */
     public static function uninstallAgent($agentId, array $seams = []) {
+        $migrationRefusal = StorageBackendMigrationService::migrationRefusal();
+        if ($migrationRefusal !== null) return $migrationRefusal;
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
         // #591: refuse a bad id here, before any path or shell string. This no
         // longer relies on agentPath() throwing a few lines below.
@@ -1096,6 +1102,8 @@ class InstallerService {
      * storage lock (WP #966) so it cannot race a bake / consolidate / reconcile.
      */
     public static function restoreAgentVersion(string $agentId, string $backupDir, ?string $lockFile = null): array {
+        $migrationRefusal = StorageBackendMigrationService::migrationRefusal();
+        if ($migrationRefusal !== null) return $migrationRefusal;
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
         // A NUL byte in either value makes realpath() throw; refuse it as a bad backup.
         if (ValidationService::containsNulByte($agentId) || ValidationService::containsNulByte($backupDir)) {

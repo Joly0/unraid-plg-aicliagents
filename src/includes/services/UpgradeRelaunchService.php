@@ -895,6 +895,12 @@ class UpgradeRelaunchService
         ?callable $stopper = null,
         ?callable $sleeper = null
     ): array {
+        require_once __DIR__ . '/StorageBackendMigrationService.php';
+        if (StorageBackendMigrationService::isMigrationInProgress()) {
+            // Keep the closed set durable. The supervisor will retry its
+            // activation after the storage migration releases the agent paths.
+            return ['relaunched' => 0, 'skipped' => 0, 'failed' => 0];
+        }
         $m = self::readManifest($agentId);
         $closed = $m['closed'] ?? [];
         if (empty($closed)) {

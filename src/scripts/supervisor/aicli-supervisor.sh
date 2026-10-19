@@ -2244,6 +2244,19 @@ _op_mount() {
         return 0
     fi
 
+    # The migration owns agent storage until it finishes. Keep upgrade
+    # activation jobs queued for the next tick instead of starting a workspace
+    # against a layer or plain folder while its representation is changing.
+    if [ "$type" = "agent" ] && [ "$reason" = "upgrade_relaunch" ] \
+        && _backend_migration_active; then
+        log_info "Upgrade activation deferred for $entity — storage migration is active"
+        lifecycle_log "info" "supervisor" "upgrade_activation_deferred_storage_migration" \
+            "{\"entity\":\"$entity\"}" 2>/dev/null || true
+        _OP_EXIT=2
+        _OP_DEFER_REASON="storage_migration"
+        return 0
+    fi
+
     # Entity-lock probe: bake/consolidate in flight for this entity → defer.
     local _lock_id="${id//[^a-zA-Z0-9_-]/_}"
     local bake_lock="/var/run/aicli-bake-${type}-${_lock_id}.lock"
@@ -4621,6 +4634,15 @@ _priority_tick() {
 }
 
 # ---------------------------------------------------------------------------
+# _backend_migration_active — report whether engine conversion owns storage.
+_backend_migration_active() {
+    local status_file="${AICLI_BACKEND_MIGRATE_STATUS:-${AICLI_STATE_ROOT:-$STATUS_DIR}/backend-migration-status.json}"
+    [ -f "$status_file" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    jq -e '(.status == "queued" or .status == "running" or .phase == "rolling_back")' \
+        "$status_file" >/dev/null 2>&1
+}
+
 # Work loop — one iteration, called every tick
 # ---------------------------------------------------------------------------
 _work_tick() {
@@ -4640,16 +4662,28 @@ _work_tick() {
     # Step 0: Check for wedged child (watchdog)
     _watchdog_check_child
 
+    # A global storage-engine migration owns the entity data until it completes.
+    # Keep the supervisor's storage passes parked while its status is queued or
+    # running; a queued job stays in place and runs on a later tick.
+    local backend_migration_active=0
+    _backend_migration_active && backend_migration_active=1
+
     # Step 1: Reconcile manifest with filesystem (unconditional, every tick)
-    _op_reconcile
+    if [ "$backend_migration_active" -eq 0 ]; then
+        _op_reconcile
+    fi
 
     # Step 1a (#71): admit non-destructive queued upgrades at a session-free
     # boundary. This raises the install barrier before its second empty check.
-    _check_queued_agent_upgrades
+    if [ "$backend_migration_active" -eq 0 ]; then
+        _check_queued_agent_upgrades
+    fi
 
     # Step 1b (#72): ensure every retained agent-upgrade closed set has one
     # backoff-managed activation job, even if install-bg crashed after writing it.
-    _check_pending_agent_upgrades
+    if [ "$backend_migration_active" -eq 0 ]; then
+        _check_pending_agent_upgrades
+    fi
 
     # Step 1c (#86): recreate crashed saved workspaces without needing a browser.
     _check_saved_workspace_restarts
@@ -4669,47 +4703,66 @@ _work_tick() {
     # Step 1d4: RESPONSIVE_PRIORITY.md — keep the terminal responsive (acts every 300 s, only when the setting is on).
     _priority_tick
 
+    # Refresh after the non-storage checks. A migration can be queued while
+    # those checks run, so do not start any storage pass from a stale reading.
+    if [ "$backend_migration_active" -eq 0 ] && _backend_migration_active; then
+        backend_migration_active=1
+    fi
+
     # Step 1e: SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 — release superseded agent
     # versions once nothing is running them, rate-limited to 5 min internally.
-    _agent_generation_sweep_tick
+    if [ "$backend_migration_active" -eq 0 ]; then
+        _agent_generation_sweep_tick
+    fi
 
     # Step 2: Check dirty-pressure thresholds (may enqueue bakes)
-    _check_dirty_pressure
+    if [ "$backend_migration_active" -eq 0 ]; then
+        _check_dirty_pressure
 
-    # Step 3: Check schedule trigger (may enqueue bakes)
-    _check_schedule_trigger
+        # Step 3: Check schedule trigger (may enqueue bakes)
+        _check_schedule_trigger
 
-    # Step 3b: Phase 5 — homes-only policy-driven consolidate enqueue (replaces the
-    # old count>=5 PHP trigger). Enqueues a consolidate when storagectl recommends it.
-    _check_consolidate_policy
+        # Step 3b: Phase 5 — homes-only policy-driven consolidate enqueue (replaces the
+        # old count>=5 PHP trigger). Enqueues a consolidate when storagectl recommends it.
+        _check_consolidate_policy
 
-    # Step 3c: WP #1262 (#6) — force-reclaim escalation. When a home is busy AND
-    # consolidation is recommended (so the Step-3b consolidate keeps deferring on
-    # the live session), arm a user-warned countdown; at the deadline force-close
-    # the home's sessions so it reaches idle and the deferred consolidate runs.
-    _check_force_reclaim_escalation
+        # Step 3c: WP #1262 (#6) — force-reclaim escalation. When a home is busy AND
+        # consolidation is recommended (so the Step-3b consolidate keeps deferring on
+        # the live session), arm a user-warned countdown; at the deadline force-close
+        # the home's sessions so it reaches idle and the deferred consolidate runs.
+        _check_force_reclaim_escalation
 
-    # Step 3c2: OP#1381 — overlay-free early-resume. Pull any parked USER
-    # consolidate/bake retry forward to now if its entity overlay has gone idle,
-    # so the _check_job_retries below matures it THIS tick (the moment the
-    # workspace closed) instead of waiting out the backoff. The backoff timer in
-    # _check_job_retries remains the safety net for a still-busy entity.
-    _check_deferred_consolidate_resume
+        # Step 3c2: OP#1381 — overlay-free early-resume. Pull any parked USER
+        # consolidate/bake retry forward to now if its entity overlay has gone idle,
+        # so the _check_job_retries below matures it THIS tick (the moment the
+        # workspace closed) instead of waiting out the backoff. The backoff timer in
+        # _check_job_retries remains the safety net for a still-busy entity.
+        _check_deferred_consolidate_resume
 
-    # Step 3d: S-08 (#1353) — mature parked job retries (deferred mounts with
-    # backoff) back into the queue.
-    _check_job_retries
+        # Step 3d: S-08 (#1353) — mature parked job retries (deferred mounts with
+        # backoff) back into the queue.
+        _check_job_retries
 
-    # Step 3e: R-025 (#603) — end ledger entries a dead supervisor left "running".
-    _reap_orphan_running_jobs 30 >/dev/null
-    _reap_orphan_queued_jobs 60 >/dev/null
+        # Step 3e: R-025 (#603) — end ledger entries a dead supervisor left "running".
+        _reap_orphan_running_jobs 30 >/dev/null
+        _reap_orphan_queued_jobs 60 >/dev/null
+    fi
 
     # Step 4: Pop and process one queue item
     local qdepth
     qdepth="$(queue_depth 2>/dev/null || echo 0)"
 
     local next_req
-    next_req="$(queue_pop_next 2>/dev/null || true)"
+    # Check again before dequeue. A migration can be queued after the tick's
+    # initial status read while non-storage service checks run.
+    if [ "$backend_migration_active" -eq 0 ] && _backend_migration_active; then
+        backend_migration_active=1
+    fi
+    if [ "$backend_migration_active" -eq 0 ]; then
+        next_req="$(queue_pop_next 2>/dev/null || true)"
+    else
+        next_req=""
+    fi
 
     if [ -n "$next_req" ] && [ -f "$next_req" ]; then
         local req_type req_id req_op req_reason req_trace req_job req_prio

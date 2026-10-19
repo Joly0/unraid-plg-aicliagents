@@ -1773,6 +1773,60 @@ convert_rollback() {
     return "$rc"
 }
 
+# convert_cleanup_failed_copy <copy> <staging_marker> — remove an uncommitted
+# plain copy after a hard conversion failure. Keep the marker while the copy is
+# still present so the Boot disk space card can offer it for removal.
+convert_cleanup_failed_copy() {
+    local copy="${1:-}" marker="${2:-}"
+    [ -n "$copy" ] && [ -n "$marker" ] && [ "$copy" != "/" ] || return 1
+    if [ -e "$copy" ] || [ -L "$copy" ]; then
+        rm -rf -- "$copy" 2>/dev/null || true
+    fi
+    if [ -e "$copy" ] || [ -L "$copy" ]; then
+        return 1
+    fi
+    rm -f -- "$marker" 2>/dev/null || true
+    return 0
+}
+
+# convert_acquire_graduate_bake_lock <type> <lock_id> <force_direct> — keep a
+# normal graduate non-blocking, but let a global migration wait briefly for a
+# supervisor pass that already owns the entity lock.
+convert_acquire_graduate_bake_lock() {
+    local type="${1:-}" lock_id="${2:-}" force_direct="${3:-0}"
+    local lock_dir="${AICLI_BAKE_LOCK_DIR:-/var/run}"
+    local wait_s="${AICLI_GRADUATE_BAKE_LOCK_WAIT_S:-30}"
+    [ -n "$type" ] && [ -n "$lock_id" ] || return 1
+    mkdir -p "$lock_dir" 2>/dev/null || return 1
+    exec 9>"$lock_dir/aicli-bake-${type}-${lock_id}.lock" || return 1
+    if [ "$force_direct" = "1" ]; then
+        case "$wait_s" in ''|*[!0-9]*) wait_s=30 ;; esac
+        if [ "${#wait_s}" -gt 3 ]; then
+            wait_s=120
+        else
+            wait_s=$((10#$wait_s))
+            [ "$wait_s" -le 120 ] || wait_s=120
+        fi
+        flock -w "$wait_s" 9
+    else
+        flock -n 9
+    fi
+}
+
+# convert_rsync_plain_tree <src> <dst> <marker> <force_direct> — copy an agent
+# tree for the legacy/global graduate path. A hard rsync failure in a global
+# migration removes the partial target but keeps its marker if removal fails.
+convert_rsync_plain_tree() {
+    local src="${1%/}" dst="${2%/}" marker="${3:-}" force_direct="${4:-0}"
+    if ! "${AICLI_RSYNC:-rsync}" -aHX --delete "$src/" "$dst/"; then
+        if [ "$force_direct" = "1" ]; then
+            convert_cleanup_failed_copy "$dst" "$marker" || true
+        fi
+        return 1
+    fi
+    return 0
+}
+
 # ----------------------------------------------------------------------------
 # BOOT_DISK_SPACE.md R3: convert ONE layered agent to plain folders in the
 # versioned layout the new plain installs use:

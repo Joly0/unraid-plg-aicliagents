@@ -85,7 +85,7 @@ _sc_err() { printf '[storagectl] %s\n' "$*" >&2; }
 
 # ---- argument parsing -------------------------------------------------------
 VERB="${1:-}"; shift || true
-TYPE=""; ID=""; PERSIST=""; OWNER=""; TARGET=""; FORCE_DIRECT=0; LAZY=0; WANT_UPPER=0; WANT_LAYERS=0; WANT_MANIFEST=0; KEEP_UPPER=0; STAGED=0
+TYPE=""; ID=""; PERSIST=""; OWNER=""; TARGET=""; FORCE_DIRECT=0; ROLLBACK=0; LAZY=0; WANT_UPPER=0; WANT_LAYERS=0; WANT_MANIFEST=0; KEEP_UPPER=0; STAGED=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --type)     TYPE="${2:-}"; shift 2 ;;
@@ -93,6 +93,7 @@ while [ $# -gt 0 ]; do
         --persist)  PERSIST="${2:-}"; shift 2 ;;
         --target)   TARGET="${2:-}"; shift 2 ;;
         --force-direct) FORCE_DIRECT=1; shift ;;
+        --rollback) ROLLBACK=1; shift ;;
         --owner)    OWNER="${2:-}"; shift 2 ;;   # Bug #1054: chown home overlay to this user (mount only)
         --lazy)     LAZY=1; shift ;;
         # Phase 3: `unstage --keep-upper` leaves the staging writable layer on disk
@@ -279,7 +280,7 @@ _lifecycle_events_json() {
 # ---- result emitter ---------------------------------------------------------
 # emit_json <exit> <outcome> <defer_reason> <events_json>
 emit_json() {
-    local ex="$1" outcome="$2" reason="$3" events="${4:-[]}" extra="${5:-}"
+    local ex="$1" outcome="$2" reason="$3" events="${4:-[]}" extra="${5:-}" changed="${6:-0}"
     local mnt; mnt="$(_mnt_point)"
     local mounted=false
     mountpoint -q "$mnt" 2>/dev/null && mounted=true
@@ -292,6 +293,7 @@ emit_json() {
     printf '"id":"%s",' "$(_json_str "$ID")"
     printf '"persist":"%s",' "$(_json_str "$PERSIST")"
     printf '"exit":%s,' "$ex"
+    [ "$VERB" = "backend-migrate" ] && printf '"changed":%s,' "$([ "$changed" = "1" ] && echo 1 || echo 0)"
     printf '"outcome":"%s",' "$(_json_str "$outcome")"
     printf '"defer_reason":%s,' "$reason_field"
     printf '"upper_mode":"%s",' "$(_upper_mode)"
@@ -730,17 +732,25 @@ do_graduate() {
 # backend-migrate — one entity's part of the global storage-engine migration.
 do_backend_migrate() {
     require_entity_args
-    backend_migration_clear_reasons "$TYPE" "$ID"
+    backend_migration_clear_reasons "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-/tmp/unraid-aicliagents}"
     _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
     case "$TARGET" in
         layering|passthrough) ;;
         *) emit_json 64 "failed" "invalid_target"; exit 64 ;;
     esac
     local start; start="$(_lifecycle_count)"
-    op_backend_migrate "$TYPE" "$ID" "$PERSIST" "$TARGET" "$FORCE_DIRECT" >&2
+    local result_file; result_file="$(mktemp "${TMPDIR:-/tmp}/aicli-backend-migrate.XXXXXX")" || {
+        emit_json 1 "failed" "result_file_unavailable" "$(_lifecycle_events_json "$start")" "" 0
+        exit 1
+    }
+    printf '0\n' > "$result_file" || { rm -f "$result_file"; emit_json 1 "failed" "result_file_unavailable" "$(_lifecycle_events_json "$start")" "" 0; exit 1; }
+    AICLI_BACKEND_MIGRATE_RESULT_FILE="$result_file" op_backend_migrate "$TYPE" "$ID" "$PERSIST" "$TARGET" "$FORCE_DIRECT" "$ROLLBACK" >&2
     local ex=$?
-    local reason; reason="$(backend_migration_failure_reason "$TYPE" "$ID" "" "$ex")"
-    emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$(_lifecycle_events_json "$start")"
+    local changed=0
+    [ "$(cat "$result_file" 2>/dev/null)" = "1" ] && changed=1
+    rm -f "$result_file"
+    local reason; reason="$(backend_migration_failure_reason "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-/tmp/unraid-aicliagents}" "$ex")"
+    emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$(_lifecycle_events_json "$start")" "" "$changed"
     exit "$ex"
 }
 
@@ -1064,6 +1074,10 @@ _pt_release() {
     umount_or_keep "$mnt" "entity mount" 3 || { emit_json 2 "deferred" "mount_busy"; exit 2; }   # #512: never lazy
     emit_json 0 "ok" ""; exit 0
 }
+
+if [ "${AICLI_STORAGECTL_LIBRARY_ONLY:-0}" = "1" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
 
 case "$VERB" in
     mount)       do_mount ;;

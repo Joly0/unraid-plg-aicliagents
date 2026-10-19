@@ -82,6 +82,8 @@ The plugin does not block `/mnt/user`, because some servers have no other choice
 > [!WARNING]
 > A move copies your data to the new place and then switches to it. The plugin saves and merges first, and it checks every file after the copy. It does not delete the old data until the copy is safe. A large home can take several minutes. Open workspaces on that home close during the move.
 
+Wait for a **Persistence engine** conversion to finish before you move storage. The plugin refuses a move while the conversion is queued or running.
+
 1. Open the **Configuration** tab.
 2. Press **Change…** next to **Home Storage** or **Agent Storage**. Expect: a panel opens and the plugin probes your storage targets.
 3. Read the list. Each line shows a name, a path and small chips: the type of place, the free space, and warnings.
@@ -175,6 +177,10 @@ The old layers move to a backup folder. They stay for 14 days, then the plugin r
 5. Wait for **Storage migration complete**. The saved setting changes only after all items convert.
 
 You can open another page while the conversion runs. The **Boot disk space** card also shows the progress. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Home Storage** to see the same status. The page does not block navigation.
+
+The plugin pauses automatic saves, merges and queued storage jobs during the conversion. A storage job that already holds a lock can finish. The migration waits and retries the affected item for a limited time.
+
+The migration also waits for an agent installation that was already running. While the migration is queued, running or rolling back, the **Agent Store** refuses new installs, upgrades, restores from a kept backup and removals. It shows: “Wait for the storage migration to finish before installing, removing, or upgrading agents.” Try again after the migration ends.
 
 If another storage job is using an agent or home, the plugin names that item and refuses before it closes workspaces. Wait for the job to finish, then try again. If a conversion fails after it starts, the status names the item and gives a short reason. The Debug Console keeps the lower-level detail. The plugin keeps the previous setting when it restores the converted items. Read the final message before you try again.
 
@@ -393,7 +399,7 @@ A button is grey when the action cannot run now. Hold the mouse over it to read 
 | **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Consolidate (merge)". |
 | **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
 | **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
-| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), the layers of a home that no workspace uses, and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. | **Remove**. |
+| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. |
 | **Plugin files** | The rest of the plugin folder: program files, saved copies of earlier versions, settings and state. | None. |
 
 A home in plain folders has the first three **Home** lines. A home with layers has the line **saved layers**.
@@ -403,7 +409,9 @@ A home in plain folders has the first three **Home** lines. A home with layers h
 1. Press **Remove** on the line **Left over**. Expect: a dialog **Remove left-over items?** It names each item with its size, and the total space it frees.
 2. Press **Remove** to continue, or **Cancel** to stop. Expect: after **Remove**, a dialog says how much space you got back, and the card measures again.
 
-The plugin checks each item again just before it removes it. It removes only items that the last measure listed under **Left over**, and only inside its own persistence folder. It keeps an item that a mount or a program uses, and says so.
+The plugin checks each item again just before it removes it. It removes only items that the last measure listed under **Left over**. It keeps an item that a mount or a program uses, and says so. It also keeps old layers that an open conversion needs to finish or roll back.
+
+An **Unfinished conversion copy** is a partial copy left by a failed storage migration when the plugin could not remove it. The plugin checks its marker and path again before it removes the copy.
 
 ### The warning when the boot disk is nearly full
 
@@ -604,6 +612,11 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-20** — The **Left over** line marks retired layers needed by an open conversion and refuses to remove them. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #709.
+- **2026-10-20** — The engine migration waits for an active agent install. The **Agent Store** refuses installs, upgrades, restores from a kept backup and removals until conversion ends. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #708.
+- **2026-10-20** — A storage-path move waits until **Persistence engine** conversion ends. The two moves cannot run together. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #707.
+- **2026-10-20** — Automatic saves, merges and queued storage jobs wait while **Persistence engine** conversion runs; the migration retries a temporary storage lock conflict. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #706.
+- **2026-10-20** — A failed **Persistence engine** conversion removes its partial copy. If the copy cannot be removed, **Left over** shows **Unfinished conversion copy** and the **Remove** action checks the copy again. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #705.
 - **2026-10-20** — The **Boot disk space** report measures homes and agents from their configured storage paths. The **Persistence engine** confirmation checks the combined space for new storage and rollback copies. It gives the required and available space when it refuses, and saves the reason in the status. A failed conversion shows a short reason and keeps the exit code and command detail in the Debug Console. Specs `docs/specs/BOOT_DISK_SPACE.md` and `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issues #699 and #701.
 - **2026-10-19** — **Persistence engine** closes its confirmation after the conversion starts. Configuration and Home Storage show saved progress, and Home Storage disables conflicting actions. Manual and automatic workspace starts wait until conversion ends. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issues #693, #694, #696 and #697.
 - **2026-10-18** — A save that is refused for lack of space says "Not enough boot disk space to save the home" in the Unraid notice, the tray and the **Persist** message, and says what to do. The plugin tests the new layer at the compression of your last layer before it refuses. The guide says that files in the `tmp` folder of a home are treated as a cache. Spec `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issues #599 and #658.

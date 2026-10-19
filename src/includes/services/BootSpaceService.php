@@ -229,17 +229,28 @@ class BootSpaceService
     }
 
     /**
-     * The "Left over" items: [{key,label,bytes,path}]. The path is absolute and inside $persist.
-     * Keys: graduated:<name>, retired:<hash>, homelayers:<user>, testhome:<id>.
+     * The "Left over" items: [{key,label,bytes,path}]. Most paths are inside $persist.
+     * Keys: graduated:<name>, retired:<hash>, homelayers:<user>, testhome:<id>, unfinished:<type>_<id>.
      */
     public static function leftOverItems(string $persist, array $homes, callable $du, ?string $retiredList = null): array
     {
         $items = [];
+        $protectedRetirePaths = self::openConversionRetirePaths($persist);
         foreach (glob($persist . '/.graduated/*', GLOB_NOSORT) ?: [] as $p) {
             $name = basename($p);
             if (preg_match('/^[A-Za-z0-9._-]{1,128}$/', $name) !== 1) continue;
-            $items[] = ['key' => 'graduated:' . $name, 'label' => 'Old layers of a converted home or agent (' . $name . ')',
-                        'bytes' => $du($p), 'path' => $p];
+            $item = ['key' => 'graduated:' . $name, 'label' => 'Old layers of a converted home or agent (' . $name . ')',
+                     'bytes' => $du($p), 'path' => $p];
+            $items[] = self::protectOpenConversionItem($item, $protectedRetirePaths);
+        }
+        foreach (glob($persist . '/.graduate_staging_*', GLOB_NOSORT) ?: [] as $marker) {
+            if (is_link($marker) || !is_file($marker)) continue;
+            $markerName = substr(basename($marker), strlen('.graduate_staging_'));
+            $path = self::unfinishedCopyPath($persist, $markerName, $marker);
+            if ($path === null) continue;
+            $items[] = ['key' => 'unfinished:' . $markerName,
+                        'label' => 'Unfinished conversion copy (' . basename($path) . ')',
+                        'bytes' => $du($path), 'path' => $path];
         }
         $list = $retiredList ?? self::retiredListPath();
         $seen = [];
@@ -248,8 +259,9 @@ class BootSpaceService
                 $d = trim($d);
                 if ($d === '' || isset($seen[$d]) || !self::isInside($d, $persist) || !is_dir($d)) continue;
                 $seen[$d] = true;
-                $items[] = ['key' => 'retired:' . substr(sha1($d), 0, 12),
-                            'label' => 'Retired layers (' . basename($d) . ')', 'bytes' => $du($d), 'path' => $d];
+                $item = ['key' => 'retired:' . substr(sha1($d), 0, 12),
+                         'label' => 'Retired layers (' . basename($d) . ')', 'bytes' => $du($d), 'path' => $d];
+                $items[] = self::protectOpenConversionItem($item, $protectedRetirePaths);
             }
         }
         foreach ($homes['unused_layers'] as $u) {
@@ -265,6 +277,89 @@ class BootSpaceService
             $items[] = ['key' => 'testhome:' . $id, 'label' => 'Test home ' . $id, 'bytes' => $du($d), 'path' => $d];
         }
         return $items;
+    }
+
+    /** @return list<string> normalized paths that an open conversion intent still needs */
+    private static function openConversionRetirePaths(string $persist): array
+    {
+        $paths = [];
+        foreach (glob(rtrim($persist, '/') . '/.aicli-intent-*.json', GLOB_NOSORT) ?: [] as $intentPath) {
+            if (is_link($intentPath) || !is_file($intentPath)) continue;
+            if (preg_match('/^\.aicli-intent-(home|agent)-([A-Za-z0-9._-]{1,128})\.json$/D', basename($intentPath), $match) !== 1) {
+                continue;
+            }
+
+            $type = $match[1];
+            $id = $match[2];
+            $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id) ?? $id;
+            $paths[] = rtrim($persist, '/') . '/.graduated/' . $type . '_' . $safeId;
+
+            $intent = json_decode((string)@file_get_contents($intentPath), true);
+            $retire = is_array($intent) ? ($intent['retire'] ?? null) : null;
+            if (is_string($retire) && $retire !== '') $paths[] = $retire;
+        }
+
+        return array_values(array_unique(array_map([self::class, 'normalizePathForMatch'], $paths)));
+    }
+
+    /** Add a visible lock when an open conversion still needs this retired folder. */
+    private static function protectOpenConversionItem(array $item, array $protectedPaths): array
+    {
+        if (in_array(self::normalizePathForMatch((string)$item['path']), $protectedPaths, true)) {
+            $item['locked'] = true;
+            $item['label'] .= ' — needed to finish or roll back a conversion';
+        }
+        return $item;
+    }
+
+    private static function normalizePathForMatch(string $path): string
+    {
+        $real = realpath($path);
+        return rtrim($real === false ? $path : $real, '/') ?: '/';
+    }
+
+    /** Return a marked partial copy only when its path has a plugin-owned shape. */
+    private static function unfinishedCopyPath(string $persist, string $markerName, string $marker): ?string
+    {
+        if (preg_match('/^(home|agent)_([A-Za-z0-9_-]{1,128})$/D', $markerName, $m) !== 1) return null;
+        $type = $m[1];
+        $id = $m[2];
+        $lines = preg_split('/\R/', (string)@file_get_contents($marker)) ?: [];
+        $path = trim((string)($lines[0] ?? ''));
+        if ($path === '' || $path[0] !== '/') {
+            foreach ($lines as $line) {
+                $line = trim((string)$line);
+                if (strpos($line, 'copy=') === 0) {
+                    $path = substr($line, strlen('copy='));
+                    break;
+                }
+            }
+        }
+        if ($path === '' || $path[0] !== '/' || strpos($path, "\0") !== false || is_link($path) || !is_dir($path)) return null;
+        if ($path === rtrim($persist, '/') . '/passthrough/' . $type . 's/' . $id) return $path;
+
+        // Staged copies use the configured work folder or the standard pool path.
+        // Resolve the parent so a symlink cannot redirect the removal elsewhere.
+        $parent = realpath(dirname($path));
+        if ($parent === false || is_link(dirname($path))) return null;
+        if ($type === 'agent') {
+            $versionRoot = rtrim($persist, '/') . '/agents/.versions';
+            $versionParent = $versionRoot . '/' . $id;
+            if (!is_link(rtrim($persist, '/') . '/agents') && !is_link($versionRoot) && !is_link($versionParent)
+                && realpath($versionParent) === $parent
+                && preg_match('/^[A-Za-z0-9_-]{1,128}$/D', basename($path)) === 1) {
+                return $path;
+            }
+        }
+        if (basename($path) !== $type . '_' . $id) return null;
+        $config = ConfigService::getConfig();
+        $stageRoot = rtrim((string)($config['consolidate_stage_path'] ?? ''), '/');
+        if ($stageRoot !== '') {
+            $configuredCopyRoot = realpath($stageRoot . '/copy');
+            if ($configuredCopyRoot !== false && $parent === $configuredCopyRoot) return $path;
+        }
+        if (preg_match('#^/mnt/[A-Za-z0-9._-]+/aicliagents/work/copy$#D', $parent) === 1) return $path;
+        return null;
     }
 
     /** Ages (days) of the history figures that the Move old sessions dialog reads from the file. */
@@ -719,7 +814,7 @@ class BootSpaceService
      */
     public static function removeLeftover(string $key, array $seams = []): array
     {
-        if (preg_match('/^(graduated|retired|homelayers|testhome):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
+        if (preg_match('/^(graduated|retired|homelayers|testhome|unfinished):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
             return ['status' => 'error', 'message' => 'This item is not valid.'];
         }
         $data = $seams['data'] ?? self::read();
@@ -756,6 +851,9 @@ class BootSpaceService
         if ($item === null) {
             return ['status' => 'error', 'message' => 'This item is no longer left over, so nothing was removed.'];
         }
+        if (!empty($item['locked'])) {
+            return ['status' => 'error', 'message' => 'These layers are needed to finish or roll back a conversion, so they were not removed.'];
+        }
 
         [$type, $name] = explode(':', $key, 2);
         $freed = 0;
@@ -775,6 +873,24 @@ class BootSpaceService
         }
 
         $path = $item['path'];
+        if ($type === 'unfinished') {
+            $marker = $persist . '/.graduate_staging_' . $name;
+            if (self::unfinishedCopyPath($persist, $name, $marker) !== $path) {
+                return ['status' => 'error', 'message' => 'The unfinished conversion copy is no longer safe to remove.'];
+            }
+            if ($inUse($path)) {
+                return ['status' => 'error', 'message' => 'The item is in use (a mount or a process holds it), so it was not removed.'];
+            }
+            $freed = $listedBytes;
+            $out = []; $rc = 0;
+            @exec('rm -rf -- ' . escapeshellarg($path) . ' 2>&1', $out, $rc);
+            if (file_exists($path) || is_link($path)) {
+                return ['status' => 'error', 'message' => 'The item could not be removed completely.'];
+            }
+            @unlink($marker);
+            self::logRemoved($key, $freed);
+            return ['status' => 'ok', 'freed_bytes' => $freed];
+        }
         if (!self::isInside($path, $persist) || $path === $persist) {
             return ['status' => 'error', 'message' => 'The item lies outside the persistence folder, so it was not removed.'];
         }

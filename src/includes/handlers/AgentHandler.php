@@ -31,20 +31,38 @@ class AgentHandler {
             set_time_limit(self::$TIME_LIMITS[$action]);
         }
 
-        switch ($action) {
-            case 'install_agent':       return self::install();
-            case 'emergency_install':   return self::emergencyInstall();
-            case 'uninstall_agent':     return self::uninstall();
-            case 'check_updates':       return self::checkUpdates();
-            case 'check_versions':      return self::checkVersions();
-            case 'get_version_cache':   return self::getVersionCache();
-            case 'set_agent_channel':   return self::setAgentChannel();
-            case 'list_active_installs': return self::listActiveInstalls();
-            case 'get_upgrade_backup_estimate': return self::getUpgradeBackupEstimate();
-            case 'restore_agent_backup': return self::restoreAgentBackup();
-            case 'cancel_agent_upgrade': return self::cancelAgentUpgrade();
-            default:                    return null;
-            // Note: get_install_status outputs raw JSON and is dispatched directly
+        $storageGuard = null;
+        if (in_array($action, ['emergency_install', 'uninstall_agent', 'restore_agent_backup'], true)) {
+            $storageGuard = \AICliAgents\Services\StorageBackendMigrationService::acquireLaunchGuard(false);
+            if ($storageGuard === false) {
+                $refusal = \AICliAgents\Services\StorageBackendMigrationService::migrationRefusal();
+                return $refusal ?? ['status' => 'error', 'message' => 'A storage change is in progress. Wait for it to finish, then try again.'];
+            }
+            $refusal = \AICliAgents\Services\StorageBackendMigrationService::migrationRefusal();
+            if ($refusal !== null) {
+                \AICliAgents\Services\StorageBackendMigrationService::releaseLaunchGuard($storageGuard);
+                return $refusal;
+            }
+        }
+
+        try {
+            switch ($action) {
+                case 'install_agent':       return self::install();
+                case 'emergency_install':   return self::emergencyInstall();
+                case 'uninstall_agent':     return self::uninstall();
+                case 'check_updates':       return self::checkUpdates();
+                case 'check_versions':      return self::checkVersions();
+                case 'get_version_cache':   return self::getVersionCache();
+                case 'set_agent_channel':   return self::setAgentChannel();
+                case 'list_active_installs': return self::listActiveInstalls();
+                case 'get_upgrade_backup_estimate': return self::getUpgradeBackupEstimate();
+                case 'restore_agent_backup': return self::restoreAgentBackup();
+                case 'cancel_agent_upgrade': return self::cancelAgentUpgrade();
+                default:                    return null;
+                // Note: get_install_status outputs raw JSON and is dispatched directly
+            }
+        } finally {
+            \AICliAgents\Services\StorageBackendMigrationService::releaseLaunchGuard($storageGuard);
         }
     }
 
@@ -376,6 +394,22 @@ class AgentHandler {
      * @return array<string,mixed>
      */
     public static function installCore(string $agentId, string $version = '', string $backupDest = '', bool $force = false): array {
+        $launchGuard = \AICliAgents\Services\StorageBackendMigrationService::acquireLaunchGuard(false);
+        if ($launchGuard === false) {
+            $refusal = \AICliAgents\Services\StorageBackendMigrationService::migrationRefusal();
+            return $refusal ?? ['status' => 'error', 'message' => 'A storage change is in progress. Wait for it to finish, then try again.'];
+        }
+        try {
+            $refusal = \AICliAgents\Services\StorageBackendMigrationService::migrationRefusal();
+            if ($refusal !== null) return $refusal;
+            return self::installCoreWithLaunchGuard($agentId, $version, $backupDest, $force);
+        } finally {
+            \AICliAgents\Services\StorageBackendMigrationService::releaseLaunchGuard($launchGuard);
+        }
+    }
+
+    /** @return array<string,mixed> */
+    private static function installCoreWithLaunchGuard(string $agentId, string $version = '', string $backupDest = '', bool $force = false): array {
         if (empty($agentId)) {
             return ['status' => 'error', 'message' => 'No Agent ID provided'];
         }

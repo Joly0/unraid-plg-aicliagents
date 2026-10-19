@@ -10,6 +10,10 @@ namespace AICliAgents\Services;
 
 final class StorageBackendMigrationService
 {
+    private const CONVERSION_RETRY_LIMIT = 6;
+    private const CONVERSION_RETRY_DELAY_SECONDS = 5;
+    private const INSTALL_WAIT_TIMEOUT_SECONDS = 1200;
+
     public static function preflight(string $target, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
@@ -239,6 +243,17 @@ final class StorageBackendMigrationService
         return in_array((string)(self::readStatus()['status'] ?? ''), ['queued', 'running'], true);
     }
 
+    /** Plain server refusal shared by agent install, removal and upgrade paths. */
+    public static function migrationRefusal(): ?array
+    {
+        if (!self::isMigrationInProgress()) return null;
+        return [
+            'status' => 'error',
+            'reason' => 'storage_migration',
+            'message' => 'Wait for the storage migration to finish before installing, removing, or upgrading agents.',
+        ];
+    }
+
     /** Save a refusal so both status views retain the reason a migration did not start. */
     private static function recordPreflightFailure(array $check, string $target, array $config, array $entities): array
     {
@@ -256,10 +271,28 @@ final class StorageBackendMigrationService
         return $check;
     }
 
-    /** Reserve the global engine change, then start its worker without holding the page open. */
+    /** Reserve the shared migration right, then start the worker without holding the page open. */
     public static function startAsync(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
+        require_once __DIR__ . '/FileStorage.php';
+        require_once __DIR__ . '/StoragePathMoveJobService.php';
+        $migrationLock = FileStorage::acquireMigrationLock();
+        if ($migrationLock === null) {
+            return ['status' => 'error', 'message' => 'Another storage migration is already running. Wait for it to finish, then try again.'];
+        }
+        try {
+            $conflict = self::pathMoveConflictMessage();
+            if ($conflict !== null) return ['status' => 'error', 'message' => $conflict];
+            return self::startAsyncWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock);
+        } finally {
+            FileStorage::releaseMigrationLock($migrationLock);
+        }
+    }
+
+    /** @param resource|null $migrationLock */
+    private static function startAsyncWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock): array
+    {
         $check = $seams['preflight'] ?? self::preflight($target, $config, $seams);
         if (($check['status'] ?? '') !== 'ok') {
             $entities = $seams['entities'] ?? self::entities($config);
@@ -280,23 +313,33 @@ final class StorageBackendMigrationService
             if ((self::readStatus()['status'] ?? '') === 'queued') {
                 return ['status' => 'error', 'message' => 'A storage-engine migration is already queued. Wait for it to finish, then try again.'];
             }
+            $activeInstalls = self::activeInstallIds($seams);
             $busy = self::busyEntities($entities);
-            if ($busy !== []) {
+            if ($busy !== [] && $activeInstalls === []) {
                 return ['status' => 'error', 'message' => 'Storage work is active for ' . implode(', ', $busy) . '. Wait for it to finish, then try the engine change again.'];
             }
 
+            $waitingForInstalls = $activeInstalls !== [];
             $state = [
                 'status' => 'queued', 'from' => $from, 'target' => $target,
                 'started_at' => time(), 'updated_at' => time(), 'completed' => 0,
-                'total' => count($entities), 'current' => '', 'phase' => 'queued',
-                'message' => 'The migration is queued. Workspaces cannot open until it finishes.', 'worker_pid' => 0,
+                'total' => count($entities), 'current' => $waitingForInstalls ? implode(', ', $activeInstalls) : '',
+                'phase' => $waitingForInstalls ? 'waiting_for_installs' : 'queued',
+                'message' => $waitingForInstalls
+                    ? 'The migration is queued and waiting for agent installation to finish: ' . implode(', ', $activeInstalls) . '.'
+                    : 'The migration is queued. Workspaces cannot open until it finishes.',
+                'worker_pid' => 0,
+                'entities' => self::entityJournal($entities, $from, $target),
             ];
             if (!self::writeStatus($state)) {
                 return ['status' => 'error', 'message' => 'The migration status could not be saved. No storage was changed.'];
             }
-            // The queued state now refuses new starts and storage actions. Free
-            // the reservation before spawning so the worker can take the
-            // exclusive lock on its first attempt.
+            // The queued state now refuses path moves. Free the shared lock
+            // before spawning so the worker can take it on its first attempt.
+            FileStorage::releaseMigrationLock($migrationLock);
+            $migrationLock = null;
+            // The launch guard also blocks workspace starts until the worker
+            // records that it owns the storage policy.
             self::releaseLaunchGuard($lock);
             $lock = false;
             $spawn = $seams['spawn'] ?? static function (string $mode, bool $ack): int {
@@ -336,6 +379,18 @@ final class StorageBackendMigrationService
         } finally {
             self::releaseLaunchGuard($lock);
         }
+    }
+
+    /** Refuse the engine change while a path move is queued or still has its marker. */
+    private static function pathMoveConflictMessage(): ?string
+    {
+        if (FileStorage::isMigrationInProgress()) {
+            return 'A storage path move is still running. Wait for it to finish before changing the storage engine.';
+        }
+        if (StoragePathMoveJobService::hasPending()) {
+            return 'A storage path move is queued. Wait for it to finish before changing the storage engine.';
+        }
+        return null;
     }
 
     /** Run the accepted worker job and record a failure that happened before conversion began. */
@@ -456,6 +511,24 @@ final class StorageBackendMigrationService
     public static function migrate(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
+        require_once __DIR__ . '/FileStorage.php';
+        require_once __DIR__ . '/StoragePathMoveJobService.php';
+        $migrationLock = FileStorage::acquireMigrationLock();
+        if ($migrationLock === null) {
+            return ['status' => 'error', 'message' => 'Another storage migration is already running. Wait for it to finish, then try again.', 'migrated' => []];
+        }
+        try {
+            $conflict = self::pathMoveConflictMessage();
+            if ($conflict !== null) return ['status' => 'error', 'message' => $conflict, 'migrated' => []];
+            return self::migrateWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock);
+        } finally {
+            FileStorage::releaseMigrationLock($migrationLock);
+        }
+    }
+
+    /** @param resource|null $migrationLock */
+    private static function migrateWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock): array
+    {
         $check = $seams['preflight'] ?? self::preflight($target, $config, $seams);
         if (($check['status'] ?? '') !== 'ok') {
             $entities = $seams['entities'] ?? self::entities($config);
@@ -479,33 +552,71 @@ final class StorageBackendMigrationService
         }
         $result = null;
         try {
-            $busy = self::busyEntities($entities);
-            if ($busy !== []) {
-                $message = 'Storage work is active for ' . implode(', ', $busy) . '. Wait for it to finish, then try the engine change again.';
-                self::writeStatus([
-                    'status' => 'error', 'phase' => 'preflight', 'from' => $from, 'target' => $target,
-                    'started_at' => time(), 'updated_at' => time(), 'completed' => 0,
-                    'total' => count($entities), 'current' => $busy[0], 'message' => $message,
-                ]);
-                $result = ['status' => 'error', 'message' => $message, 'migrated' => []];
-            } else {
-                $state = [
-                    'status' => 'running', 'from' => $from, 'target' => $target,
-                    'started_at' => time(), 'updated_at' => time(), 'completed' => 0,
-                    'total' => count($entities), 'current' => '', 'phase' => 'converting', 'message' => 'Preparing migration',
-                ];
+            $state = [
+                'status' => 'running', 'from' => $from, 'target' => $target,
+                'started_at' => time(), 'updated_at' => time(), 'completed' => 0,
+                'total' => count($entities), 'current' => '', 'phase' => 'waiting_for_installs',
+                'message' => 'Checking for agent installations in progress.',
+                'entities' => self::entityJournal($entities, $from, $target),
+            ];
+            self::writeStatus($state);
+
+            $now = $seams['now'] ?? static fn(): int => time();
+            $installWait = $seams['install_wait'] ?? static function (int $seconds): void { sleep($seconds); };
+            $waitStartedAt = $now();
+            $activeInstalls = self::activeInstallIds($seams);
+            while ($activeInstalls !== []) {
+                if ($now() - $waitStartedAt >= self::INSTALL_WAIT_TIMEOUT_SECONDS) {
+                    $message = 'An agent installation did not finish in time. No storage was changed. Try the migration again.';
+                    $state['status'] = 'error';
+                    $state['phase'] = 'error';
+                    $state['current'] = '';
+                    $state['message'] = $message;
+                    $state['updated_at'] = $now();
+                    self::writeStatus($state);
+                    $result = ['status' => 'error', 'message' => $message, 'migrated' => []];
+                    break;
+                }
+                $state['phase'] = 'waiting_for_installs';
+                $state['current'] = implode(', ', $activeInstalls);
+                $state['message'] = 'Waiting for agent installation to finish: ' . implode(', ', $activeInstalls) . '.';
+                $state['updated_at'] = $now();
                 self::writeStatus($state);
-                $result = self::migrateLocked($from, $target, $entities, $seams, $save, $state);
-                $state['status'] = $result['status'] === 'ok' ? 'complete' : 'error';
-                $state['phase'] = $state['status'];
+                $installWait(self::CONVERSION_RETRY_DELAY_SECONDS);
+                $activeInstalls = self::activeInstallIds($seams);
+            }
+
+            if ($result === null) {
+                $state['phase'] = 'converting';
                 $state['current'] = '';
-                $state['message'] = (string)($result['message'] ?? 'Migration finished.');
-                $state['updated_at'] = time();
+                $state['message'] = 'Preparing migration';
+                $state['updated_at'] = $now();
                 self::writeStatus($state);
+                $busy = self::busyEntities($entities);
+                if ($busy !== []) {
+                    $message = 'Storage work is active for ' . implode(', ', $busy) . '. Wait for it to finish, then try the engine change again.';
+                    $state['status'] = 'error';
+                    $state['phase'] = 'preflight';
+                    $state['current'] = $busy[0];
+                    $state['message'] = $message;
+                    $state['updated_at'] = $now();
+                    self::writeStatus($state);
+                    $result = ['status' => 'error', 'message' => $message, 'migrated' => []];
+                } else {
+                    $result = self::migrateLocked($from, $target, $entities, $seams, $save, $state);
+                    $state['status'] = $result['status'] === 'ok' ? 'complete' : 'error';
+                    $state['phase'] = $state['status'];
+                    $state['current'] = '';
+                    $state['message'] = (string)($result['message'] ?? 'Migration finished.');
+                    $state['updated_at'] = time();
+                    self::writeStatus($state);
+                }
             }
         } finally {
             self::releaseLaunchGuard($lock);
         }
+        FileStorage::releaseMigrationLock($migrationLock);
+        $migrationLock = null;
         if (!empty($result['resume_after_migration'])) {
             if (isset($seams['resume']) && is_callable($seams['resume'])) {
                 ($seams['resume'])();
@@ -517,15 +628,42 @@ final class StorageBackendMigrationService
         return $result;
     }
 
+    /** @return list<string> active install ids from the tray and live worker processes */
+    private static function activeInstallIds(array $seams): array
+    {
+        if (isset($seams['active_installs']) && is_callable($seams['active_installs'])) {
+            $ids = (array)($seams['active_installs'])();
+        } else {
+            $ids = [];
+            if (class_exists(ActivityService::class)) {
+                foreach (ActivityService::listAll() as $entry) {
+                    $opId = (string)($entry['opId'] ?? '');
+                    if (in_array((string)($entry['status'] ?? ''), ['running', 'stalled'], true)
+                        && preg_match('/^install_([A-Za-z0-9._-]{1,128})$/', $opId, $m)) {
+                        $ids[] = $m[1];
+                    }
+                }
+            }
+            if (class_exists(PendingAgentUpgradeService::class)
+                && method_exists(PendingAgentUpgradeService::class, 'runningInstallIds')) {
+                $ids = array_merge($ids, PendingAgentUpgradeService::runningInstallIds());
+            }
+        }
+        $ids = array_values(array_unique(array_filter(array_map('strval', $ids), static fn(string $id): bool => $id !== '')));
+        sort($ids);
+        return $ids;
+    }
+
     /** @param array<int,array{type:string,id:string}> $entities */
     private static function migrateLocked(string $from, string $target, array $entities, array $seams, callable $save, array &$state): array
     {
         $convert = $seams['convert'] ?? static fn(string $type, string $id, string $mode, bool $direct): array => FileStorage::migrateBackend($type, $id, $mode, $direct);
         $wrap = $seams['wrap'] ?? static fn(string $f, string $t, callable $work) => FileStorage::migrateBackendPolicy($f, $t, $work);
+        $retryWait = $seams['retry_wait'] ?? static function (int $seconds): void { sleep($seconds); };
         $migrated = [];
         $failure = null;
         $rollbackFailed = [];
-        $result = $wrap($from, $target, function () use ($entities, $target, $from, $seams, $convert, &$migrated, &$failure, &$rollbackFailed, &$state): bool {
+        $result = $wrap($from, $target, function () use ($entities, $target, $from, $seams, $convert, $retryWait, &$migrated, &$failure, &$rollbackFailed, &$state): bool {
             // No workspace may keep writing while the authority of its storage
             // engine is changing. The shell operation still refuses a busy mount.
             if (isset($seams['evict'])) {
@@ -536,35 +674,69 @@ final class StorageBackendMigrationService
                 }
                 ProcessManager::evictAllForStorageMigration();
             }
+            $processed = 0;
             foreach ($entities as $entity) {
-                $state['current'] = $entity['type'] . '/' . $entity['id'];
+                $key = $entity['type'] . '/' . $entity['id'];
+                $state['current'] = $key;
                 $state['message'] = 'Converting ' . $state['current'];
+                $state['entities'][$key]['status'] = 'converting';
                 $state['updated_at'] = time();
                 self::writeStatus($state);
-                $r = $convert($entity['type'], $entity['id'], $target, $target === StorageBackendPolicyService::PASSTHROUGH);
-                if ((int)($r['exit'] ?? 1) !== 0) {
+                $retry = 0;
+                do {
+                    $r = $convert($entity['type'], $entity['id'], $target, $target === StorageBackendPolicyService::PASSTHROUGH);
+                    $exit = (int)($r['exit'] ?? 1);
+                    if ($exit !== 2 || $retry >= self::CONVERSION_RETRY_LIMIT) break;
+                    $retry++;
+                    // Exit 2 means another storage operation still owns the
+                    // entity. Keep the migration active and retry that entity.
+                    $state['entities'][$key]['status'] = 'waiting';
+                    $state['entities'][$key]['retry'] = $retry;
+                    $state['message'] = 'Waiting for storage to become available for ' . $key . ' (retry ' . $retry . ' of ' . self::CONVERSION_RETRY_LIMIT . ').';
+                    $state['updated_at'] = time();
+                    self::writeStatus($state);
+                    $retryWait(self::CONVERSION_RETRY_DELAY_SECONDS);
+                    $state['entities'][$key]['status'] = 'converting';
+                    $state['message'] = 'Converting ' . $key;
+                    $state['updated_at'] = time();
+                    self::writeStatus($state);
+                } while (true);
+                $changed = !empty($r['changed']);
+                $state['entities'][$key]['exit'] = $exit;
+                $state['entities'][$key]['changed'] = $changed;
+                if ($exit !== 0) {
+                    $state['entities'][$key]['status'] = 'failed';
                     $diagnostic = self::cleanDiagnostic((string)($r['diagnostic'] ?? ''));
                     $reason = self::conversionFailureReason((string)($r['reason'] ?? ''), $diagnostic);
                     $failure = $entity['type'] . '/' . $entity['id'] . ': ' . $reason;
-                    self::logConversionFailure($entity, (int)($r['exit'] ?? 1), (string)($r['reason'] ?? ''), $diagnostic, $target);
+                    self::logConversionFailure($entity, $exit, (string)($r['reason'] ?? ''), $diagnostic, $target);
                     // Convert the entities that already moved back, newest first.
+                    if ($changed) $migrated[] = $key;
                     foreach (array_reverse($migrated) as $done) {
                         $state['phase'] = 'rolling_back';
                         $state['current'] = $done;
                         $state['message'] = 'Restoring ' . $done . ' to ' . StorageBackendPolicyService::label($from);
+                        $state['entities'][$done]['status'] = 'rolling_back';
                         $state['updated_at'] = time();
                         self::writeStatus($state);
                         [$t, $i] = explode('/', $done, 2);
-                        $b = $convert($t, $i, $from, $from === StorageBackendPolicyService::PASSTHROUGH);
-                        if ((int)($b['exit'] ?? 1) !== 0) $rollbackFailed[] = $done;
-                        else $state['completed'] = max(0, (int)$state['completed'] - 1);
+                        $b = $convert($t, $i, $from, $from === StorageBackendPolicyService::PASSTHROUGH, true);
+                        if ((int)($b['exit'] ?? 1) !== 0) {
+                            $rollbackFailed[] = $done;
+                            $state['entities'][$done]['status'] = 'rollback_failed';
+                        } else {
+                            $state['completed'] = max(0, (int)$state['completed'] - 1);
+                            $state['entities'][$done]['status'] = 'rolled_back';
+                        }
                         $state['updated_at'] = time();
                         self::writeStatus($state);
                     }
                     return false;
                 }
-                $migrated[] = $entity['type'] . '/' . $entity['id'];
-                $state['completed'] = count($migrated);
+                $state['entities'][$key]['status'] = $changed ? 'converted' : 'unchanged';
+                if ($changed) $migrated[] = $key;
+                $processed++;
+                $state['completed'] = $processed;
                 $state['updated_at'] = time();
                 self::writeStatus($state);
             }
@@ -583,6 +755,17 @@ final class StorageBackendMigrationService
             return ['status' => 'error', 'message' => 'Storage data migrated, but the global policy could not be saved. Re-open Settings and retry.', 'migrated' => $migrated];
         }
         return ['status' => 'ok', 'message' => 'Migrated ' . count($migrated) . ' storage entities to ' . StorageBackendPolicyService::label($target) . '.', 'migrated' => $migrated, 'resume_after_migration' => true];
+    }
+
+    /** Keep the source engine and conversion outcome for each entity in the saved migration state. */
+    private static function entityJournal(array $entities, string $from, string $target): array
+    {
+        $journal = [];
+        foreach ($entities as $entity) {
+            $key = (string)($entity['type'] ?? '') . '/' . (string)($entity['id'] ?? '');
+            $journal[$key] = ['from' => $from, 'target' => $target, 'status' => 'pending', 'changed' => null];
+        }
+        return $journal;
     }
 
     /** Return a short reason that fits the saved status and Settings page. */
