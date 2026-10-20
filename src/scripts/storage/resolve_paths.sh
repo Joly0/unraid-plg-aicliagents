@@ -121,7 +121,8 @@ home_persist_path() {
 # var.ini covers a stop the hook has not seen yet. AICLI_ARRAY_STOPPING_FLAG
 # and AICLI_VAR_INI are test seams.
 
-# aicli_array_stopping: true while the array is stopping (or stopped).
+# aicli_array_stopping: true while the array is stopping (event/stopping until
+# event/stopping_array, which runs once every disk and pool is unmounted).
 aicli_array_stopping() {
     [ -f "${AICLI_ARRAY_STOPPING_FLAG:-$MOUNT_ROOT/.array_stopping}" ] && return 0
     grep -q '^fsState="Stopping"' "${AICLI_VAR_INI:-/var/local/emhttp/var.ini}" 2>/dev/null
