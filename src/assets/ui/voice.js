@@ -1376,7 +1376,8 @@
         var seg = Number(reply.segment || 0);
         if (seg < live.segment) return null;                 // a late reply for a closed segment
         if (seg > live.segment) { live.segment = seg; live.interim = ''; }
-        var text = String(reply.text || '').replace(/^\s+|\s+$/g, '');
+        // The engine puts two spaces after a full stop; one is typed.
+        var text = String(reply.text || '').replace(/\s+/g, ' ').replace(/^ | $/g, '');
         if (reply.is_final) {
             live.interim = '';
             live.segment = seg + 1;
@@ -1397,12 +1398,20 @@
         } catch (e) { /* best effort */ }
     }
 
+    var LIVE_MAX_PENDING = LIVE_RATE * 10;   // audio kept while the socket is not open yet: 10 s at most
+
+    /** Adds samples and sends every full frame while the socket is open. Audio from before the
+     *  socket opened (or while it reconnects) waits and goes first, so the first word is not lost. */
     function liveSendFloat(live, samples) {
-        live.pending = live.pending.length ? concatFloat(live.pending, samples) : samples;
+        if (samples && samples.length) live.pending = live.pending.length ? concatFloat(live.pending, samples) : samples;
+        if (!live.ws || live.ws.readyState !== 1) {
+            if (live.pending.length > LIVE_MAX_PENDING) live.pending = live.pending.slice(live.pending.length - LIVE_MAX_PENDING);
+            return;
+        }
         while (live.pending.length >= LIVE_FRAME) {
             var frame = live.pending.slice(0, LIVE_FRAME);
             live.pending = live.pending.slice(LIVE_FRAME);
-            if (live.ws && live.ws.readyState === 1) { try { live.ws.send(frame.buffer); } catch (e) { /* the close handler decides */ } }
+            try { live.ws.send(frame.buffer); } catch (e) { return; /* the close handler decides */ }
         }
     }
 
@@ -1476,6 +1485,7 @@
         ws.onopen = function () {
             if (live.openTimer) { clearTimeout(live.openTimer); live.openTimer = null; }
             live.opened = true;
+            liveSendFloat(live, null);   // the audio that waited for the socket
         };
         ws.onmessage = function (evt) {
             if (gen !== inputGeneration || inputLive !== live) return;
