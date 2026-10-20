@@ -800,14 +800,22 @@ class HealthService {
     private static function collectVoiceInput(): ?array {
         $config = ConfigService::getConfig();
         $sttUrl = trim((string)($config['stt_url'] ?? ''));
-        if ($sttUrl === '') {
+        $streamUrl = trim((string)($config['stt_stream_url'] ?? ''));
+        if ($sttUrl === '' && $streamUrl === '') {
             return null;
         }
-        $path = VoiceService::sttStatusPath();
+        // VOICE_LIVE_ENGINE.md R7 (#731): with a live engine set, the newest of the two
+        // records (live session, piece transcription) says how dictation went last.
         $status = null;
-        if (is_file($path)) {
+        $paths = [];
+        if ($sttUrl !== '') $paths[] = VoiceService::sttStatusPath();
+        if ($streamUrl !== '') $paths[] = VoiceService::sttLiveStatusPath();
+        foreach ($paths as $path) {
+            if (!is_file($path)) continue;
             $decoded = json_decode((string) @file_get_contents($path), true);
-            $status = is_array($decoded) ? $decoded : null;
+            if (is_array($decoded) && ($status === null || (int)($decoded['at'] ?? 0) > (int)($status['at'] ?? 0))) {
+                $status = $decoded;
+            }
         }
         return self::evalVoiceInput($status);
     }

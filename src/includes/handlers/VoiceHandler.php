@@ -67,6 +67,8 @@ class VoiceHandler
             case 'voice_dictate':       return self::voiceDictate();
             // docs/specs/VOICE_INPUT.md "Engine down" (#484).
             case 'voice_stt_health':    return self::voiceSttHealth();
+            // docs/specs/VOICE_LIVE_ENGINE.md R7 (#731).
+            case 'voice_live_result':   return self::voiceLiveResult();
             // docs/specs/VOICE_MAIL.md — Forgejo #210.
             case 'voicemail_list':      return self::voicemailList();
             case 'voicemail_mark_heard':return self::voicemailMarkHeard();
@@ -295,7 +297,7 @@ class VoiceHandler
                 'voice_set_workspace_voice',
                 'voice_set_workspace_speed',
                 'voice_engine_prepare', 'check_voice_engine', 'voice_engine_finish', 'voice_engine_status', 'voice_engine_download',
-                'voice_stt_health'];
+                'voice_stt_health', 'voice_live_result'];
     }
 
     private static function getVoiceSettings(): array
@@ -341,6 +343,8 @@ class VoiceHandler
             'stt_url'      => static fn (string $v): string => $v,
             'stt_model'    => static fn (string $v): string => $v !== '' ? $v : 'whisper-1',
             'stt_language' => static fn (string $v): string => $v,
+            // VOICE_LIVE_ENGINE.md R1 (#731): the live (websocket) engine, same contract.
+            'stt_stream_url' => static fn (string $v): string => $v,
             // VOICE_MAIL.md R8: retention. An emptied field goes back to the default.
             'voicemail_max_per_workspace' => static fn (string $v): string => $v !== '' ? $v : (string)VoiceMailService::DEFAULT_MAX_PER_WORKSPACE,
             'voicemail_max_age_days'      => static fn (string $v): string => $v !== '' ? $v : (string)VoiceMailService::DEFAULT_MAX_AGE_DAYS,
@@ -571,6 +575,18 @@ class VoiceHandler
     private static function voiceSttHealth(): array
     {
         return ['status' => 'ok'] + VoiceService::sttHealth();
+    }
+
+    /**
+     * VOICE_LIVE_ENGINE.md R7 (#731): POST ok ('1'|'0') and message — how a live dictation
+     * session went. The browser talks to the live engine directly, so only the page knows.
+     * Recorded for the Health check; never carries the dictated text.
+     */
+    private static function voiceLiveResult(): array
+    {
+        $ok = (string)($_POST['ok'] ?? '') === '1';
+        VoiceService::recordLiveResult($ok, (string)($_POST['message'] ?? ''));
+        return ['status' => 'ok'];
     }
 
     /**

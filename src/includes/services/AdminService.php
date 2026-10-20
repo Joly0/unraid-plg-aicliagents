@@ -631,6 +631,7 @@ class AdminService {
             'stt_url'       => ['group' => 'voice', 'description' => 'Speech-to-text (transcription) engine URL. Empty uses the browser\'s own speech recognition; set to send recordings to a transcription server instead. Changes only on the Settings page, Agent voice — an agent cannot change it.'],
             'stt_model'     => ['group' => 'voice', 'description' => 'The model name to ask the transcription engine for (ignored in browser mode). Must match a model the engine actually has installed.'],
             'stt_language'  => ['group' => 'voice', 'description' => 'Language hint for transcription. Empty lets the engine detect the language on its own.'],
+            'stt_stream_url' => ['group' => 'voice', 'description' => 'Live transcription endpoint: a streaming (websocket) engine, ws:// or wss://. The browser streams the microphone to it and types the words while you speak, with corrections. Empty turns live dictation off. Changes only on the Settings page, Agent voice.'],
 
             // ---- voice mail (VOICE_MAIL.md R8) ----
             'voicemail_max_per_workspace' => ['group' => 'voice', 'description' => 'How many voice mail messages to keep for each workspace, 1 to 500. When a workspace has more, the oldest heard messages go first.'],
@@ -1007,6 +1008,8 @@ class AdminService {
         'stt_url'          => ['regex' => '#^https?://[^\s/]+(/v1)?/?$#i', 'allowEmpty' => true, 'hint' => "empty (browser mode), or an http(s) URL with no path beyond an optional '/v1'"],
         'stt_model'        => ['regex' => '#^[\w.\-/]{1,64}$#', 'hint' => "a model name the engine lists (letters, digits, . _ - and, for a vendor-style id, /, e.g. Systran/faster-whisper-small)"],
         'stt_language'     => ['regex' => '/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/', 'allowEmpty' => true, 'hint' => 'empty (detect), or a short language tag such as en or en-US'],
+        // VOICE_LIVE_ENGINE.md R1 (#731).
+        'stt_stream_url'   => ['regex' => '#^wss?://[^\s/]+(/[\w./-]*)?$#i', 'allowEmpty' => true, 'hint' => "empty (off), or a ws:// or wss:// URL such as ws://192.168.1.9:8012"],
         // VOICE_MAIL.md R8: a retention POLICY for kept messages (text only, a few
         // hundred bytes each). The upper bounds keep the store small on Flash;
         // VoiceMailService::HARD_MAX_TOTAL still caps the whole store at 2000.

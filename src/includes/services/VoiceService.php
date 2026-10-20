@@ -192,6 +192,27 @@ class VoiceService {
         return self::dir() . '/status-stt.json';
     }
 
+    /** VOICE_LIVE_ENGINE.md R7 (#731): the last live dictation session's outcome, written by recordLiveResult(). */
+    public static function sttLiveStatusPath(): string {
+        return self::dir() . '/status-stt-live.json';
+    }
+
+    /**
+     * VOICE_LIVE_ENGINE.md R7 (#731): the browser talks to the live engine directly, so the
+     * page reports how a session went (connected and worked, or the error sentence). Kept for
+     * the Health check `voice_input`. Never the dictated text: one plain sentence, at most 200
+     * characters, control characters removed.
+     */
+    public static function recordLiveResult(bool $ok, string $message): void {
+        $message = (string)(preg_replace('/[\x00-\x1F\x7F\s]+/u', ' ', $message) ?? '');   // control characters and runs of space: one space
+        $message = mb_substr(trim($message), 0, 200);
+        AtomicWriteService::writeJson(self::sttLiveStatusPath(), [
+            'ok'      => $ok,
+            'message' => $message !== '' ? $message : ($ok ? 'ok' : 'Live transcription failed.'),
+            'at'      => self::now(),
+        ]);
+    }
+
     private static function now(): int {
         return self::$now !== null ? (int)(self::$now)() : time();
     }
@@ -211,7 +232,7 @@ class VoiceService {
      * `stt_mode` are the input-side counterparts of the existing `tts_*`/`mode`
      * keys — same shape, same "key is set, never the key itself" rule.
      *
-     * @return array{voice_enabled:bool,tts_url:string,tts_voice:string,tts_speed:string,tts_api_key_set:bool,mode:string,stt_url:string,stt_model:string,stt_language:string,stt_api_key_set:bool,stt_mode:string,voicemail_max_per_workspace:string,voicemail_max_age_days:string}
+     * @return array{voice_enabled:bool,tts_url:string,tts_voice:string,tts_speed:string,tts_api_key_set:bool,mode:string,stt_url:string,stt_model:string,stt_language:string,stt_api_key_set:bool,stt_mode:string,stt_stream_url:string,voicemail_max_per_workspace:string,voicemail_max_age_days:string}
      */
     public static function settings(): array {
         $config = ConfigService::getConfig();
@@ -232,6 +253,8 @@ class VoiceService {
             'stt_language'    => (string)($config['stt_language'] ?? ''),
             'stt_api_key_set' => self::sttApiKey() !== '',
             'stt_mode'        => $sttUrl !== '' ? 'engine' : 'browser',
+            // VOICE_LIVE_ENGINE.md R1 (#731): empty = no live dictation.
+            'stt_stream_url'  => trim((string)($config['stt_stream_url'] ?? '')),
             // VOICE_MAIL.md R8: retention, shown and edited on the same card.
             'voicemail_max_per_workspace' => (string)($config['voicemail_max_per_workspace'] ?? '') ?: (string)VoiceMailService::DEFAULT_MAX_PER_WORKSPACE,
             'voicemail_max_age_days'      => (string)($config['voicemail_max_age_days'] ?? '') ?: (string)VoiceMailService::DEFAULT_MAX_AGE_DAYS,

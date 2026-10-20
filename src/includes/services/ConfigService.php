@@ -206,6 +206,8 @@ class ConfigService {
             'stt_url'                               => '',
             'stt_model'                             => 'whisper-1',
             'stt_language'                          => '',
+            // VOICE_LIVE_ENGINE.md R1 (#731): a streaming (websocket) engine for live dictation. Empty = off.
+            'stt_stream_url'                        => '',
             // VOICE_MAIL.md R8: how much voice mail to keep. A message goes when
             // its workspace holds more than this many (heard ones first), or when
             // it is older than this many days, whichever comes first.

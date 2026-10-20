@@ -1340,6 +1340,247 @@
         });
     }
 
+    // ---- live mode (a streaming engine over a websocket) -------------------
+    // docs/specs/VOICE_LIVE_ENGINE.md (#731). The browser streams the microphone to
+    // `opts.sttStreamUrl` as 16 kHz mono float32 frames of 100 ms. Each reply carries the
+    // FULL text of the open segment; it goes out as an interim event (the terminal types and
+    // corrects it, R13), and `is_final` sends it as a phrase (R11/R12), the same events as
+    // browser recognition. A failure moves the recording to the piece engine (stt_url) or the
+    // browser's recognition. The page reports each session's outcome for the Health check.
+    var LIVE_RATE = 16000;
+    var LIVE_FRAME = 1600;            // 0.1 s at 16 kHz
+    var LIVE_OPEN_TIMEOUT_MS = 3000;
+    var LIVE_EOF_WAIT_MS = 3000;
+    var LIVE_TAIL_SECONDS = 0.3;      // silence before "Done", so the last word is not cut
+    var LIVE_MAX_RECONNECTS = 2;      // the proxy closes a stream after 4 min with no traffic
+    var LIVE_DOWN_NOTE = 'The live transcription engine is not answering, so dictation goes on without live words.';
+    var inputLive = null;             // the live session of this recording, or null
+
+    /** Linear resampler: float samples at `from` Hz to `to` Hz. Exposed for the unit test. */
+    function liveResample(samples, from, to) {
+        if (from === to) return Float32Array.from(samples);
+        var n = Math.floor(samples.length * to / from);
+        var out = new Float32Array(n);
+        var ratio = from / to;
+        for (var i = 0; i < n; i++) {
+            var x = i * ratio, i0 = Math.floor(x), f = x - i0;
+            var a = samples[i0] || 0, b = i0 + 1 < samples.length ? samples[i0 + 1] : a;
+            out[i] = a + (b - a) * f;
+        }
+        return out;
+    }
+
+    /** One reply from the engine, folded into the session. Returns the event to send, or null. Exposed for the unit test. */
+    function liveReduce(live, reply) {
+        if (!reply || typeof reply !== 'object') return null;
+        var seg = Number(reply.segment || 0);
+        if (seg < live.segment) return null;                 // a late reply for a closed segment
+        if (seg > live.segment) { live.segment = seg; live.interim = ''; }
+        var text = String(reply.text || '').replace(/^\s+|\s+$/g, '');
+        if (reply.is_final) {
+            live.interim = '';
+            live.segment = seg + 1;
+            return { phrase: text };
+        }
+        if (text === live.interim) return null;
+        live.interim = text;
+        return { interim: text };
+    }
+
+    function reportLiveResult(ok, message) {
+        try {
+            fetch(inputAjaxUrl('voice_live_result'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'ok=' + (ok ? '1' : '0') + '&message=' + encodeURIComponent(message || '') + '&csrf_token=' + encodeURIComponent(inputCsrf())
+            }).catch(function () { /* best effort */ });
+        } catch (e) { /* best effort */ }
+    }
+
+    function liveSendFloat(live, samples) {
+        live.pending = live.pending.length ? concatFloat(live.pending, samples) : samples;
+        while (live.pending.length >= LIVE_FRAME) {
+            var frame = live.pending.slice(0, LIVE_FRAME);
+            live.pending = live.pending.slice(LIVE_FRAME);
+            if (live.ws && live.ws.readyState === 1) { try { live.ws.send(frame.buffer); } catch (e) { /* the close handler decides */ } }
+        }
+    }
+
+    function concatFloat(a, b) {
+        var c = new Float32Array(a.length + b.length);
+        c.set(a, 0); c.set(b, a.length);
+        return c;
+    }
+
+    function liveTeardownAudio(live) {
+        if (live.node) { try { live.node.disconnect(); } catch (e) { /* noop */ } live.node.onaudioprocess = null; live.node = null; }
+        if (live.source) { try { live.source.disconnect(); } catch (e) { /* noop */ } live.source = null; }
+        if (live.ctx) { try { live.ctx.close(); } catch (e) { /* noop */ } live.ctx = null; }
+        stopInputTracks();
+    }
+
+    function liveCloseSocket(live) {
+        if (live.openTimer) { clearTimeout(live.openTimer); live.openTimer = null; }
+        if (live.eofTimer) { clearTimeout(live.eofTimer); live.eofTimer = null; }
+        var ws = live.ws;
+        live.ws = null;
+        if (ws) { ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null; try { ws.close(); } catch (e) { /* noop */ } }
+    }
+
+    /** The end of a live recording: whatever is still open goes out as the stop flush. */
+    function finishLiveInput(gen, live) {
+        if (gen !== inputGeneration || inputLive !== live || live.done) return;
+        live.done = true;
+        liveCloseSocket(live);
+        liveTeardownAudio(live);
+        clearInputTimers();
+        inputLive = null;
+        var leftover = live.interim;
+        live.interim = '';
+        inputInterim = '';
+        reportLiveResult(true, live.heard ? 'Live transcription worked.' : 'Live transcription connected (no speech heard).');
+        setInputState('idle', { text: leftover });
+    }
+
+    /** The live engine failed: carry on with the piece engine or the browser, and say so once. */
+    function liveFallBack(gen, live, reason) {
+        if (gen !== inputGeneration || inputLive !== live || live.done) return;
+        live.done = true;
+        liveCloseSocket(live);
+        liveTeardownAudio(live);
+        inputLive = null;
+        reportLiveResult(false, reason);
+        // Words of the open segment that were already typed stay typed: the stop flush is empty.
+        live.interim = '';
+        inputInterim = '';
+        // A stop was already requested: end here. (Before the microphone opened the state is
+        // not 'recording' yet, and the recording must still move on, so the state is not checked.)
+        if (live.stopping) { clearInputTimers(); setInputState('idle', { text: '' }); return; }
+        var rest = {};
+        for (var k in inputOpts) { if (Object.prototype.hasOwnProperty.call(inputOpts, k)) rest[k] = inputOpts[k]; }
+        rest.sttStreamUrl = '';
+        inputOpts = rest;
+        if (rest.sttUrl) startEngineInput(gen); else startBrowserInput(gen, ENGINE_DOWN_NO_BROWSER_NOTE);
+        if (_inputState !== 'refused') dispatchInput({ state: 'recording', error: LIVE_DOWN_NOTE });
+    }
+
+    function liveConnect(gen, live) {
+        var url = String(inputOpts.sttStreamUrl || '');
+        var ws;
+        try { ws = new WebSocket(url); } catch (e) { liveFallBack(gen, live, 'The live transcription endpoint is not a valid address.'); return; }
+        ws.binaryType = 'arraybuffer';
+        live.ws = ws;
+        live.openTimer = setTimeout(function () {
+            if (live.ws === ws && ws.readyState !== 1) liveFallBack(gen, live, 'The live transcription engine did not answer in time.');
+        }, LIVE_OPEN_TIMEOUT_MS);
+        ws.onopen = function () {
+            if (live.openTimer) { clearTimeout(live.openTimer); live.openTimer = null; }
+            live.opened = true;
+        };
+        ws.onmessage = function (evt) {
+            if (gen !== inputGeneration || inputLive !== live) return;
+            var reply = null;
+            try { reply = JSON.parse(String(evt.data)); } catch (e) { return; }
+            var out = liveReduce(live, reply);
+            if (out && out.phrase) { live.heard = true; inputHeardThisRecording = true; inputInterim = ''; dispatchInput({ state: liveInputState(), phrase: out.phrase }); }
+            else if (out && typeof out.interim === 'string') {
+                if (out.interim) { live.heard = true; inputHeardThisRecording = true; }
+                inputInterim = out.interim;
+                setInputState(liveInputState(), { interim: out.interim, seconds: inputSeconds, live: true });
+                armBrowserSilenceStop(gen);
+            }
+            if (reply && reply.is_eof) finishLiveInput(gen, live);
+        };
+        ws.onclose = function () {
+            if (live.ws !== ws || live.done) return;
+            live.ws = null;
+            if (live.stopping) { finishLiveInput(gen, live); return; }
+            // The proxy closes a stream that idled for 4 minutes; open a new one once or twice.
+            if (live.opened && live.reconnects < LIVE_MAX_RECONNECTS) {
+                live.reconnects++;
+                live.opened = false;
+                live.segment = 0;
+                liveConnect(gen, live);
+                return;
+            }
+            liveFallBack(gen, live, live.opened ? 'The live transcription engine closed the connection.' : 'The live transcription engine is not answering.');
+        };
+        ws.onerror = function () { /* onclose follows and decides */ };
+    }
+
+    function startLiveInput(gen) {
+        if (!window.WebSocket || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            liveFallBackBeforeStart(gen, 'This browser cannot stream to the live transcription engine.');
+            return;
+        }
+        // An HTTPS page cannot open a plain ws:// socket (mixed content).
+        if (window.location && window.location.protocol === 'https:' && /^ws:/i.test(String(inputOpts.sttStreamUrl || ''))) {
+            liveFallBackBeforeStart(gen, 'This page is HTTPS, so it cannot use a ws:// live endpoint; set a wss:// address.');
+            return;
+        }
+        var live = { ws: null, ctx: null, source: null, node: null, pending: new Float32Array(0), segment: 0, interim: '',
+                     opened: false, stopping: false, done: false, heard: false, reconnects: 0, openTimer: null, eofTimer: null };
+        inputLive = live;
+        liveConnect(gen, live);
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+            if (gen !== inputGeneration || inputLive !== live || live.done) {
+                try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) { /* noop */ }
+                return;
+            }
+            inputStream = stream;
+            try {
+                var Ctx = window.AudioContext || window.webkitAudioContext;
+                live.ctx = new Ctx();
+                live.source = live.ctx.createMediaStreamSource(stream);
+                // ScriptProcessorNode: deprecated but in every browser, and it needs no module file.
+                live.node = live.ctx.createScriptProcessor(4096, 1, 1);
+                var rate = live.ctx.sampleRate;
+                live.node.onaudioprocess = function (e) {
+                    if (gen !== inputGeneration || live.done || live.stopping) return;
+                    liveSendFloat(live, liveResample(e.inputBuffer.getChannelData(0), rate, LIVE_RATE));
+                };
+                live.source.connect(live.node);
+                live.node.connect(live.ctx.destination);   // a processor runs only while connected; its output is silent
+            } catch (e) {
+                liveFallBack(gen, live, 'The browser could not read the microphone for live transcription.');
+                return;
+            }
+            setInputState('recording', { interim: '', seconds: 0, live: true });
+        }).catch(function () {
+            if (gen !== inputGeneration) return;
+            liveCloseSocket(live);
+            inputLive = null;
+            live.done = true;
+            refuseInput('The browser refused microphone access; allow it in the site settings and try again.');
+        });
+    }
+
+    /** No live session could start: use the piece engine or the browser from the first word. */
+    function liveFallBackBeforeStart(gen, reason) {
+        reportLiveResult(false, reason);
+        var rest = {};
+        for (var k in inputOpts) { if (Object.prototype.hasOwnProperty.call(inputOpts, k)) rest[k] = inputOpts[k]; }
+        rest.sttStreamUrl = '';
+        inputOpts = rest;
+        if (rest.sttUrl) startEngineInput(gen); else startBrowserInput(gen);
+        if (_inputState !== 'refused') dispatchInput({ state: 'recording', error: reason });
+    }
+
+    /** Stop a live recording: a short tail of silence, "Done", then wait for the end of the stream. */
+    function stopLiveInput(live) {
+        var gen = inputGeneration;
+        if (live.stopping) return;
+        live.stopping = true;
+        liveTeardownAudio(live);
+        if (!live.ws || live.ws.readyState !== 1) { finishLiveInput(gen, live); return; }
+        try {
+            liveSendFloat(live, new Float32Array(Math.round(LIVE_RATE * LIVE_TAIL_SECONDS)));
+            if (live.pending.length) { live.ws.send(live.pending.buffer); live.pending = new Float32Array(0); }
+            live.ws.send('Done');
+        } catch (e) { finishLiveInput(gen, live); return; }
+        live.eofTimer = setTimeout(function () { finishLiveInput(gen, live); }, LIVE_EOF_WAIT_MS);
+    }
+
     /**
      * Begin dictating. `opts.workspaceId` names where the text will go — the
      * Manager Settings "Test" button, which never dictates, still passes a
@@ -1373,13 +1614,16 @@
         inputSecondsTimer = setInterval(function () {
             if (gen !== inputGeneration) return;
             inputSeconds += 1;
-            if (_inputState === 'recording') dispatchInput({ state: 'recording', interim: inputInterim, seconds: inputSeconds });
+            if (_inputState === 'recording') dispatchInput(inputLive ? { state: 'recording', interim: inputInterim, seconds: inputSeconds, live: true } : { state: 'recording', interim: inputInterim, seconds: inputSeconds });
         }, 1000);
         inputAutoStopTimer = setTimeout(function () {
             if (gen !== inputGeneration) return;
             stopInput();
         }, INPUT_MAX_MS);
-        if (opts.sttUrl) startEngineInput(gen);
+        inputLive = null;
+        // #731: a live (streaming) engine first; it falls back to the piece engine or the browser.
+        if (opts.sttStreamUrl) startLiveInput(gen);
+        else if (opts.sttUrl) startEngineInput(gen);
         else startBrowserInput(gen);
     }
 
@@ -1390,6 +1634,7 @@
         if (inputSilenceStopTimer) { clearTimeout(inputSilenceStopTimer); inputSilenceStopTimer = null; }
         // #485: the icon stops pulsing now, whatever path asked for the stop.
         markInputStopped();
+        if (inputLive) { stopLiveInput(inputLive); return; }   // #731
         if (inputRecogniser) {
             var rec = inputRecogniser;
             var gen = inputGeneration;

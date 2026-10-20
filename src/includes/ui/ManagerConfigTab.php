@@ -717,6 +717,19 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Leave empty to use the browser's own speech recognition, or enter the address of an OpenAI-compatible transcription server such as Speaches.</div>
                         </dd>
 
+                        <!-- VOICE_LIVE_ENGINE.md R1/R7 (#731): the live (streaming) engine. The
+                             browser connects to it directly; the Test button opens the socket from
+                             this page and sends one second of silence. -->
+                        <dt>Live transcription endpoint</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="text" id="aicli-voice-stt-stream-url" aria-label="Live transcription endpoint" onchange="aicliVoiceSaveField('stt_stream_url')" placeholder="wss://stt-live.example.com/" style="flex:1; min-width:0;">
+                                <button type="button" class="aicli-btn-slim" onclick="aicliVoiceLiveTest()" title="Connect to the live endpoint from this browser" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Test</button>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Optional. A streaming engine (ws:// or wss://) that types your words while you speak and corrects them. When it cannot be reached, dictation uses the endpoint above, or the browser. An HTTPS page needs a wss:// address.</div>
+                            <div id="aicli-voice-live-test-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
+                        </dd>
+
                         <dt>Model</dt>
                         <dd>
                             <input type="text" id="aicli-voice-stt-model" aria-label="Transcription model" onchange="aicliVoiceSaveField('stt_model')" placeholder="whisper-1" style="width:100%;">
@@ -786,6 +799,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     // VOICE_INPUT.md: the reverse-direction (dictation) settings,
                     // loaded/saved the same way as the TTS fields above.
                     $('#aicli-voice-stt-url').val(s.stt_url || '');
+                    $('#aicli-voice-stt-stream-url').val(s.stt_stream_url || '');   // #731
                     $('#aicli-voicemail-max-per-workspace').val(s.voicemail_max_per_workspace || '50');
                     $('#aicli-voicemail-max-age-days').val(s.voicemail_max_age_days || '7');
                     $('#aicli-voice-stt-model').val(s.stt_model || 'whisper-1');
@@ -906,6 +920,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         // VOICE_INPUT.md: the reverse-direction fields save through the
                         // SAME save_voice_settings action, one field per request.
                         stt_url: "#aicli-voice-stt-url", stt_model: "#aicli-voice-stt-model", stt_language: "#aicli-voice-stt-language", stt_api_key: "#aicli-voice-stt-key",
+                        stt_stream_url: "#aicli-voice-stt-stream-url",   // VOICE_LIVE_ENGINE.md R1 (#731)
                         // VOICE_MAIL.md R8: retention, same action, own result line.
                         voicemail_max_per_workspace: "#aicli-voicemail-max-per-workspace", voicemail_max_age_days: "#aicli-voicemail-max-age-days"
                     };
@@ -913,7 +928,8 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     var value = key === "tts_voice" ? currentVoiceValue() : ($(ids[key]).val() || "").trim();
                     if ((key === "tts_api_key" || key === "stt_api_key") && value === "") return;
                     var body = {}; body[key] = value;
-                    var box = key === "stt_url" || key === "stt_model" || key === "stt_language" || key === "stt_api_key"
+                    var box = key === "stt_stream_url" ? $("#aicli-voice-live-test-result")
+                        : key === "stt_url" || key === "stt_model" || key === "stt_language" || key === "stt_api_key"
                         ? $("#aicli-voice-input-test-result")
                         : (key.indexOf("voicemail_") === 0 ? $("#aicli-voicemail-save-result") : $("#aicli-voice-test-result"));
                     aicliVoicePost("save_voice_settings", body).then(function (r) {
@@ -948,6 +964,36 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             else swal('Error', (r && r.message) || 'Failed to clear the key.', 'error');
                         }).catch(function () { swal('Error', 'Network error — could not clear the key.', 'error'); });
                     });
+                };
+
+                // VOICE_LIVE_ENGINE.md R7 (#731): connect from THIS browser (the live engine is
+                // reached by the browser, never by the server), send 1 s of silence and "Done",
+                // and wait for the end of the stream. Records nothing from the microphone.
+                window.aicliVoiceLiveTest = function () {
+                    var box = $('#aicli-voice-live-test-result');
+                    var url = ($('#aicli-voice-stt-stream-url').val() || '').trim();
+                    if (!url) { box.css('color', '#f87171').text('Enter a ws:// or wss:// address first.'); return; }
+                    if (location.protocol === 'https:' && /^ws:/i.test(url)) { box.css('color', '#f87171').text('This page is HTTPS, so it cannot use a ws:// address. Use a wss:// address.'); return; }
+                    var done = false, ws;
+                    var finish = function (ok, text) {
+                        if (done) return; done = true;
+                        try { ws && ws.close(); } catch (e) { /* noop */ }
+                        box.css('color', ok ? '' : '#f87171').text(text);
+                        aicliVoicePost('voice_live_result', { ok: ok ? '1' : '0', message: text }).catch(function () { /* best effort */ });
+                    };
+                    box.css('color', '').text('Connecting…');
+                    try { ws = new WebSocket(url); } catch (e) { finish(false, 'That is not a valid websocket address.'); return; }
+                    ws.binaryType = 'arraybuffer';
+                    var timer = setTimeout(function () { finish(false, 'The live endpoint did not answer in 5 seconds.'); }, 5000);
+                    ws.onopen = function () {
+                        for (var i = 0; i < 10; i++) ws.send(new Float32Array(1600).buffer);
+                        ws.send('Done');
+                    };
+                    ws.onmessage = function (evt) {
+                        var d = null; try { d = JSON.parse(String(evt.data)); } catch (e) { return; }
+                        if (d && d.is_eof) { clearTimeout(timer); finish(true, 'Connected. Live transcription works.'); }
+                    };
+                    ws.onclose = function () { clearTimeout(timer); finish(false, 'The live endpoint closed the connection without an answer.'); };
                 };
 
                 window.aicliVoiceTest = function () {
