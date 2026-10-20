@@ -426,9 +426,15 @@ function renderBackendMigrationStatus(s) {
         }
     } else {
         $('select[name="storage_backend_mode"]').prop('disabled', false);
-        if (s.status === 'complete' && target) $('select[name="storage_backend_mode"]').val(s.target);
+        // Set the select from a finished record ONCE per record, not on every poll:
+        // a later poll must not move the select back while the person picks a new
+        // engine and its confirmation is open.
+        var recordKey = String(s.started_at || '') + ':' + String(s.status || '');
+        var firstSeen = window._aicliBackendStatusApplied !== recordKey;
+        window._aicliBackendStatusApplied = recordKey;
+        if (firstSeen && s.status === 'complete' && target) $('select[name="storage_backend_mode"]').val(s.target);
         if (s.status === 'complete' && s.target) window._aicliCurrentStorageMode = s.target;
-        if ((s.status === 'error' || s.status === 'interrupted') && s.from) {
+        if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) {
             $('select[name="storage_backend_mode"]').val(s.from);
             window._aicliEngineBusy = false;
         }
