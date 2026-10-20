@@ -28,7 +28,7 @@ class ValidationService {
         'delete_home_storage', 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts', 'backup_home',
         'set_home_backup_setting', 'restore_home', 'delete_backup_snapshot', 'clear_halt', 'restore_from_sibling',
         'auto_heal_agent_install', 'history_move', 'history_bring_back', 'execute_migrate',
-        'execute_storage_backend', 'execute_upper_mode',
+        'execute_storage_backend', 'storage_backend_migration_recovery', 'execute_upper_mode',
     ];
 
     /**

@@ -166,7 +166,7 @@ class AutoLaunchService
      *                               actually fired in production.
      * @return array{launched:int, skipped:int, failed:int, sessions:array, busy?:bool}
      */
-    public static function launchAllPending(?string $filterAgentId = null, string $reason = 'unknown', ?array $onlySessionIds = null): array
+    public static function launchAllPending(?string $filterAgentId = null, string $reason = 'unknown', ?array $onlySessionIds = null, bool $resumePreviouslyRunning = false): array
     {
         // Bug #532: serialise concurrent sweeps. PLG INLINE / disks_mounted /
         // InitService boot-marker can all fire within the same ~50 ms window
@@ -308,7 +308,7 @@ class AutoLaunchService
                 // agent has auto-launch enabled is (re)launched, regardless of any
                 // legacy per-workspace flag — that is the agent-level intent.
                 $config = ConfigService::getAgentAutoLaunch($agentId);
-                if (!$config['autoLaunch']) {
+                if (!$config['autoLaunch'] && !$resumePreviouslyRunning) {
                     $skipped++;
                     continue;
                 }
@@ -329,7 +329,7 @@ class AutoLaunchService
                 // browser-independent restart path (#86, _check_saved_workspace_
                 // restarts) — it must not undo a deliberate close either. See
                 // docs/specs/2026-04-27-auto-launch-workspaces-design.md.
-                if (AutoLaunchSuppression::isSuppressed($sid)) {
+                if (!$resumePreviouslyRunning && AutoLaunchSuppression::isSuppressed($sid)) {
                     $skipped++;
                     continue;
                 }
@@ -344,7 +344,7 @@ class AutoLaunchService
                 }
 
                 $resumeId = ConfigService::getResumeId($path, $agentId, (string)$sid);
-                if ($resumeId === null && !$config['freshIfNoResume']) {
+                if ($resumeId === null && !$config['freshIfNoResume'] && !$resumePreviouslyRunning) {
                     $skipped++;
                     continue;
                 }

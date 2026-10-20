@@ -163,20 +163,30 @@ The old layers move to a backup folder. They stay for 14 days, then the plugin r
 
 ## The setting "Persistence engine"
 
-**Persistence engine** applies to every installed agent and every home. **SquashFS layers + zram (recommended)** stores changes in compressed layers and a writable layer. **Plain directories (advanced)** stores files directly in ordinary folders.
+**Persistence engine** applies to saved agent and home storage. **SquashFS layers + zram (recommended)** stores changes in compressed layers and a writable layer. **Plain directories (advanced)** stores files directly in ordinary folders. When **Keep agents compressed** is on, agents stay in SquashFS layers during a change to plain directories. Homes still change.
 
 ### Change the persistence engine
 
 > [!WARNING]
-> This change closes open workspaces and converts all installed agents and homes. The conversion can take several minutes. Keep the server running until the status says the migration is complete.
+> This change closes open workspaces and converts saved storage. When **Keep agents compressed** is on, agents stay in SquashFS layers while homes change to plain directories. The conversion can take several minutes. Keep the server running until the status says the migration is complete.
 
 1. Open the **Configuration** tab.
 2. Change **Persistence engine**. Expect: the dialog **Change persistence engine?** explains the conversion.
-3. Read the space check. It uses a complete **Boot disk space** report from the last 10 minutes and current free space. It counts the new storage and the copies needed to restore the old storage for every agent and home. It keeps at least 2 GB or 10% of each disk free, whichever is larger. If the report is missing, old or incomplete, refresh it on the **Boot disk space** card. If there is not enough room, the message gives the required and available space. No workspace closes and no data changes. The status keeps the refusal message.
+3. Read the space check. It uses a complete **Boot disk space** report from the last 10 minutes and current free space. It counts the new storage and the copies needed to restore the old storage for every item it will convert. It keeps at least 2 GB or 10% of each disk free, whichever is larger. If **Keep agents compressed** is on, the check leaves agents out because they stay layered. If the report is missing, old or incomplete, refresh it on the **Boot disk space** card. If there is not enough room, the message gives the required and available space. No workspace closes and no data changes. The status keeps the refusal message.
 4. Press **Migrate all storage**. Expect: the confirmation closes when the conversion starts. A status appears beside the setting. It shows the target engine, current item and number of completed items.
-5. Wait for **Storage migration complete**. The saved setting changes only after all items convert.
+5. Wait for **Storage migration complete**. The saved setting changes only after all selected items convert. Workspaces that ran before the change open again after success or a complete put-back, even when **Auto-launch workspaces** is off.
+
+If this page stays open while another tab changes the engine, the next save uses the completed engine value. It does not start the same conversion again.
+
+If the server stops during conversion, Configuration and **Boot disk space** show the changed items. Press **Continue** to finish the change. Press **Put back** to restore the changed items to the saved engine. Workspaces and storage actions stay paused until recovery ends.
+
+**Dismiss** hides only the result for that conversion. A later conversion appears and disables **Persistence engine** while it runs.
 
 You can open another page while the conversion runs. The **Boot disk space** card also shows the progress. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Home Storage** to see the same status. The page does not block navigation.
+
+The migration includes homes with saved layers, files in a plain home folder or a saved workspace. A user account without saved home storage does not add an item to the migration.
+
+Copies kept when the engine changes from plain folders to SquashFS layers appear in **Boot disk space** under **Left over**. Each row shows its size and age. You can remove a copy after no conversion needs it. The plugin does not remove these copies automatically.
 
 The plugin pauses automatic saves, merges and queued storage jobs during the conversion. A storage job that already holds a lock can finish. The migration waits and retries the affected item for a limited time.
 
@@ -612,6 +622,20 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-20** — The migration lists only homes with saved storage or a saved workspace. A user account alone does not add an empty home. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #723.
+- **2026-10-20** — The migration waits for workspaces to stop before it moves storage. A forced agent conversion also waits for its mount to become idle. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #722.
+- **2026-10-20** — The agent conversion compares the full copied tree and checks sample file hashes before it switches storage. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #721.
+- **2026-10-20** — An exception during conversion names the item and restores earlier changes. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #720.
+- **2026-10-20** — A worker error that arrives as soon as migration starts stays visible. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #719.
+- **2026-10-20** — **Keep agents compressed** leaves agents in layers when the engine changes to plain directories. The space check also leaves those agents out. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #718.
+- **2026-10-20** — Retained copies from a plain-folder-to-layer change appear under **Left over** with size and age. Remove stays unavailable while a conversion needs a copy. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #717.
+- **2026-10-20** — A workspace start during migration is refused before the page queues a home mount. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #716.
+- **2026-10-20** — Storage status reconciles after a worker stops unexpectedly, so the page can show recovery instead of blocking actions. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #715.
+- **2026-10-20** — **Dismiss** hides one conversion result. It does not hide a later conversion or leave **Persistence engine** enabled while it runs. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #714.
+- **2026-10-20** — The migration resumes the exact workspaces that ran before it closed them. A refused start shows a plain sentence. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #713.
+- **2026-10-20** — If a server restart interrupts **Persistence engine**, the Configuration and **Boot disk space** cards show **Continue** and **Put back**. The Boot disk checkpoint lists changed items. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #712.
+- **2026-10-20** — The migration waits for a workspace start that already holds the shared lock. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #711.
+- **2026-10-20** — A save from an open Settings tab uses the engine from the completed status and does not start the same conversion again. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #710.
 - **2026-10-20** — The **Left over** line marks retired layers needed by an open conversion and refuses to remove them. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #709.
 - **2026-10-20** — The engine migration waits for an active agent install. The **Agent Store** refuses installs, upgrades, restores from a kept backup and removals until conversion ends. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #708.
 - **2026-10-20** — A storage-path move waits until **Persistence engine** conversion ends. The two moves cannot run together. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #707.

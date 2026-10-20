@@ -535,6 +535,13 @@ class TerminalHandler {
     }
 
     private static function start($id) {
+        if (\AICliAgents\Services\StorageBackendMigrationService::isMigrationInProgress()) {
+            return [
+                'status' => 'error',
+                'reason' => 'storage_migration',
+                'message' => 'Storage is being migrated. Workspaces open again when it finishes.',
+            ];
+        }
         $config = getAICliConfig();
         $persistPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
         // Never default the agent: starting the WRONG agent in a user's

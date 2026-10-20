@@ -3792,12 +3792,11 @@ lifecycle_log "info" "graduate" "graduate_start" \
 #            back an interrupted run from the intent (R8).
 # BOOT_DISK_SPACE.md R3: ONE layered agent becomes plain folders in the versioned
 # layout (passthrough/agents/.versions/<id>/<gen> + the stable link). The supervisor
-# sets AICLI_GRADUATE_REASON=user_convert for this run. It uses the home flow below:
-# copy the merged view, verify, move the layers to .graduated/, flip, bind. The
-# global policy migration (FORCE_DIRECT=1) and the older agent steps further down
-# stay as they were.
+# sets AICLI_GRADUATE_REASON=user_convert for this run. The global policy migration
+# uses this same copy-first flow so it checks space before it changes any layer.
+# Both paths copy the merged view, verify, move the layers to .graduated/, flip, bind.
 _GR_AGENT=0
-if [ "$TYPE" = "agent" ] && [ "${AICLI_GRADUATE_REASON:-}" = "user_convert" ] && [ "$FORCE_DIRECT" != "1" ]; then
+if [ "$TYPE" = "agent" ] && { [ "${AICLI_GRADUATE_REASON:-}" = "user_convert" ] || [ "$FORCE_DIRECT" = "1" ]; }; then
     _GR_AGENT=1
     if [ "$(_keep_agents_compressed)" = "1" ]; then
         _gr_precondition_refuse "keep_agents_compressed"
@@ -4376,34 +4375,15 @@ if ! convert_rsync_plain_tree "$_GR_SCRATCH" "$_GR_PT_DIR" "$_GR_STAGING_MARKER"
     exit 1
 fi
 
-# ---- 6. Verify: file count + sampled sha256 ----------------------------------
-_GR_SRC_COUNT="$(find "$_GR_SCRATCH" -type f 2>/dev/null | wc -l | tr -d ' ')"
-_GR_DST_COUNT="$(find "$_GR_PT_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$_GR_SRC_COUNT" != "$_GR_DST_COUNT" ]; then
-    error "Copy verify failed: file count src=$_GR_SRC_COUNT dst=$_GR_DST_COUNT — aborting (layers untouched)."
-    if [ "$FORCE_DIRECT" = "1" ]; then convert_cleanup_failed_copy "$_GR_PT_DIR" "$_GR_STAGING_MARKER" || true; fi
-    _gr_cleanup_scratch
-    exit 1
-fi
-_GR_VERIFY_FAIL=0
-while IFS= read -r _gr_f; do
-    [ -n "$_gr_f" ] || continue
-    _gr_rel="${_gr_f#"$_GR_SCRATCH"/}"
-    _gr_src_sha="$(sha256sum "$_gr_f" 2>/dev/null | awk '{print $1}')"
-    _gr_dst_sha="$(sha256sum "$_GR_PT_DIR/$_gr_rel" 2>/dev/null | awk '{print $1}')"
-    if [ -z "$_gr_src_sha" ] || [ "$_gr_src_sha" != "$_gr_dst_sha" ]; then
-        error "Copy verify failed: sha256 mismatch on '$_gr_rel'."
-        _GR_VERIFY_FAIL=1
-        break
-    fi
-done < <(find "$_GR_SCRATCH" -type f 2>/dev/null | head -5)
-if [ "$_GR_VERIFY_FAIL" -ne 0 ]; then
+# ---- 6. Verify the full tree, then read back sample file hashes ---------------
+if ! _GR_VERIFY_FAIL="$(convert_verify_tree "$_GR_SCRATCH" "$_GR_PT_DIR" "" 20)"; then
+    error "Copy verify failed: $_GR_VERIFY_FAIL — aborting (layers untouched)."
     if [ "$FORCE_DIRECT" = "1" ]; then convert_cleanup_failed_copy "$_GR_PT_DIR" "$_GR_STAGING_MARKER" || true; fi
     _gr_cleanup_scratch
     exit 1
 fi
 _gr_cleanup_scratch
-log "Copy verified ($_GR_DST_COUNT files, sampled sha256 ok)."
+log "Copy verified (full tree matches; sampled sha256 checks passed)."
 
 # ---- 7. CRITICAL SECTION: per-entity bake lock -------------------------------
 # Same lock op_bake holds (fd 9) — excludes a concurrent bake AND the

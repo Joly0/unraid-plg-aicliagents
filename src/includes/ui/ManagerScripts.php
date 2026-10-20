@@ -139,7 +139,8 @@ function saveAICliAgentsManager(form, silent = false) {
     var curAgentPath = '<?= addslashes($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
     var curHomePath = '<?= addslashes($config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
     var newStorageMode = $(form).find('[name="storage_backend_mode"]').val() || 'layering';
-    var curStorageMode = '<?= addslashes($config['storage_backend_mode'] ?? 'layering') ?>';
+    var curStorageMode = window._aicliCurrentStorageMode || '<?= addslashes($config['storage_backend_mode'] ?? 'layering') ?>';
+    window._aicliCurrentStorageMode = curStorageMode;
     var newUpperMode = $(form).find('[name="storage_upper_mode"]').val() || 'zram';
     var curUpperMode = '<?= addslashes($config['storage_upper_mode'] ?? 'zram') ?>';
 
@@ -390,16 +391,24 @@ function hideMigrateOverlay() {
 function renderBackendMigrationStatus(s) {
     var box = $('#aicli-backend-migration-status');
     if (!box.length) return;
-    if (!s || !s.status || s.status === 'idle' || sessionStorage.getItem('aicli_backend_migration_dismissed') === '1') {
+    if (!s || !s.status || s.status === 'idle') {
         box.prop('hidden', true).empty();
         return;
     }
+    var dismissedStartedAt = Number(sessionStorage.getItem('aicli_backend_migration_dismissed') || 0);
+    var statusStartedAt = Number(s.started_at || 0);
+    if (dismissedStartedAt > 0 && statusStartedAt > 0 && statusStartedAt <= dismissedStartedAt) {
+        box.prop('hidden', true).empty();
+        return;
+    }
+    if (dismissedStartedAt > 0 && statusStartedAt > dismissedStartedAt) sessionStorage.removeItem('aicli_backend_migration_dismissed');
     box.prop('hidden', false).empty();
-    var running = s.status === 'running' || s.status === 'queued';
+    var interrupted = s.status === 'interrupted';
+    var running = s.status === 'running' || s.status === 'queued' || interrupted;
     var title = s.status === 'queued' ? 'Storage migration starting'
         : (s.phase === 'rolling_back' ? 'Restoring storage after a conversion problem'
-        : (running ? 'Storage migration in progress'
-        : (s.status === 'complete' ? 'Storage migration complete' : 'Storage migration needs attention')));
+        : (interrupted ? 'Storage migration stopped' : (running ? 'Storage migration in progress'
+        : (s.status === 'complete' ? 'Storage migration complete' : 'Storage migration needs attention'))));
     var target = s.target === 'passthrough' ? 'Plain directories' : (s.target === 'layering' ? 'SquashFS layers + zram' : '');
     $('<strong>').text(title).appendTo(box);
     $('<div>').text((target ? 'Target: ' + target + '. ' : '') + (s.message || '')).appendTo(box);
@@ -411,9 +420,14 @@ function renderBackendMigrationStatus(s) {
     } else if (running) {
         $('select[name="storage_backend_mode"]').prop('disabled', true);
         $('<div>').text(s.message || 'Workspaces cannot open until the migration finishes.').appendTo(box);
+        if (interrupted) {
+            $('<button type="button">').text('Continue').css({ marginTop: '6px', marginRight: '6px' }).on('click', function() { aicliRecoverBackendMigration('continue'); }).appendTo(box);
+            $('<button type="button">').text('Put back').css({ marginTop: '6px' }).on('click', function() { aicliRecoverBackendMigration('rollback'); }).appendTo(box);
+        }
     } else {
         $('select[name="storage_backend_mode"]').prop('disabled', false);
         if (s.status === 'complete' && target) $('select[name="storage_backend_mode"]').val(s.target);
+        if (s.status === 'complete' && s.target) window._aicliCurrentStorageMode = s.target;
         if ((s.status === 'error' || s.status === 'interrupted') && s.from) {
             $('select[name="storage_backend_mode"]').val(s.from);
             window._aicliEngineBusy = false;
@@ -424,11 +438,25 @@ function renderBackendMigrationStatus(s) {
             setTimeout(safeReload, 800);
         }
         $('<button type="button">').text('Dismiss').css({ marginTop: '6px' }).on('click', function() {
-            sessionStorage.setItem('aicli_backend_migration_dismissed', '1');
+            sessionStorage.setItem('aicli_backend_migration_dismissed', String(Number(s.started_at || Date.now())));
             box.prop('hidden', true).empty();
         }).appendTo(box);
     }
 }
+
+function aicliRecoverBackendMigration(operation) {
+    aicliAjax('storage_backend_migration_recovery', { operation: operation }, function(r) {
+        if (!r || r.status !== 'accepted') {
+            if (typeof window.swal === 'function') window.swal('Storage recovery did not start', (r && r.message) || 'Try again after you check the storage status.', 'error');
+            return;
+        }
+        sessionStorage.removeItem('aicli_backend_migration_dismissed');
+        renderBackendMigrationStatus({ status: 'queued', message: r.message || 'Storage recovery is starting.' });
+        updateBackendMigrationStatus();
+        if (window.aicliBootSpace && typeof window.aicliBootSpace.refresh === 'function') window.aicliBootSpace.refresh();
+    });
+}
+window.aicliRecoverBackendMigration = aicliRecoverBackendMigration;
 
 function updateBackendMigrationStatus() {
     if (!$('#aicli-backend-migration-status').length) return;

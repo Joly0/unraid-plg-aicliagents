@@ -30,7 +30,9 @@ class StorageMountService {
     public static function emergencyHome(): string { return SecretPaths::stateRoot() . "/emergency_home"; }
 
     public static function isMigrationInProgress() {
-        return file_exists(self::migrationLock());
+        if (file_exists(self::migrationLock())) return true;
+        return class_exists(StorageBackendMigrationService::class)
+            && StorageBackendMigrationService::isMigrationInProgress();
     }
 
     public static function isEmergencyMode() {

@@ -113,7 +113,7 @@
         parts.forEach(function (p) { if (p.bytes > max) max = p.bytes; });
         var measuring = !!(data && data.measuring);
         var migration = data && data.storage_migration;
-        var migrationBusy = !!(migration && (migration.status === 'queued' || migration.status === 'running'));
+        var migrationBusy = !!(migration && ['queued', 'running', 'interrupted'].indexOf(migration.status) !== -1);
         var stamp;
         if (data && data.has_data) stamp = 'Measured at <b data-testid="boot-space-measured">' + clock(data.measured_at) + '</b>';
         else stamp = '<span data-testid="boot-space-measured">Not measured yet.</span>';
@@ -124,7 +124,9 @@
         var migrationBanner = '';
         if (migrationBusy) {
             var progress = Number(migration.total) > 0 ? (Number(migration.completed || 0) + ' of ' + Number(migration.total) + ' storage items complete.') : 'The migration is starting.';
-            migrationBanner = '<div data-testid="boot-space-migration" role="status" aria-live="polite" style="padding:10px 12px; margin:0 0 10px; border:1px solid #e6a23c; border-radius:4px; background:rgba(230,162,60,.12); font-size:12px;"><strong>' + (migration.status === 'queued' ? 'Storage migration starting' : 'Storage migration in progress') + '</strong><div>' + esc(migration.message || 'Workspaces and storage actions are paused until this finishes.') + '</div><div>' + esc(progress) + '</div>' + (Number(migration.total) > 0 ? '<progress max="' + Number(migration.total) + '" value="' + Number(migration.completed || 0) + '" aria-label="Storage migration progress" style="width:100%; margin-top:6px;"></progress>' : '') + '</div>';
+            var stopped = migration.status === 'interrupted';
+            var recovery = stopped ? '<div style="margin-top:6px;"><button type="button" data-testid="boot-space-migration-continue" data-recovery="continue">Continue</button> <button type="button" data-testid="boot-space-migration-rollback" data-recovery="rollback">Put back</button></div>' : '';
+            migrationBanner = '<div data-testid="boot-space-migration" role="status" aria-live="polite" style="padding:10px 12px; margin:0 0 10px; border:1px solid #e6a23c; border-radius:4px; background:rgba(230,162,60,.12); font-size:12px;"><strong>' + (stopped ? 'Storage migration stopped' : (migration.status === 'queued' ? 'Storage migration starting' : 'Storage migration in progress')) + '</strong><div>' + esc(migration.message || 'Workspaces and storage actions are paused until this finishes.') + '</div><div>' + esc(progress) + '</div>' + (Number(migration.total) > 0 ? '<progress max="' + Number(migration.total) + '" value="' + Number(migration.completed || 0) + '" aria-label="Storage migration progress" style="width:100%; margin-top:6px;"></progress>' : '') + recovery + '</div>';
         }
         return '<style>@media(max-width:760px){#aicli-boot-space-card .aicli-bs-line{grid-template-columns:minmax(0,1fr) auto !important;}#aicli-boot-space-card .aicli-bs-line>div:first-child,#aicli-boot-space-card .aicli-bs-line>div:last-child{grid-column:1/-1;}#aicli-boot-space-card .aicli-bs-line>div:last-child{justify-self:end;}}</style>' +
             '<div class="aicli-card" data-testid="boot-space-card" id="boot-space">' +
@@ -201,7 +203,7 @@
     reg.stampHtml = function (r) {
         var stale = !r || !r.has_data || !!r.stale;
         var migration = r && r.storage_migration;
-        var migrationBusy = !!(migration && (migration.status === 'queued' || migration.status === 'running'));
+        var migrationBusy = !!(migration && ['queued', 'running', 'interrupted'].indexOf(migration.status) !== -1);
         var h = '<div data-testid="bootspace-dialog-stamp" data-stale="' + (stale ? '1' : '0') + '" style="margin-top:8px; font-size:11px; opacity:0.85;">' + esc(ageText(r));
         if (r && r.measuring) h += ' <i class="fa fa-spinner fa-spin"></i> measuring now&hellip;';
         if (migrationBusy) h += ' Storage actions are paused until the migration finishes.';
@@ -267,6 +269,12 @@
     $(document).on('click', '#aicli-bs-measure', function () {
         $(this).prop('disabled', true);
         reg.refresh();
+    });
+
+    $(document).on('click', '#aicli-boot-space-card [data-recovery]', function () {
+        if (typeof window.aicliRecoverBackendMigration === 'function') {
+            window.aicliRecoverBackendMigration(this.getAttribute('data-recovery'));
+        }
     });
 
     $(document).on('click', '#aicli-boot-space-card .aicli-bs-act', function () {

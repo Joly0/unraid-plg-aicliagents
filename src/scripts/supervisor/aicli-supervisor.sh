@@ -4638,9 +4638,15 @@ _priority_tick() {
 _backend_migration_active() {
     local status_file="${AICLI_BACKEND_MIGRATE_STATUS:-${AICLI_STATE_ROOT:-$STATUS_DIR}/backend-migration-status.json}"
     [ -f "$status_file" ] || return 1
-    command -v jq >/dev/null 2>&1 || return 1
-    jq -e '(.status == "queued" or .status == "running" or .phase == "rolling_back")' \
-        "$status_file" >/dev/null 2>&1
+    # The status writer puts these fields first in a single-line JSON object.
+    # Read them directly so the supervisor does not depend on jq.
+    local status phase
+    status="$(sed -n '1s/^{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$status_file" 2>/dev/null)"
+    phase="$(sed -n '1s/^{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"phase"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$status_file" 2>/dev/null)"
+    case "$status:$phase" in
+        queued:*|running:*|*:rolling_back) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Work loop — one iteration, called every tick

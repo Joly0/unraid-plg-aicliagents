@@ -230,7 +230,7 @@ class BootSpaceService
 
     /**
      * The "Left over" items: [{key,label,bytes,path}]. Most paths are inside $persist.
-     * Keys: graduated:<name>, retired:<hash>, homelayers:<user>, testhome:<id>, unfinished:<type>_<id>.
+     * Keys: graduated:<name>, retired:<hash>, homelayers:<user>, testhome:<id>, unfinished:<type>_<id>, backendarchive:<name>.
      */
     public static function leftOverItems(string $persist, array $homes, callable $du, ?string $retiredList = null): array
     {
@@ -251,6 +251,27 @@ class BootSpaceService
             $items[] = ['key' => 'unfinished:' . $markerName,
                         'label' => 'Unfinished conversion copy (' . basename($path) . ')',
                         'bytes' => $du($path), 'path' => $path];
+        }
+        $archiveRoot = rtrim($persist, '/') . '/.backend-migration-archive';
+        foreach (glob($archiveRoot . '/*', GLOB_ONLYDIR | GLOB_NOSORT) ?: [] as $archive) {
+            if (is_link($archive)) continue;
+            $name = basename($archive);
+            if (preg_match('/^(\d{8}T\d{6}Z)_(agent|home)_([A-Za-z0-9._-]{1,128})$/D', $name, $match) !== 1) continue;
+            $archivedAt = \DateTimeImmutable::createFromFormat('!Ymd\\THis\\Z', $match[1], new \DateTimeZone('UTC'));
+            if ($archivedAt === false) continue;
+            $age = max(0, time() - $archivedAt->getTimestamp());
+            $ageText = self::archiveAgeText($age);
+            $locked = self::backendArchiveHasOpenIntent($persist, $name);
+            $label = 'Archived copy from an engine change (' . $match[2] . '/' . $match[3] . ') — ' . $ageText;
+            if ($locked) $label .= ' — needed to finish or put back a conversion';
+            $items[] = [
+                'key' => 'backendarchive:' . $name,
+                'label' => $label,
+                'bytes' => $du($archive),
+                'path' => $archive,
+                'locked' => $locked,
+                'age_seconds' => $age,
+            ];
         }
         $list = $retiredList ?? self::retiredListPath();
         $seen = [];
@@ -277,6 +298,29 @@ class BootSpaceService
             $items[] = ['key' => 'testhome:' . $id, 'label' => 'Test home ' . $id, 'bytes' => $du($d), 'path' => $d];
         }
         return $items;
+    }
+
+    private static function archiveAgeText(int $ageSeconds): string
+    {
+        if ($ageSeconds < 60) return 'less than a minute old';
+        if ($ageSeconds < 3600) {
+            $minutes = intdiv($ageSeconds, 60);
+            return $minutes . ' ' . ($minutes === 1 ? 'minute' : 'minutes') . ' old';
+        }
+        if ($ageSeconds < 86400) {
+            $hours = intdiv($ageSeconds, 3600);
+            return $hours . ' ' . ($hours === 1 ? 'hour' : 'hours') . ' old';
+        }
+        $days = intdiv($ageSeconds, 86400);
+        return $days . ' ' . ($days === 1 ? 'day' : 'days') . ' old';
+    }
+
+    private static function backendArchiveHasOpenIntent(string $persist, string $name): bool
+    {
+        if (preg_match('/^\d{8}T\d{6}Z_(agent|home)_([A-Za-z0-9._-]{1,128})$/D', $name, $match) !== 1) return true;
+        // Intent names use the original validated entity id, including dots.
+        $intent = rtrim($persist, '/') . '/.aicli-intent-' . $match[1] . '-' . $match[2] . '.json';
+        return is_file($intent) || is_link($intent);
     }
 
     /** @return list<string> normalized paths that an open conversion intent still needs */
@@ -521,8 +565,14 @@ class BootSpaceService
             $lo = 0; foreach ($items as $it) $lo += $it['bytes'];
             if (self::isInside($persist, $pluginDir)) $insideTotal += $lo;
             $parts[] = ['key' => 'leftover', 'group' => 'leftover', 'label' => 'Left over', 'bytes' => $lo,
-                'items' => array_map(static function ($it) { return ['key' => $it['key'], 'label' => $it['label'], 'bytes' => $it['bytes']]; }, $items),
-                'action' => $items ? self::action('remove_leftover', 'Remove')
+                'items' => array_map(static function ($it) {
+                    $out = ['key' => $it['key'], 'label' => $it['label'], 'bytes' => $it['bytes']];
+                    if (isset($it['locked'])) $out['locked'] = (bool)$it['locked'];
+                    if (isset($it['age_seconds'])) $out['age_seconds'] = (int)$it['age_seconds'];
+                    return $out;
+                }, $items),
+                'action' => array_filter($items, static fn(array $it): bool => empty($it['locked'])) !== []
+                    ? self::action('remove_leftover', 'Remove')
                     : self::action('remove_leftover', 'Remove', false, 'Nothing is left over.')];
         } else {
             $complete = false;
@@ -814,7 +864,7 @@ class BootSpaceService
      */
     public static function removeLeftover(string $key, array $seams = []): array
     {
-        if (preg_match('/^(graduated|retired|homelayers|testhome|unfinished):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
+        if (preg_match('/^(graduated|retired|homelayers|testhome|unfinished|backendarchive):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
             return ['status' => 'error', 'message' => 'This item is not valid.'];
         }
         $data = $seams['data'] ?? self::read();
@@ -870,6 +920,31 @@ class BootSpaceService
             $freed = $listedBytes;
             if ($ok) { self::logRemoved($key, $freed); return ['status' => 'ok', 'freed_bytes' => $freed]; }
             return ['status' => 'error', 'message' => (string)($r['message'] ?? 'The layers could not be removed.')];
+        }
+
+        if ($type === 'backendarchive') {
+            $path = (string)($item['path'] ?? '');
+            $archiveRoot = $persist . '/.backend-migration-archive';
+            if (preg_match('/^\d{8}T\d{6}Z_(agent|home)_[A-Za-z0-9._-]{1,128}$/D', $name) !== 1
+                || $path !== $archiveRoot . '/' . $name || is_link($path)
+                || !is_dir($path) || !self::isInside($path, $archiveRoot)) {
+                return ['status' => 'error', 'message' => 'This archived copy is no longer safe to remove.'];
+            }
+            if (self::backendArchiveHasOpenIntent($persist, $name)) {
+                return ['status' => 'error', 'message' => 'A conversion still needs this archive to finish or put back the storage.'];
+            }
+            if ($inUse($path)) {
+                return ['status' => 'error', 'message' => 'The archived copy is in use, so it was not removed.'];
+            }
+            $freed = $listedBytes;
+            $out = []; $rc = 0;
+            @exec('rm -rf -- ' . escapeshellarg($path) . ' 2>&1', $out, $rc);
+            clearstatcache(true, $path);
+            if (@lstat($path) !== false) {
+                return ['status' => 'error', 'message' => 'The archived copy could not be removed completely.'];
+            }
+            self::logRemoved($key, $freed);
+            return ['status' => 'ok', 'freed_bytes' => $freed];
         }
 
         $path = $item['path'];

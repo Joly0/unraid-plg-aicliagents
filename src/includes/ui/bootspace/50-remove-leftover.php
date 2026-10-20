@@ -26,15 +26,18 @@
     }
 
     // Pure: the text of the confirm.
-    function confirmHtml(items) {
+    function confirmHtml(items, lockedCount) {
         var total = 0;
         var li = (items || []).map(function (it) {
             total += Number(it.bytes) || 0;
             return '<li>' + esc(it.label) + ' &mdash; <b>' + human(it.bytes) + '</b></li>';
         }).join('');
+        var locked = lockedCount > 0
+            ? '<div style="margin:8px 0;">' + lockedCount + (lockedCount === 1 ? ' archived copy is' : ' archived copies are') + ' still needed to finish or put back a conversion. They stay in place.</div>'
+            : '';
         return '<div style="text-align:left; font-size:12px; line-height:1.6;" data-testid="remove-leftover-dialog">' +
             '<div style="margin-bottom:8px;">These items are left over and no workspace uses them. They are removed for good:</div>' +
-            '<ul style="margin:0 0 8px 18px; padding:0;">' + li + '</ul>' +
+            '<ul style="margin:0 0 8px 18px; padding:0;">' + li + '</ul>' + locked +
             '<div>This frees <b>' + human(total) + '</b> on the boot disk.</div></div>';
     }
     reg.removeLeftoverHtml = confirmHtml;   // test seam
@@ -44,12 +47,14 @@
     }
 
     reg.actions['remove_leftover'] = function (part) {
-        var items = (part && part.items) || [];
-        if (!items.length) { fail('Nothing is left over.'); return; }
+        var allItems = (part && part.items) || [];
+        var items = allItems.filter(function (it) { return !it.locked; });
+        var lockedCount = allItems.length - items.length;
+        if (!items.length) { fail(lockedCount ? 'A conversion still needs this archive to finish or put back the storage.' : 'Nothing is left over.'); return; }
         if (typeof window.swal !== 'function') { fail('This page cannot show the dialog.'); return; }
         swal({
             title: 'Remove left-over items?',
-            text: confirmHtml(items),
+            text: confirmHtml(items, lockedCount),
             html: true,
             type: 'warning',
             showCancelButton: true,

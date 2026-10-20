@@ -769,7 +769,43 @@ class ProcessManager {
     /** @var array<int,bool> pids already reported as spared system services (one log line each per request). */
     private static array $sparedServices = [];
 
-    public static function terminateSessionDescendants(string $sessionId): array
+    /** Send TERM to a group, wait for the full grace period, then kill only survivors. */
+    private static function terminatePidListWithGrace(array $rawPids, int $graceMilliseconds): void
+    {
+        $pids = [];
+        foreach ($rawPids as $rawPid) {
+            $pid = trim((string)$rawPid);
+            if (ctype_digit($pid) && (int)$pid > 1) $pids[(int)$pid] = true;
+        }
+        if ($pids === []) return;
+        $signal = static function (int $pid, int $signal): void {
+            if (is_callable(self::$sessionSignalProbe)) {
+                call_user_func(self::$sessionSignalProbe, $pid, $signal);
+            } elseif (function_exists('posix_kill')) {
+                @posix_kill($pid, $signal);
+            } else {
+                @shell_exec('kill -' . (int)$signal . ' ' . (int)$pid . ' 2>/dev/null');
+            }
+        };
+        $alive = static function (int $pid): bool {
+            if (function_exists('posix_kill')) return @posix_kill($pid, 0);
+            $out = []; $status = 0;
+            @exec('kill -0 ' . (int)$pid . ' 2>/dev/null', $out, $status);
+            return $status === 0;
+        };
+        foreach (array_keys($pids) as $pid) $signal((int)$pid, defined('SIGTERM') ? SIGTERM : 15);
+        $deadline = microtime(true) + max(0, $graceMilliseconds) / 1000;
+        do {
+            $remaining = array_filter(array_keys($pids), static fn(int $pid): bool => $alive($pid));
+            if ($remaining === [] || microtime(true) >= $deadline) break;
+            usleep(100000);
+        } while (true);
+        foreach (array_keys($pids) as $pid) {
+            if ($alive((int)$pid)) $signal((int)$pid, defined('SIGKILL') ? SIGKILL : 9);
+        }
+    }
+
+    public static function terminateSessionDescendants(string $sessionId, int $graceMilliseconds = 250): array
     {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $sessionId);
         if ($safeId === '') return [];
@@ -832,10 +868,16 @@ class ProcessManager {
             $seen[$pid] = true;
             $signal($pid, defined('SIGTERM') ? SIGTERM : 15);
         }
-        // Give cooperative agent/plugin children a short chance to flush, then
-        // re-discover so a child that detached during close is also reaped.
-        usleep(250000);
-        foreach ($victims() as $pid) {
+        // Give cooperative agent/plugin children time to flush. Re-discover on
+        // every pass so an exiting child is not sent SIGKILL after it is gone.
+        $deadline = microtime(true) + max(0, $graceMilliseconds) / 1000;
+        do {
+            $alive = $victims();
+            if ($alive === [] || microtime(true) >= $deadline) break;
+            usleep(100000);
+        } while (true);
+        $alive = $victims();
+        foreach ($alive as $pid) {
             $seen[$pid] = true;
             $signal($pid, defined('SIGKILL') ? SIGKILL : 9);
         }
@@ -1051,7 +1093,7 @@ class ProcessManager {
      *   funnels through this one method, so the publish lives here once
      *   rather than at every call site.
      */
-    public static function stopTerminal($id = 'default', $killTmux = false, string $reason = 'stop') {
+    public static function stopTerminal($id = 'default', $killTmux = false, string $reason = 'stop', int $graceMilliseconds = 200) {
         $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
         // R-100: an id that sanitises to nothing names no session. Going on would build
         // an "AICLI_SESSION_ID=" pattern that matches every session on the host.
@@ -1067,23 +1109,13 @@ class ProcessManager {
         // 1. Kill ttyd
         $pids = [];
         exec("pgrep -x ttyd | xargs -I {} ps -p {} -o pid=,args= | grep " . escapeshellarg($sock) . " | awk '{print $1}'", $pids);
-        foreach ($pids as $pid) {
-            $pid = trim($pid);
-            if (ctype_digit($pid)) {
-                exec("kill -15 $pid > /dev/null 2>&1; sleep 0.2; kill -9 $pid > /dev/null 2>&1");
-            }
-        }
+        self::terminatePidListWithGrace($pids, $graceMilliseconds);
         
         // 2. Kill agent processes (Node)
         $nodePids = [];
         $escapedId = escapeshellarg((string)self::sessionArgvPattern($id));
         exec("pgrep -f $escapedId 2>/dev/null", $nodePids);
-        foreach ($nodePids as $np) {
-            $np = trim($np);
-            if (ctype_digit($np)) {
-                exec("kill -15 $np > /dev/null 2>&1; sleep 0.2; kill -9 $np > /dev/null 2>&1");
-            }
-        }
+        self::terminatePidListWithGrace($nodePids, $graceMilliseconds);
 
         // #159: the pgrep -f above matches the ARGV, which only the runuser/ttyd/
         // tmux wrappers carry (they name AICLI_SESSION_ID=<id> on their command
@@ -1093,7 +1125,7 @@ class ProcessManager {
         // would never be reaped. terminateSessionDescendants reads the actual
         // ENVIRONMENT (/proc/<pid>/environ), reaping the reparented binary too.
         // Env-scoped => safe (it skips tmux servers and respects launch identity).
-        self::terminateSessionDescendants($id);
+        self::terminateSessionDescendants($id, $graceMilliseconds);
 
         // D-319: Introduce brief delay before socket removal to allow processes to finish writes
         usleep(500000); // 0.5s
@@ -1186,9 +1218,54 @@ class ProcessManager {
         self::evictAllWithSuppression(true);
     }
 
-    /** Stop sessions for a storage conversion without treating it as a user close. */
-    public static function evictAllForStorageMigration() {
-        self::evictAllWithSuppression(false);
+    /** Stop the recorded sessions without suppressing their planned relaunch. */
+    public static function evictAllForStorageMigration(array $sessionIds = []): void
+    {
+        $sessionIds = $sessionIds !== [] ? $sessionIds : self::runningSessionIdsForStorageMigration();
+        foreach (array_values(array_unique($sessionIds)) as $id) {
+            $id = preg_replace('/[^A-Za-z0-9_-]/', '', (string)$id);
+            if ($id === '') continue;
+            self::captureFallbackBeforeKill($id);
+            self::stopTerminal($id, true, 'evict', 5000);
+        }
+    }
+
+    /** Return the saved workspace ids that are live before a storage conversion closes them. */
+    public static function runningSessionIdsForStorageMigration(): array
+    {
+        if (!class_exists(ConfigService::class)) return [];
+        try {
+            $sessions = ConfigService::getWorkspaces()['sessions'] ?? [];
+        } catch (\Throwable $e) {
+            return [];
+        }
+        $ids = [];
+        foreach ($sessions as $session) {
+            if (!is_array($session)) continue;
+            $id = (string)($session['id'] ?? '');
+            if ($id === '' || preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) !== 1 || !self::isRunning($id)) continue;
+            $ids[] = $id;
+        }
+        return array_values(array_unique($ids));
+    }
+
+    /** Wait for every saved session to stop before storage files move. */
+    public static function waitForSessionsStopped(array $sessionIds, int $timeoutSeconds = 30, ?callable $runningProbe = null, ?callable $wait = null): bool
+    {
+        $sessionIds = array_values(array_unique(array_filter(array_map(
+            static fn($id): string => preg_replace('/[^A-Za-z0-9_-]/', '', (string)$id),
+            $sessionIds
+        ), static fn(string $id): bool => $id !== '')));
+        if ($sessionIds === []) return true;
+        $runningProbe = $runningProbe ?? static fn(string $id): bool => self::isRunning($id);
+        $wait = $wait ?? static function (int $microseconds): void { usleep($microseconds); };
+        $deadline = microtime(true) + max(0, $timeoutSeconds);
+        do {
+            $running = array_filter($sessionIds, static fn(string $id): bool => $runningProbe($id));
+            if ($running === []) return true;
+            if (microtime(true) >= $deadline) return false;
+            $wait(100000);
+        } while (true);
     }
 
     private static function evictAllWithSuppression(bool $suppressAutoLaunch) {

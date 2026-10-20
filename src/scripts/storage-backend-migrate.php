@@ -9,13 +9,16 @@ use AICliAgents\Services\StorageBackendMigrationService;
 
 $target = (string)($argv[1] ?? '');
 $acknowledgeWear = (string)($argv[2] ?? '0') === '1';
+$operation = (string)($argv[3] ?? 'continue');
 if (!in_array($target, ['layering', 'passthrough'], true)) {
     aicli_log('Storage backend worker refused an invalid target.', AICLI_LOG_ERROR, 'StorageBackendMigration');
     exit(2);
 }
 
 try {
-    $result = StorageBackendMigrationService::runQueuedMigration($target, $acknowledgeWear);
+    $result = $operation === 'rollback'
+        ? StorageBackendMigrationService::restoreInterrupted()
+        : StorageBackendMigrationService::runQueuedMigration($target, $acknowledgeWear);
     if (($result['status'] ?? '') !== 'ok') {
         aicli_log('Storage backend migration worker finished with an error: ' . (string)($result['message'] ?? 'unknown error'), AICLI_LOG_ERROR, 'StorageBackendMigration');
         exit(1);

@@ -150,7 +150,7 @@ class TerminalService {
     public static function startFailureSentence(string $reason, string $agentName): string
     {
         switch ($reason) {
-            case 'storage_migration':    return 'Storage is being converted. Wait for the migration to finish, then try again.';
+            case 'storage_migration':    return 'Storage is being migrated. Workspaces open again when it finishes.';
             case 'agent_unknown':       return 'This agent is not installed on this server.';
             case 'no_terminal_server':  return 'The terminal server program is missing.';
             case 'agent_storage':       return "The storage for $agentName could not be mounted.";
