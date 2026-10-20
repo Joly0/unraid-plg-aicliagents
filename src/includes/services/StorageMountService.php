@@ -139,6 +139,20 @@ class StorageMountService {
         return self::isArrayStopping($varIni, $flag);
     }
 
+    /**
+     * Issue #10: is the array stopping while the plugin's own storage (agent
+     * images or homes) is on the array or a pool? A workspace folder on flash
+     * or RAM passes startBlockedByArrayStop(), but starting it still mounts the
+     * agent and the home from their persist paths, which holds the pool.
+     * $varIni and $flag are test seams.
+     */
+    public static function storageBlockedByArrayStop(?string $varIni = null, ?string $flag = null): bool {
+        if (!self::isArrayStopping($varIni, $flag)) return false;
+        require_once __DIR__ . '/StoragePathResolver.php';
+        return self::isArrayDependent(StoragePathResolver::agentPersistPath())
+            || self::isArrayDependent(StoragePathResolver::homePersistPath('root'));
+    }
+
     /** Forgejo #558: the message the start request returns while the array stops. */
     const ARRAY_STOPPING_MESSAGE = 'The array is stopping. This workspace starts again after the array is started.';
 
