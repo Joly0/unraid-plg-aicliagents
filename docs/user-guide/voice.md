@@ -131,7 +131,7 @@ Both options are kept in this browser, per device. The **i** icon of the bubble 
 | Mode | How it works | When to use it |
 | :-- | :-- | :-- |
 | **Browser recognition** (**Transcription endpoint URL** is empty) | Your browser turns the speech into text. It works in Chrome and Safari, also on an iPhone. | The quick start. No install. |
-| **Transcription engine** (**Transcription endpoint URL** is set) | The page records your speech and sends it to a server on your network. The server returns the text. The plugin cuts the recording at a pause of about 0.7 seconds, or every 8 seconds, so you see the words come in piece by piece. | Firefox, Chrome on iPhone, and any browser without built-in recognition. Also when you want the audio to stay on your own server. |
+| **Transcription engine** (**Transcription endpoint URL** is set) | The page records your speech and sends it to a server on your network. The server returns the text. The plugin cuts the recording at a pause of about 0.7 seconds, or every 8 seconds, so you see the words come in piece by piece. A pause with no speech types nothing. The words do not appear while you speak and are not corrected afterwards; only browser recognition does that. | Firefox, Chrome on iPhone, and any browser without built-in recognition. Also when you want the audio to stay on your own server. |
 
 A browser without recognition gets the message "This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Agent voice." If the microphone is blocked, the message is "The browser refused microphone access; allow it in the site settings and try again."
 
@@ -288,6 +288,7 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 <details>
 <summary>Change history</summary>
 
+- **2026-10-20** — With a transcription engine, a pause with no speech types nothing. Before, some engines typed a label such as "[BLANK_AUDIO]". Spec `docs/specs/VOICE_INPUT.md`, issue #730.
 - **2026-10-18** — When an agent speaks for a different workspace, the voice mail message shows "(said by ...)" with the name of the workspace that really spoke. Spec `docs/specs/AGENT_VOICE.md`, issue #664.
 
 </details>
