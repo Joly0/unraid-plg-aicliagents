@@ -157,7 +157,7 @@ function saveAICliAgentsManager(form, silent = false) {
     if (newStorageMode !== curStorageMode) {
         if (window._aicliEngineBusy) return;
         window._aicliEngineBusy = true;
-        var restoreEngine = function () { window._aicliEngineBusy = false; $(form).find('[name="storage_backend_mode"]').val(curStorageMode); };
+        var restoreEngine = function () { window._aicliEngineBusy = false; $(form).find('[name="storage_backend_mode"]').val(window._aicliCurrentStorageMode || curStorageMode); };
         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_storage_backend&mode=' + encodeURIComponent(newStorageMode) + '&csrf_token=' + csrf, function(pf) {
             if (pf.status !== 'ok') { restoreEngine(); swal("Error", pf.message || "Storage-engine check failed", "error"); return; }
             var msg = pf.message || ('This will migrate all agents and homes to ' + newStorageMode + '.');
@@ -429,14 +429,20 @@ function renderBackendMigrationStatus(s) {
         // Set the select from a finished record ONCE per record, not on every poll:
         // a later poll must not move the select back while the person picks a new
         // engine and its confirmation is open.
+        // A person who already picked another engine keeps the choice, also before the
+        // first reply arrives (the 400 ms save delay, the check, the open warning): the
+        // record then moves only the baseline that Cancel restores (#702).
+        var engineSelect = $('select[name="storage_backend_mode"]');
+        var baseline = window._aicliCurrentStorageMode || '<?= addslashes($config['storage_backend_mode'] ?? 'layering') ?>';
+        var choosing = !!window._aicliEngineBusy || engineSelect.val() !== baseline;
         var recordKey = String(s.started_at || '') + ':' + String(s.status || '');
-        var firstSeen = window._aicliBackendStatusApplied !== recordKey;
-        window._aicliBackendStatusApplied = recordKey;
-        if (firstSeen && s.status === 'complete' && target) $('select[name="storage_backend_mode"]').val(s.target);
+        var firstSeen = !choosing && window._aicliBackendStatusApplied !== recordKey;
+        if (!choosing) window._aicliBackendStatusApplied = recordKey;
+        if (firstSeen && s.status === 'complete' && target) engineSelect.val(s.target);
         if (s.status === 'complete' && s.target) window._aicliCurrentStorageMode = s.target;
+        if ((s.status === 'error' || s.status === 'interrupted') && s.from) window._aicliCurrentStorageMode = s.from;
         if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) {
-            $('select[name="storage_backend_mode"]').val(s.from);
-            window._aicliCurrentStorageMode = s.from;
+            engineSelect.val(s.from);
             window._aicliEngineBusy = false;
         }
         if (s.status === 'complete') window._aicliEngineBusy = false;
