@@ -700,7 +700,12 @@ class ConfigService {
 
         // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs
         if (!FileStorage::ensureReady("home/$user")->ok) {   // Epic #1310: facade intent
-            LogService::log("getUserStatePath: home mount unavailable for '$user' — reads/writes will target bare tmpfs and may be lost", LogService::LOG_WARN, "ConfigService");
+            // Issue #10: expected while the array is down; only log it otherwise.
+            require_once __DIR__ . '/StorageMountService.php';
+            require_once __DIR__ . '/StoragePathResolver.php';
+            if (!StorageMountService::storageDownWithArray(StoragePathResolver::homePersistPath($user))) {
+                LogService::log("getUserStatePath: home mount unavailable for '$user' — reads/writes will target bare tmpfs and may be lost", LogService::LOG_WARN, "ConfigService");
+            }
         }
 
         $homeDir = "/tmp/unraid-aicliagents/work/$user/home";
