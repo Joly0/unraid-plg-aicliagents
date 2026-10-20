@@ -397,6 +397,9 @@ class StorageMountService {
     public static function ensureAgentMounted($agentId, int &$exit = 0) {
         $exit = 1;
         if (self::isMigrationInProgress()) return false;
+        // Issue #10: storagectl refuses this mount anyway; return before spawning
+        // it, so a polling page does not retry and log every refusal to flash.
+        if (self::storageBlockedByArrayStop()) return false;
 
         $mnt = AgentRegistry::agentPath($agentId);
 
@@ -620,6 +623,9 @@ class StorageMountService {
     private static function ensureHomeMountedTraced($user, int &$exit, string &$path) {
         $exit = 1;
         if (self::isMigrationInProgress()) return false;
+        // Issue #10: storagectl refuses this mount anyway; return before spawning
+        // it, so a polling page does not retry and log every refusal to flash.
+        if (self::storageBlockedByArrayStop()) return false;
 
         $workDir = UtilityService::getWorkDir($user);
         $mnt = "$workDir/home";
