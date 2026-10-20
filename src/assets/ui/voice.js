@@ -1352,6 +1352,7 @@
     var LIVE_OPEN_TIMEOUT_MS = 3000;
     var LIVE_EOF_WAIT_MS = 3000;
     var LIVE_TAIL_SECONDS = 0.3;      // silence before "Done", so the last word is not cut
+    var LIVE_LEAD_SECONDS = 0.5;      // silence at the start of each stream, so the first word is not cut
     var LIVE_MAX_RECONNECTS = 2;      // the proxy closes a stream after 4 min with no traffic
     var LIVE_DOWN_NOTE = 'The live transcription engine is not answering, so dictation goes on without live words.';
     var inputLive = null;             // the live session of this recording, or null
@@ -1485,7 +1486,12 @@
         ws.onopen = function () {
             if (live.openTimer) { clearTimeout(live.openTimer); live.openTimer = null; }
             live.opened = true;
-            liveSendFloat(live, null);   // the audio that waited for the socket
+            // The engine drops a word spoken in the first moment of a stream (checked 2026-10-21:
+            // "Hello" was lost with no lead, kept with 0.3 s): 0.5 s of silence goes first, then
+            // the audio that waited for the socket.
+            live.pending = live.pending.length ? concatFloat(new Float32Array(Math.round(LIVE_RATE * LIVE_LEAD_SECONDS)), live.pending)
+                                               : new Float32Array(Math.round(LIVE_RATE * LIVE_LEAD_SECONDS));
+            liveSendFloat(live, null);
         };
         ws.onmessage = function (evt) {
             if (gen !== inputGeneration || inputLive !== live) return;
