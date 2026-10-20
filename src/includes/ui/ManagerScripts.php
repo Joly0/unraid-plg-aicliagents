@@ -436,6 +436,7 @@ function renderBackendMigrationStatus(s) {
         if (s.status === 'complete' && s.target) window._aicliCurrentStorageMode = s.target;
         if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) {
             $('select[name="storage_backend_mode"]').val(s.from);
+            window._aicliCurrentStorageMode = s.from;
             window._aicliEngineBusy = false;
         }
         if (s.status === 'complete') window._aicliEngineBusy = false;
