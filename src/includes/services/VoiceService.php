@@ -887,7 +887,7 @@ class VoiceService {
                 return $result + ['engine' => true];
             }
 
-            $text = trim((string)$result['text']);
+            $text = self::stripNonSpeechTags((string)$result['text']);
             $chars = self::charCount($text);
             self::recordSttResult(true, 'ok');
             LogService::log("Transcribed a {$seconds}s clip ($chars chars)", LogService::LOG_INFO, 'VoiceService');
@@ -901,6 +901,21 @@ class VoiceService {
             try { self::recordSttResult(false, $failed); } catch (\Throwable $ignored) { /* the record must never hide the error */ }
             return ['error' => $failed, 'engine' => true];
         }
+    }
+
+    /**
+     * #730: Whisper engines (whisper.cpp, faster-whisper) label a piece with no speech
+     * instead of returning nothing: "[BLANK_AUDIO]", "[Sizzling]", "[ Silence ]",
+     * "(music)". Live typing sends every short piece cut at a pause, so these labels
+     * were typed into the terminal. Remove every [..] label, and a (..) label when it
+     * is the whole result; spoken dictation never produces square brackets. Returns
+     * the trimmed text with single spaces where a label was removed.
+     */
+    public static function stripNonSpeechTags(string $text): string {
+        $text = preg_replace('/\[[^\[\]\n]{0,40}\]/u', ' ', $text) ?? $text;
+        $text = trim(preg_replace('/\s+/u', ' ', $text) ?? $text);
+        if (preg_match('/^\([^()]{0,40}\)$/u', $text) === 1) return '';
+        return $text;
     }
 
     /**
