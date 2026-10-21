@@ -113,7 +113,7 @@ The card has a **Natural voice** row, the **Voice (all devices)** switch, the te
 | **Model** (Voice input) | Chooses which model the transcription server uses. Ignored in browser mode. | whisper-1 | A model name the server lists | Change it to use another Whisper model. | Saves. | Yes |
 | **Language** (Voice input) | Sets the language you speak, for example "en". Empty lets the browser or the engine detect it. | Empty | Empty, or a short language tag such as en or en-US | Set it if detection picks the wrong language. | Saves. | Yes |
 | **API key** (Voice input, with **Clear**) | Holds the key for the transcription server. The page never shows the stored key. | Not set | Text | Enter a key only when the server asks for one. | **Clear** shows a confirm dialog "Clear the transcription API key?". | No |
-| **Test (records 3 s)** | Records three seconds on this device and shows the recognised text. It never types into a workspace. | Not applicable | Not applicable | After a change to the dictation settings. | The browser may ask for microphone permission. | No |
+| **Test (records 3 s, 8 s live)** | Records three seconds on this device and shows the recognised text. When a **Live transcription endpoint** is set, it streams for eight seconds and shows the words while you speak. It never types into a workspace. | Not applicable | Not applicable | After a change to the dictation settings. | The browser may ask for microphone permission. | No |
 
 ### Auto-continue patterns card
 

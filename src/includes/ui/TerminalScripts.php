@@ -54,20 +54,29 @@
             const el = document.getElementById('aicliagents-root');
             if (!el) return;
             // Measure from the root's normal place, not from a keyboard pin.
+            const wasPinned = !!savedInline;
             if (savedInline) unpin(el);
             const available = window.innerHeight - el.getBoundingClientRect().top - 24;
-            lockedHeight = Math.max(400, Math.floor(available));
+            const height = Math.max(400, Math.floor(available));
+            // Tell the page only about a real change (#736): a resize event that changes
+            // nothing must not send another one, or two listeners answer each other at
+            // every frame.
+            const changed = !rootSized || wasPinned || height !== lockedHeight || window.innerWidth !== measuredWidth;
+            lockedHeight = height;
             keyboardOpen = false;
             el.style.height = lockedHeight + 'px';
             rootSized = true;
             measuredWidth = window.innerWidth;
             suppressScroll();
-            notifyResize();
+            if (changed) notifyResize();
         });
     }
 
+    // True while notifyResize() sends its own resize event (#736).
+    let notifying = false;
     function notifyResize() {
-        window.dispatchEvent(new Event('resize'));
+        notifying = true;
+        try { window.dispatchEvent(new Event('resize')); } finally { notifying = false; }
         document.querySelectorAll('iframe').forEach(function(f) { try { f.contentWindow.dispatchEvent(new Event('resize')); } catch(e) {} });
     }
 
@@ -164,6 +173,9 @@
     }
 
     function onWindowResize() {
+        // Our own notifyResize() event is not a new page size. Answering it sized the
+        // root again and sent another event, at every frame (#736, "Page Unresponsive").
+        if (notifying) return;
         // Desktop browsers should continue to follow ordinary window resizing.
         // On touch browsers only a width change is meaningful here; height-only
         // changes are browser-toolbar/keyboard movement, not a new page size.

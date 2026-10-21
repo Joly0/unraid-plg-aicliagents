@@ -481,10 +481,10 @@ class TerminalService {
             'AICLI_CWD'         => $path ? PoolPathService::launchDirectory((string)$path, $config) : '/mnt',
             // Agent Relay self-service reads this launch-bound session identity;
             // the command itself never accepts a session argument.
-            'AICLI_RELAY_COMMAND' => 'php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-agent.php',
+            'AICLI_RELAY_COMMAND' => '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-agent.php',   // one word: works quoted (#735)
             // Plugin management (read-only) self-service. Same launch-bound identity
             // rule as the Relay: the command never accepts a session argument.
-            'AICLI_ADMIN_COMMAND' => 'php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php',
+            'AICLI_ADMIN_COMMAND' => '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php',
             'AICLI_CHAT_SESSION_ID' => $resolvedChatId ?: '',
             // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1: route through the resolver
             // instead of the literal AGENT_BASE path.

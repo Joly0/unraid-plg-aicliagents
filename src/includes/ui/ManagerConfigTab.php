@@ -701,7 +701,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                              leaves it. Loads/saves through the same get_voice_settings /
                              save_voice_settings actions and the same masked-key handling as
                              the TTS key above (aicliVoiceSaveField / aicliVoicePost). The Test
-                             button here records 3 s on this device and shows the recognised
+                             button here records 3 s (8 s with a live endpoint, words shown as you speak) on this device and shows the recognised
                              text — it calls window.aicliVoice.startInput() with a fixed
                              non-workspace id ('manager') and never dictates anywhere. -->
                         <dt style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px; font-weight:600;">Voice input</dt>
@@ -754,7 +754,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt aria-hidden="true">&nbsp;</dt>
                         <dd>
                             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                                <button type="button" class="aicli-btn-slim" onclick="aicliVoiceInputTest()"><i class="fa fa-microphone"></i> Test (records 3 s)</button>
+                                <button type="button" class="aicli-btn-slim" onclick="aicliVoiceInputTest()"><i class="fa fa-microphone"></i> Test (records 3 s, 8 s live)</button>
                             </div>
                             <div id="aicli-voice-input-test-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
                         </dd>
@@ -1046,7 +1046,12 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
                         if (answerTimer) { clearTimeout(answerTimer); answerTimer = null; }
                     };
-                    box.css('color', '').text('Listening… 3 s left');
+                    var streamUrl = ($('#aicli-voice-stt-stream-url').val() || '').trim();
+                    // VOICE_LIVE_ENGINE.md (#731): with a live endpoint the Test streams and shows the
+                    // words while you speak, so it records longer than the 3 s of a clip test.
+                    var testSeconds = streamUrl ? 8 : 3;
+                    var head = streamUrl ? 'Listening (live)… ' : 'Listening… ';
+                    box.css('color', '').text(head + testSeconds + ' s left');
                     var onEvt = function (e) {
                         var d = (e && e.detail) || {};
                         if (d.state === 'refused') {
@@ -1058,10 +1063,10 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             if (typeof d.error === 'string' && d.error) { box.css('color', '#f87171').text(d.error); return; }
                             if (typeof d.seconds === 'number') {
                                 if (baseSeconds === null) baseSeconds = d.seconds;
-                                var left = Math.max(0, 3 - (d.seconds - baseSeconds));
-                                show('Listening… ' + left + ' s left');
+                                var left = Math.max(0, testSeconds - (d.seconds - baseSeconds));
+                                show(head + left + ' s left');
                             } else {
-                                show('Listening…');
+                                show(head.trim());
                             }
                             // The 3 s start when the microphone really records
                             // (after a permission prompt), not at the click.
@@ -1079,7 +1084,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                         finish();
                                         box.css('color', '#f87171').text('No answer from the transcription server after 60 s. Check the endpoint and try again.');
                                     }, 60000);
-                                }, 3000);
+                                }, testSeconds * 1000);
                             }
                         } else if (d.state === 'transcribing') {
                             // #485: a piece can answer after the stop; its words still count.
@@ -1095,7 +1100,9 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     };
                     window.addEventListener('aicli-voice-input', onEvt);
                     // noEngineFallback (#484): this button tests the engine, so it must not quietly use the browser instead.
-                    api.startInput({ workspaceId: 'manager', sttUrl: sttUrl, sttLanguage: sttLanguage, noEngineFallback: true });
+                    var startOpts = { workspaceId: 'manager', sttUrl: sttUrl, sttLanguage: sttLanguage, noEngineFallback: true };
+                    if (streamUrl) startOpts.sttStreamUrl = streamUrl;
+                    api.startInput(startOpts);
                 };
 
                 window.addEventListener('aicli-voice-state', syncToggle);

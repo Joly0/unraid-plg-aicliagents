@@ -1374,14 +1374,17 @@
     /** One reply from the engine, folded into the session. Returns the event to send, or null. Exposed for the unit test. */
     function liveReduce(live, reply) {
         if (!reply || typeof reply !== 'object') return null;
-        var seg = Number(reply.segment || 0);
-        if (seg < live.segment) return null;                 // a late reply for a closed segment
-        if (seg > live.segment) { live.segment = seg; live.interim = ''; }
+        // The engine numbers every sentence 0 and starts a new one at a new start_time
+        // (#733), so a segment is its number plus its start time.
+        var key = String(Number(reply.segment || 0)) + '@' + String(reply.start_time == null ? '' : reply.start_time);
+        if (!live.closed) live.closed = {};
+        if (live.closed[key]) return null;                   // a late reply for a closed segment
+        if (key !== live.segment) { live.segment = key; live.interim = ''; }
         // The engine puts two spaces after a full stop; one is typed.
         var text = String(reply.text || '').replace(/\s+/g, ' ').replace(/^ | $/g, '');
         if (reply.is_final) {
             live.interim = '';
-            live.segment = seg + 1;
+            live.closed[key] = true;
             return { phrase: text };
         }
         if (text === live.interim) return null;
@@ -1515,7 +1518,8 @@
             if (live.opened && live.reconnects < LIVE_MAX_RECONNECTS) {
                 live.reconnects++;
                 live.opened = false;
-                live.segment = 0;
+                live.segment = '';
+                live.closed = {};                            // a new stream starts its times at 0
                 liveConnect(gen, live);
                 return;
             }
@@ -1534,7 +1538,7 @@
             liveFallBackBeforeStart(gen, 'This page is HTTPS, so it cannot use a ws:// live endpoint; set a wss:// address.');
             return;
         }
-        var live = { ws: null, ctx: null, source: null, node: null, pending: new Float32Array(0), segment: 0, interim: '',
+        var live = { ws: null, ctx: null, source: null, node: null, pending: new Float32Array(0), segment: '', closed: {}, interim: '',
                      opened: false, stopping: false, done: false, heard: false, reconnects: 0, openTimer: null, eofTimer: null };
         inputLive = live;
         liveConnect(gen, live);

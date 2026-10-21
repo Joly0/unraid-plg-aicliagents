@@ -545,12 +545,15 @@ PRIOEOF
     # here so reconnects and shell relaunches retain the complete Relay context.
     # Pin Relay to this immutable launcher generation. A later hot-swap may
     # advance the mutable src link while this workspace is still running.
-    printf 'export AICLI_RELAY_COMMAND=%q\n' "${AICLI_RELAY_COMMAND:-php $PLUGIN_SRC/scripts/relay-agent.php}" >> "$RUN_SCRIPT"
+    # One word, the executable script itself (it starts with "#!/usr/bin/env php"), so
+    # "$AICLI_RELAY_COMMAND" inbox works quoted as well as unquoted (#735). A two-word
+    # "php <path>" value fails when an agent quotes it.
+    printf 'export AICLI_RELAY_COMMAND=%q\n' "${AICLI_RELAY_COMMAND:-$PLUGIN_SRC/scripts/relay-agent.php}" >> "$RUN_SCRIPT"
     # Plugin management (read-only) self-service, pinned the same way and for the
     # same reason. This is the fallback for an agent with no MCP support — pi-coder
     # is HubProjector::MCP_EXEMPT and will never read an MCP config file — and it is
     # also what a user's own script calls. Spec: docs/specs/PLUGIN_MANAGEMENT_TOOLS.md
-    printf 'export AICLI_ADMIN_COMMAND=%q\n' "${AICLI_ADMIN_COMMAND:-php $PLUGIN_SRC/scripts/admin-agent.php}" >> "$RUN_SCRIPT"
+    printf 'export AICLI_ADMIN_COMMAND=%q\n' "${AICLI_ADMIN_COMMAND:-$PLUGIN_SRC/scripts/admin-agent.php}" >> "$RUN_SCRIPT"
     # (Relay 'watch' mode retired 2026-08-22: every agent now receives the
     # readiness-gated paste, so no per-session watcher command is injected here.
     # The old watcher env var + relay-watch.sh were removed — the watcher died on
