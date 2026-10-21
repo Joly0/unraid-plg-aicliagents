@@ -990,7 +990,34 @@ _mount_teardown_arbiter() {
     if _overlay_present_at "$mnt"; then
         return 2                                      # keep the live overlay; defer the refresh
     fi
+    # #737: a plain-folder bind whose source folder was deleted (the storage engine
+    # change archived it while a session held it, then the archive was removed). It
+    # has no upper or work directory, so a lazy detach cannot poison a copy-up; the
+    # running sessions keep the files they opened. Without this, no new session of
+    # that agent could start until every old one closed.
+    if _bind_source_deleted_at "$mnt" && umount -l "$mnt" 2>/dev/null; then
+        return 0                                      # detached -> safe to bind fresh
+    fi
     return 1                                          # busy + phantom -> unsafe to remount
+}
+
+# Test seam for the mount table with each mount's root (field 4), as
+# _proc_mounts_path is for /proc/mounts.
+_proc_mountinfo_path() { printf '%s' "${AICLI_PROC_MOUNTINFO:-/proc/self/mountinfo}"; }
+
+# _bind_source_deleted_at <mnt> -> 0 (true) IFF the mount at exactly <mnt> is not an
+# overlay and its root (the folder it binds) has been deleted: the kernel then
+# shows the root with "//deleted" at its end.
+_bind_source_deleted_at() {
+    local mnt="${1:-}"
+    [ -n "$mnt" ] || return 1
+    awk -v m="$mnt" '
+        $5 == m {
+            fs = ""
+            for (i = 7; i <= NF; i++) if ($i == "-") { fs = $(i + 1); break }
+            if (fs != "overlay" && $4 ~ /\/\/deleted$/) f = 1
+        }
+        END { exit f ? 0 : 1 }' "$(_proc_mountinfo_path)" 2>/dev/null
 }
 
 # WP #1263 (#7): canonical per-entity overlay-mount-op lock path.
