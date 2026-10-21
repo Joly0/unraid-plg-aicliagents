@@ -3,6 +3,36 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.21.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.10.21.01
+
+**Live dictation (new)**
+
+- **Feat: see your words while you speak.** The new setting **Live transcription endpoint** (Settings, Agent voice) takes the address of a streaming transcription engine. The page then sends your voice to the engine as you talk. It types each word while you speak and corrects the words as the engine hears more. A pause ends the sentence. A **Test** button next to the setting checks the connection.
+- **Feat: dictation goes on when the live engine is not available.** If the live engine cannot be reached, dictation uses the transcription endpoint, or your browser's own recognition if that is not set, and it says so.
+- **Improve: the Settings dictation Test shows the words while you speak.** When a live endpoint is set, **Test (records 3 s, 8 s live)** streams for 8 seconds and shows the words as you say them.
+- **Fix: dictation with a transcription engine no longer types labels such as "[BLANK_AUDIO]"** for a pause or a silent piece.
+
+**Storage**
+
+- **Fix: changes of the Persistence engine are safer.** Before a change starts, the plugin checks that the storage has enough free space. It refuses to start while installs, backups or moves run. If a conversion fails, the plugin puts every item back, keeps your data, and the Settings page names the item and the cause. The engine selector on the Configuration tab keeps your choice while the warning is open, and **Cancel** puts back the engine in use.
+- **Fix: Convert to plain folders is no longer refused because of a left-over empty marker file.** When it is refused, the Activity tray names the folder and the first file in the way, and says that nothing was changed.
+
+**Reliability and safety**
+
+- **Fix: a large reliability and safety update from a full review of the plugin.** More than 180 defects are fixed. Saving, merging, backing up and converting homes no longer report success when nothing was saved. A save that waits for another save now says so instead of failing. Two saves of the same home at the same time no longer wait for 30 seconds; the second one skips, because the first one saves the same changes.
+- **Fix: a home card says again what a running job does** (for example "to save" or "to merge").
+- **Fix: converting agents to plain folders keeps the agents you selected** and always shows its result.
+- **Fix: a failed request shows its reason**, not a dialog that waits for ever. Many smaller web page defects are fixed.
+- **Fix: agent installs, upgrades and shutdowns are safer.** A failed reinstall puts the old version back. A native agent gets the same time to save its work at shutdown as other agents.
+- **Fix: file paths with control characters are refused.**
+
+**Terminal and agents**
+
+- **Fix: the terminal page no longer keeps the browser busy.** On a busy page, Chrome could show "Page Unresponsive". The page now reacts to a resize only when the size of the terminal changed.
+- **Fix: a new agent workspace starts again after a storage conversion** left the agent attached to a folder that was later removed.
+- **Fix: the Relay command of an agent works when the agent puts it in quotes.**
+- **Improve: the plugin recognises Claude's weekly limit message** and shows when the limit resets.
+
 ## 2026.10.17.02
 
 **Boot disk space (new)**
